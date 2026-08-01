@@ -1117,7 +1117,6 @@ func reportContext(ctx context.Context, agentName string, mgr agentgo.ContextMan
 		ContextWindow   int     `json:"context_window,omitempty"`
 		Percent         float64 `json:"percent,omitempty"`
 		Scope           string  `json:"scope,omitempty"`
-		Strategy        string  `json:"strategy,omitempty"`
 		ActiveMessages  int     `json:"active_messages,omitempty"`
 		SummaryMessages int     `json:"summary_messages,omitempty"`
 		CompactedCount  int     `json:"compacted_count,omitempty"`
@@ -1131,7 +1130,6 @@ func reportContext(ctx context.Context, agentName string, mgr agentgo.ContextMan
 	}
 	if snap := mgr.Snapshot(); snap != nil {
 		payload.Scope = snap.Scope
-		payload.Strategy = snap.LastStrategy
 		payload.ActiveMessages = snap.ActiveMessages
 		payload.SummaryMessages = snap.SummaryMessages
 		payload.CompactedCount = snap.LastCompactedCount

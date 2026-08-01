@@ -43,7 +43,6 @@ type ContextSnapshot struct {
 	ToolMessages       int
 	ClearedToolResults int
 	TrimmedTextBlocks  int
-	LastStrategy       string
 	LastChanged        bool
 	LastCompactedCount int
 	LastKeptCount      int
@@ -57,7 +56,6 @@ type ContextCommitResult struct {
 	Messages       []AgentMessage
 	Usage          *ContextUsage
 	Changed        bool
-	Strategy       string
 	CompactedCount int
 	KeptCount      int
 	SplitTurn      bool
@@ -74,7 +72,6 @@ type ContextRecoveryResult struct {
 	Usage          *ContextUsage
 	Changed        bool
 	ShouldCommit   bool
-	Strategy       string
 	CompactedCount int
 	KeptCount      int
 	SplitTurn      bool

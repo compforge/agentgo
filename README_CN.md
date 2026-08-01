@@ -303,13 +303,13 @@ agent := agentgo.NewAgent(
 )
 ```
 
-当 `ContextManager` 实现了相关可选能力接口时，`NewAgent` 会自动接入 token 估算和 context window。`AgentMessage.ToMessage` 是唯一的模型协议转换边界。
+当 `ContextManager` 实现了相关可选能力接口时，`NewAgent` 会自动接入 token 估算和 context window。`AgentMessage.ToMessage` 是唯一的模型协议转换边界。领域消息通过 `Raw` 始终保留原值，并由 `Compact(expect)` 自己选择尽量满足目标比例的最高保真表示；`expect == 0` 表示直接返回该消息能提供的最小表示。
 
-当使用量超出 `ContextWindow - ReserveTokens`（默认 16384）时，压缩会：
+当使用量超出 `ContextWindow - ReserveTokens` 时，Engine 会把剩余 token 预算换算成一个整体比例，交给单一且可替换的 `Compactor`。默认实现会：
 
-1. 先让 `CompactableAgentMessage` 生成逐步收缩的语义表达
+1. 按消息 Priority 分配目标比例，由各 `AgentMessage` 生成领域原生的紧凑表示
 2. 消息自有压缩仍不够时，再执行通用 tool-result 与长文本裁剪
-3. 通过 LLM 将旧消息摘要为结构化检查点（Goal / Progress / Key Decisions / Next Steps）
+3. 基于原始消息通过 LLM 生成结构化检查点（Goal / Progress / Key Decisions / Next Steps）
 4. 追踪文件操作（read/write/edit 路径），并支持增量更新摘要
 
 ## 内置工具

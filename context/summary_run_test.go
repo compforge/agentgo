@@ -116,7 +116,7 @@ func TestRunSummaryCompaction_CompactsAndPreservesRecentMessages(t *testing.T) {
 		agentgo.UserMsg("keep"),
 	}
 
-	out, info, err := runSummaryCompaction(context.Background(), cfg, msgs, true)
+	out, info, err := runSummaryCompaction(context.Background(), cfg, msgs, msgs, true)
 	if err != nil {
 		t.Fatalf("unexpected compaction error: %v", err)
 	}

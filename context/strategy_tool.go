@@ -28,35 +28,33 @@ type ToolResultMicrocompactConfig struct {
 	IdleThreshold    time.Duration
 }
 
-type ToolResultMicrocompactStrategy struct {
+type ToolResultCompactor struct {
 	cfg ToolResultMicrocompactConfig
 }
 
-func NewToolResultMicrocompact(cfg ToolResultMicrocompactConfig) *ToolResultMicrocompactStrategy {
+func NewToolResultCompactor(cfg ToolResultMicrocompactConfig) *ToolResultCompactor {
 	if cfg.KeepRecent <= 0 {
 		cfg.KeepRecent = 5
 	}
 	if cfg.ClearedMessage == "" {
 		cfg.ClearedMessage = DefaultClearedToolResult
 	}
-	return &ToolResultMicrocompactStrategy{cfg: cfg}
+	return &ToolResultCompactor{cfg: cfg}
 }
 
-func (s *ToolResultMicrocompactStrategy) Name() string { return "tool_result_microcompact" }
-
-func (s *ToolResultMicrocompactStrategy) Apply(_ context.Context, _ []agentgo.AgentMessage, view []agentgo.AgentMessage, _ Budget) ([]agentgo.AgentMessage, StrategyResult, error) {
-	if len(view) == 0 {
-		return view, StrategyResult{Name: s.Name()}, nil
+func (s *ToolResultCompactor) Compact(_ context.Context, messages []agentgo.AgentMessage, expect float64) ([]agentgo.AgentMessage, error) {
+	if len(messages) == 0 || expect >= 1 {
+		return messages, nil
 	}
 
-	candidates := findCompactableToolResults(view, s.cfg.Classifier)
+	candidates := findCompactableToolResults(messages, s.cfg.Classifier)
 	if len(candidates) == 0 {
-		return view, StrategyResult{Name: s.Name()}, nil
+		return messages, nil
 	}
 
 	keepRecent := s.cfg.KeepRecent
 	if s.cfg.IdleThreshold > 0 {
-		lastAssistant := latestAssistantTimestamp(view)
+		lastAssistant := latestAssistantTimestamp(messages)
 		if !lastAssistant.IsZero() && time.Since(lastAssistant) > s.cfg.IdleThreshold && keepRecent > 1 {
 			keepRecent = max(1, keepRecent/2)
 		}
@@ -77,20 +75,24 @@ func (s *ToolResultMicrocompactStrategy) Apply(_ context.Context, _ []agentgo.Ag
 		protected[c.Index] = struct{}{}
 	}
 	if len(protected) == len(candidates) {
-		return view, StrategyResult{Name: s.Name()}, nil
+		return messages, nil
 	}
 
-	out := copyMessages(view)
-	saved := 0
-	applied := false
+	out := copyMessages(messages)
+	tokens := EstimateTotal(out)
+	target := int(float64(tokens) * clampRatio(expect))
 	for _, candidate := range candidates {
+		if tokens <= target {
+			break
+		}
 		if _, ok := protected[candidate.Index]; ok {
 			continue
 		}
-		msg, ok := out[candidate.Index].(agentgo.Message)
+		msg, ok := out[candidate.Index].ToMessage()
 		if !ok {
 			continue
 		}
+		before := EstimateTokens(out[candidate.Index])
 		next := msg
 		next.Content = []agentgo.ContentBlock{agentgo.TextBlock(s.clearedText(candidate.ToolName, msg))}
 		next.Metadata = cloneMetadata(msg.Metadata)
@@ -99,19 +101,14 @@ func (s *ToolResultMicrocompactStrategy) Apply(_ context.Context, _ []agentgo.Ag
 		}
 		next.Metadata["compacted_tool_result"] = true
 		next.Metadata["compacted_tool_name"] = candidate.ToolName
-		out[candidate.Index] = next
-		saved += max(0, EstimateTokens(msg)-EstimateTokens(next))
-		applied = true
+		out[candidate.Index] = newProjectedMessage(out[candidate.Index], next)
+		tokens -= before - EstimateTokens(out[candidate.Index])
 	}
 
-	return out, StrategyResult{
-		Applied:     applied,
-		TokensSaved: saved,
-		Name:        s.Name(),
-	}, nil
+	return out, nil
 }
 
-func (s *ToolResultMicrocompactStrategy) clearedText(toolName string, original agentgo.Message) string {
+func (s *ToolResultCompactor) clearedText(toolName string, original agentgo.Message) string {
 	if s.cfg.ClearedMessageFn != nil {
 		if text := s.cfg.ClearedMessageFn(toolName, original); text != "" {
 			return text
@@ -138,7 +135,7 @@ func findCompactableToolResults(msgs []agentgo.AgentMessage, classifier ToolClas
 	var results []compactableToolResult
 
 	for i, am := range msgs {
-		msg, ok := am.(agentgo.Message)
+		msg, ok := am.ToMessage()
 		if !ok {
 			continue
 		}
@@ -173,7 +170,7 @@ func findCompactableToolResults(msgs []agentgo.AgentMessage, classifier ToolClas
 
 func latestAssistantTimestamp(msgs []agentgo.AgentMessage) time.Time {
 	for i := len(msgs) - 1; i >= 0; i-- {
-		msg, ok := msgs[i].(agentgo.Message)
+		msg, ok := msgs[i].ToMessage()
 		if ok && msg.Role == agentgo.RoleAssistant {
 			return msg.Timestamp
 		}

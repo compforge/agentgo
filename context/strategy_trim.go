@@ -14,11 +14,11 @@ type LightTrimConfig struct {
 	PreserveTail  int
 }
 
-type LightTrimStrategy struct {
+type LightTrimCompactor struct {
 	cfg LightTrimConfig
 }
 
-func NewLightTrim(cfg LightTrimConfig) *LightTrimStrategy {
+func NewLightTrimCompactor(cfg LightTrimConfig) *LightTrimCompactor {
 	if cfg.KeepRecent <= 0 {
 		cfg.KeepRecent = 4
 	}
@@ -31,44 +31,41 @@ func NewLightTrim(cfg LightTrimConfig) *LightTrimStrategy {
 	if cfg.PreserveTail <= 0 {
 		cfg.PreserveTail = 800
 	}
-	return &LightTrimStrategy{cfg: cfg}
+	return &LightTrimCompactor{cfg: cfg}
 }
 
-func (s *LightTrimStrategy) Name() string { return "light_trim" }
-
-func (s *LightTrimStrategy) Apply(_ context.Context, _ []agentgo.AgentMessage, view []agentgo.AgentMessage, _ Budget) ([]agentgo.AgentMessage, StrategyResult, error) {
-	if len(view) == 0 {
-		return view, StrategyResult{Name: s.Name()}, nil
+func (s *LightTrimCompactor) Compact(_ context.Context, messages []agentgo.AgentMessage, expect float64) ([]agentgo.AgentMessage, error) {
+	if len(messages) == 0 || expect >= 1 {
+		return messages, nil
 	}
 
-	lastEligible := len(view) - s.cfg.KeepRecent
+	lastEligible := len(messages) - s.cfg.KeepRecent
 	if lastEligible <= 0 {
-		return view, StrategyResult{Name: s.Name()}, nil
+		return messages, nil
 	}
 
-	out := copyMessages(view)
-	applied := false
-	saved := 0
+	out := copyMessages(messages)
+	tokens := EstimateTotal(out)
+	target := int(float64(tokens) * clampRatio(expect))
 
 	for i := 0; i < lastEligible; i++ {
-		msg, ok := out[i].(agentgo.Message)
+		if tokens <= target {
+			break
+		}
+		msg, ok := out[i].ToMessage()
 		if !ok {
 			continue
 		}
+		before := EstimateTokens(out[i])
 		next, changed := trimLongTextBlocks(msg, s.cfg.TextThreshold, s.cfg.PreserveHead, s.cfg.PreserveTail)
 		if !changed {
 			continue
 		}
-		out[i] = next
-		saved += max(0, EstimateTokens(msg)-EstimateTokens(next))
-		applied = true
+		out[i] = newProjectedMessage(out[i], next)
+		tokens -= before - EstimateTokens(out[i])
 	}
 
-	return out, StrategyResult{
-		Applied:     applied,
-		TokensSaved: saved,
-		Name:        s.Name(),
-	}, nil
+	return out, nil
 }
 
 func trimLongTextBlocks(msg agentgo.Message, threshold, preserveHead, preserveTail int) (agentgo.Message, bool) {

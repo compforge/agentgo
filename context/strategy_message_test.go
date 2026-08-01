@@ -16,6 +16,11 @@ type stagedMessage struct {
 
 func (m stagedMessage) GetRole() agentgo.Role   { return agentgo.RoleUser }
 func (m stagedMessage) GetTimestamp() time.Time { return time.Time{} }
+func (m stagedMessage) Raw() agentgo.AgentMessage {
+	raw := m
+	raw.stage = 0
+	return raw
+}
 func (m stagedMessage) TextContent() string     { return m.contents[m.stage] }
 func (m stagedMessage) ThinkingContent() string { return "" }
 func (m stagedMessage) HasToolCalls() bool      { return false }
@@ -26,13 +31,23 @@ func (m stagedMessage) ToMessage() (agentgo.Message, bool) {
 		Content: []agentgo.ContentBlock{agentgo.TextBlock(m.TextContent())},
 	}, true
 }
-func (m stagedMessage) Compact() (agentgo.AgentMessage, bool) {
-	if m.stage+1 >= len(m.contents) {
-		return nil, false
+func (m stagedMessage) Compact(expect float64) (agentgo.AgentMessage, float64) {
+	rawLen := len(m.contents[0])
+	current := float64(len(m.contents[m.stage])) / float64(rawLen)
+	if expect >= current {
+		return m, current
+	}
+	stage := len(m.contents) - 1
+	for i := m.stage + 1; i < len(m.contents); i++ {
+		ratio := float64(len(m.contents[i])) / float64(rawLen)
+		if ratio <= expect {
+			stage = i
+			break
+		}
 	}
 	next := m
-	next.stage++
-	return next, true
+	next.stage = stage
+	return next, float64(len(next.contents[stage])) / float64(rawLen)
 }
 
 func TestMessageCompactionUsesMessageOwnedStages(t *testing.T) {
@@ -40,59 +55,59 @@ func TestMessageCompactionUsesMessageOwnedStages(t *testing.T) {
 	outline := strings.Repeat("x", 2000)
 	reference := "artifact:path"
 	original := stagedMessage{contents: []string{full, outline, reference}}
-	strategy := NewCompactionStrategy()
+	compactor := NewMessageCompactor()
 
-	view, result, err := strategy.Apply(t.Context(), nil, []agentgo.AgentMessage{original}, Budget{
-		Tokens:    EstimateTokens(original),
-		Threshold: 100,
-	})
+	view, err := compactor.Compact(t.Context(), []agentgo.AgentMessage{original}, 0.05)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !result.Applied || result.TokensSaved <= 0 {
-		t.Fatalf("result = %+v, want applied compaction", result)
 	}
 	got := view[0].(stagedMessage)
 	if got.stage != 2 || got.TextContent() != reference {
 		t.Fatalf("compacted message = %#v, want terminal reference stage", got)
 	}
 	if original.stage != 0 || original.TextContent() != full {
-		t.Fatal("strategy mutated the original message")
+		t.Fatal("compactor mutated the original message")
+	}
+}
+
+func TestAgentMessageCompactReportsRatioAgainstRaw(t *testing.T) {
+	message := stagedMessage{contents: []string{strings.Repeat("x", 100), strings.Repeat("x", 40), "ref"}, stage: 1}
+
+	next, actual := message.Compact(0)
+	if got := next.(stagedMessage).stage; got != 2 {
+		t.Fatalf("stage = %d, want terminal stage", got)
+	}
+	if actual != 0.03 {
+		t.Fatalf("actual = %f, want 0.03 relative to raw", actual)
+	}
+	if got := next.Raw().(stagedMessage).stage; got != 0 {
+		t.Fatalf("raw stage = %d, want 0", got)
 	}
 }
 
 func TestMessageCompactionIgnoresNonShrinkingStep(t *testing.T) {
 	message := stagedMessage{contents: []string{"short", "a longer replacement"}}
-	strategy := NewCompactionStrategy()
+	compactor := NewMessageCompactor()
 
-	view, result, err := strategy.Apply(t.Context(), nil, []agentgo.AgentMessage{message}, Budget{
-		Tokens:    EstimateTokens(message),
-		Threshold: 0,
-	})
+	view, err := compactor.Compact(t.Context(), []agentgo.AgentMessage{message}, 0)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if result.Applied {
-		t.Fatalf("result = %+v, non-shrinking compaction must be ignored", result)
 	}
 	if got := view[0].(stagedMessage).stage; got != 0 {
 		t.Fatalf("stage = %d, want original stage", got)
 	}
 }
 
-func TestCompactionStrategyUsesNewestFirstWithinPriority(t *testing.T) {
+func TestMessageCompactorUsesNewestFirstWithinPriority(t *testing.T) {
 	full := strings.Repeat("x", 8000)
 	outline := strings.Repeat("x", 2000)
 	messages := []agentgo.AgentMessage{
 		stagedMessage{contents: []string{full, outline}},
 		stagedMessage{contents: []string{full, outline}},
 	}
-	strategy := NewCompactionStrategy()
+	compactor := NewMessageCompactor()
 
-	view, _, err := strategy.Apply(t.Context(), nil, messages, Budget{
-		Tokens:    4000,
-		Threshold: 3000,
-	})
+	view, err := compactor.Compact(t.Context(), messages, 0.75)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,19 +119,16 @@ func TestCompactionStrategyUsesNewestFirstWithinPriority(t *testing.T) {
 	}
 }
 
-func TestCompactionStrategyExhaustsLowerPriorityFirst(t *testing.T) {
+func TestMessageCompactorExhaustsLowerPriorityFirst(t *testing.T) {
 	full := strings.Repeat("x", 8000)
 	outline := strings.Repeat("x", 2000)
 	messages := []agentgo.AgentMessage{
 		stagedMessage{contents: []string{full, outline, "reference"}, priority: 0},
 		stagedMessage{contents: []string{full, outline}, priority: 10},
 	}
-	strategy := NewCompactionStrategy()
+	compactor := NewMessageCompactor()
 
-	view, _, err := strategy.Apply(t.Context(), nil, messages, Budget{
-		Tokens:    4000,
-		Threshold: 2400,
-	})
+	view, err := compactor.Compact(t.Context(), messages, 0.6)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,19 +140,16 @@ func TestCompactionStrategyExhaustsLowerPriorityFirst(t *testing.T) {
 	}
 }
 
-func TestCompactionStrategyPriorityOverridesRecency(t *testing.T) {
+func TestMessageCompactorPriorityOverridesRecency(t *testing.T) {
 	full := strings.Repeat("x", 8000)
 	outline := strings.Repeat("x", 2000)
 	messages := []agentgo.AgentMessage{
 		stagedMessage{contents: []string{full, outline}, priority: 0},
 		stagedMessage{contents: []string{full, outline}, priority: 10},
 	}
-	strategy := NewCompactionStrategy()
+	compactor := NewMessageCompactor()
 
-	view, _, err := strategy.Apply(t.Context(), nil, messages, Budget{
-		Tokens:    4000,
-		Threshold: 3000,
-	})
+	view, err := compactor.Compact(t.Context(), messages, 0.75)
 	if err != nil {
 		t.Fatal(err)
 	}

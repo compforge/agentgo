@@ -12,7 +12,6 @@ import (
 )
 
 const (
-	defaultReserveTokens = 16384
 	// Bounds for the dynamically sized verbatim tail.
 	minKeepRecentTokens = 2000
 	maxKeepRecentTokens = 20000
@@ -47,7 +46,13 @@ type summaryRunConfig struct {
 	TurnPrefixPrompt    string
 }
 
-func runSummaryCompaction(ctx context.Context, cfg summaryRunConfig, msgs []agentgo.AgentMessage, stripImages bool) ([]agentgo.AgentMessage, *SummaryInfo, error) {
+func runSummaryCompaction(
+	ctx context.Context,
+	cfg summaryRunConfig,
+	msgs []agentgo.AgentMessage,
+	source []agentgo.AgentMessage,
+	stripImages bool,
+) ([]agentgo.AgentMessage, *SummaryInfo, error) {
 	cut := findCutPoint(msgs, cfg.KeepRecentTokens)
 	if cut.firstKeptIndex <= 0 {
 		return msgs, nil, nil
@@ -60,7 +65,7 @@ func runSummaryCompaction(ctx context.Context, cfg summaryRunConfig, msgs []agen
 		historyEnd = cut.turnStartIndex
 	}
 
-	toSummarize := msgs[:historyEnd]
+	toSummarize := source[:historyEnd]
 	toKeep := msgs[cut.firstKeptIndex:]
 
 	if stripImages {
@@ -88,7 +93,7 @@ func runSummaryCompaction(ctx context.Context, cfg summaryRunConfig, msgs []agen
 	needTurnPrefix := cut.isSplitTurn && cut.turnStartIndex >= 0
 	var turnPrefix []agentgo.AgentMessage
 	if needTurnPrefix {
-		turnPrefix = msgs[cut.turnStartIndex:cut.firstKeptIndex]
+		turnPrefix = source[cut.turnStartIndex:cut.firstKeptIndex]
 		if stripImages {
 			turnPrefix = stripImageBlocks(turnPrefix)
 		}
@@ -131,7 +136,7 @@ func runSummaryCompaction(ctx context.Context, cfg summaryRunConfig, msgs []agen
 		}
 	}
 
-	allCompacted := msgs[:cut.firstKeptIndex]
+	allCompacted := source[:cut.firstKeptIndex]
 	readFiles, modifiedFiles := extractFileOps(allCompacted)
 	summary += formatFileOps(readFiles, modifiedFiles)
 
@@ -141,6 +146,10 @@ func runSummaryCompaction(ctx context.Context, cfg summaryRunConfig, msgs []agen
 		TokensBefore:  tokensBefore,
 		ReadFiles:     readFiles,
 		ModifiedFiles: modifiedFiles,
+		RawMessages:   sourceMessages(allCompacted),
+		Compacted:     len(allCompacted),
+		Kept:          len(toKeep),
+		SplitTurn:     needTurnPrefix,
 		Timestamp:     time.Now(),
 	}
 

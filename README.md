@@ -307,13 +307,13 @@ agent := agentgo.NewAgent(
 )
 ```
 
-`NewAgent` auto-wires token estimation and the context window from the context manager when available. `AgentMessage.ToMessage` is the single model-protocol boundary.
+`NewAgent` auto-wires token estimation and the context window from the context manager when available. `AgentMessage.ToMessage` is the single model-protocol boundary. Domain messages retain their original value through `Raw` and implement `Compact(expect)` to choose the highest-fidelity representation that can approach the requested ratio; `expect == 0` asks for that message's smallest representation.
 
-When usage exceeds `ContextWindow - ReserveTokens` (default 16384), compaction:
+When usage exceeds `ContextWindow - ReserveTokens`, the engine converts the remaining token budget to one aggregate ratio and calls its single replaceable `Compactor`. The default compactor:
 
-1. Lets `CompactableAgentMessage` values produce progressively smaller semantic representations
+1. Allocates that ratio by message priority and lets each `AgentMessage` choose its domain-native representation
 2. Applies generic tool-result and long-text trimming when message-owned compaction is insufficient
-3. Summarizes older messages via LLM into a structured checkpoint (Goal / Progress / Key Decisions / Next Steps)
+3. Summarizes older raw messages via LLM into a structured checkpoint (Goal / Progress / Key Decisions / Next Steps)
 4. Tracks file operations (read/write/edit paths) and supports incremental summary updates
 
 ## Built-in Tools
