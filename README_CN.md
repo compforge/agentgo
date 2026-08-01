@@ -18,7 +18,7 @@ go get github.com/compforge/agentgo
 
 ## 稳定性
 
-- 优先稳定 `Agent`、`AgentLoop`、`Event`、`Tool`、`Message` 这些核心接口
+- 优先稳定 `Agent`、`AgentLoop`、`Event`、`Tool`、`AgentMessage`、`Message` 这些核心接口
 - `examples/` 与内部实现细节不视为稳定 API
 
 ## 架构
@@ -38,7 +38,8 @@ agentgo/permission/ 可选权限引擎，自行适配为 ToolGate
 
 - **无状态循环 + 有状态 Agent** —— `loop.go` 是 free function，所有输入通过参数注入；`agent.go` 作为循环事件的唯一消费者，更新内部状态后分发给外部监听者。双层循环：内层处理工具调用 + steering，外层处理 follow-up
 - **事件流** —— 单一 `<-chan Event` 输出，驱动任何 UI（TUI、Web、Slack、日志）
-- **上下文层** —— `ContextManager`（接口）+ `agentgo/context`（默认引擎）共同负责 prompt 投影、溢出恢复，并自动接入消息转换与 token 估算
+- **Message-native Loop** —— Loop、Event、ContextManager 和持久化都使用应用层 `AgentMessage`；仅在调用模型前，由消息自身转换为模型协议 `Message`
+- **上下文层** —— `ContextManager`（接口）+ `agentgo/context`（默认引擎）共同负责 prompt 投影、消息自有压缩、溢出恢复与 token 估算
 - **SubAgent 工具**（`subagent/`）—— 通过工具调用实现多 Agent，四种模式：single、parallel、chain、background
 
 ## 快速开始
@@ -302,14 +303,14 @@ agent := agentgo.NewAgent(
 )
 ```
 
-当 `ContextManager` 实现了相关可选能力接口时，`NewAgent` 会自动接入消息转换、token 估算和 context window，无需再手动配置。
+当 `ContextManager` 实现了相关可选能力接口时，`NewAgent` 会自动接入 token 估算和 context window。`AgentMessage.ToMessage` 是唯一的模型协议转换边界。
 
 当使用量超出 `ContextWindow - ReserveTokens`（默认 16384）时，压缩会：
 
-1. 保留最近消息（默认 20000 tokens）
-2. 通过 LLM 将旧消息摘要为结构化检查点（Goal / Progress / Key Decisions / Next Steps）
-3. 跨压缩消息追踪文件操作（read/write/edit 路径）
-4. 支持增量更新 —— 后续压缩基于已有摘要更新，而非重新总结
+1. 先让 `CompactableAgentMessage` 生成逐步收缩的语义表达
+2. 消息自有压缩仍不够时，再执行通用 tool-result 与长文本裁剪
+3. 通过 LLM 将旧消息摘要为结构化检查点（Goal / Progress / Key Decisions / Next Steps）
+4. 追踪文件操作（read/write/edit 路径），并支持增量更新摘要
 
 ## 内置工具
 

@@ -32,29 +32,29 @@ func estimateTextTokens(text string) int {
 // Text and thinking blocks use CJK-aware estimation; tool calls and images
 // use byte-based heuristics (JSON args are ASCII-dominant).
 func EstimateTokens(msg agentgo.AgentMessage) int {
-	var tokens int
-
-	switch v := msg.(type) {
-	case agentgo.Message:
-		for _, b := range v.Content {
-			switch b.Type {
-			case agentgo.ContentText:
-				tokens += estimateTextTokens(b.Text)
-			case agentgo.ContentThinking:
-				tokens += estimateTextTokens(b.Thinking)
-			case agentgo.ContentToolCall:
-				if b.ToolCall != nil {
-					// Tool call args are JSON (ASCII-dominant), use byte-based estimation
-					tokens += max((len(b.ToolCall.Name)+len(b.ToolCall.Args)+3)/4, 1)
-				}
-			case agentgo.ContentImage:
-				tokens += 1200
-			}
-		}
-	case ContextSummary:
-		tokens = estimateTextTokens(v.Summary)
-	default:
+	if msg == nil {
 		return 0
+	}
+	modelMessage, include := msg.ToMessage()
+	if !include {
+		return 0
+	}
+
+	var tokens int
+	for _, b := range modelMessage.Content {
+		switch b.Type {
+		case agentgo.ContentText:
+			tokens += estimateTextTokens(b.Text)
+		case agentgo.ContentThinking:
+			tokens += estimateTextTokens(b.Thinking)
+		case agentgo.ContentToolCall:
+			if b.ToolCall != nil {
+				// Tool call args are JSON (ASCII-dominant), use byte-based estimation
+				tokens += max((len(b.ToolCall.Name)+len(b.ToolCall.Args)+3)/4, 1)
+			}
+		case agentgo.ContentImage:
+			tokens += 1200
+		}
 	}
 
 	return max(tokens, 1)

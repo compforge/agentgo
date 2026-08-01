@@ -124,13 +124,6 @@ type ContextManager interface {
 	Snapshot() *ContextSnapshot
 }
 
-// ContextLLMConverter is an optional interface a ContextManager can implement
-// to provide its own AgentMessage → Message conversion (e.g. to handle
-// summary message types). When implemented, NewAgent auto-wires it.
-type ContextLLMConverter interface {
-	ConvertToLLM([]AgentMessage) []Message
-}
-
 // ContextEstimator is an optional interface a ContextManager can implement
 // to provide token estimation. When implemented, NewAgent auto-wires it.
 type ContextEstimator interface {

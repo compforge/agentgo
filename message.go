@@ -197,16 +197,29 @@ func NormalizeThinkingLevel(level ThinkingLevel) ThinkingLevel {
 // Messages
 // ---------------------------------------------------------------------------
 
-// AgentMessage is the app-layer message abstraction.
-// Message implements this interface. Users can define custom types
-// (e.g. status notifications, UI hints) that flow through the context
-// pipeline but get filtered out by ConvertToLLM.
+// AgentMessage is the application-layer message abstraction used by the
+// agent loop, context management, events, and persistence. Message implements
+// this interface; applications can add richer message types without lowering
+// them to the model protocol until ToMessage is called.
 type AgentMessage interface {
 	GetRole() Role
 	GetTimestamp() time.Time
 	TextContent() string
 	ThinkingContent() string
 	HasToolCalls() bool
+	ToMessage() (message Message, include bool)
+}
+
+// CompactableAgentMessage can produce a progressively smaller semantic
+// representation of itself. Each call advances one step in that message
+// type's own compaction sequence; no shared notion of compaction levels is
+// imposed across unrelated message types.
+//
+// Implementations must return a new value rather than mutate the receiver.
+// ok=false means the message has no smaller representation.
+type CompactableAgentMessage interface {
+	AgentMessage
+	Compact() (next AgentMessage, ok bool)
 }
 
 // Message is an LLM-level message with structured content blocks.
@@ -221,6 +234,16 @@ type Message struct {
 
 func (m Message) GetRole() Role           { return m.Role }
 func (m Message) GetTimestamp() time.Time { return m.Timestamp }
+
+// ToMessage returns the model representation of m. Failed and aborted model
+// responses stay available to persistence and observers but are not replayed
+// into later model requests.
+func (m Message) ToMessage() (Message, bool) {
+	if m.StopReason == StopReasonError || m.StopReason == StopReasonAborted {
+		return Message{}, false
+	}
+	return m, true
+}
 
 // TextContent returns the concatenated text from all text blocks.
 func (m Message) TextContent() string {
@@ -268,6 +291,22 @@ func (m Message) HasToolCalls() bool {
 // IsEmpty reports whether the message has no meaningful content.
 func (m Message) IsEmpty() bool {
 	return len(m.Content) == 0
+}
+
+// ToMessages lowers application messages to the model protocol at the LLM
+// call boundary. Messages may opt out, for example when they only exist for
+// persistence or UI display.
+func ToMessages(messages []AgentMessage) []Message {
+	out := make([]Message, 0, len(messages))
+	for _, message := range messages {
+		if message == nil {
+			continue
+		}
+		if modelMessage, include := message.ToMessage(); include {
+			out = append(out, modelMessage)
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -441,8 +480,9 @@ func RepairMessageSequence(msgs []Message) []Message {
 // Message Serialization Helpers
 // ---------------------------------------------------------------------------
 
-// CollectMessages extracts concrete Messages from an AgentMessage slice,
-// dropping custom types. Use this to serialize conversation history.
+// CollectMessages extracts concrete model Messages from an AgentMessage
+// slice, dropping application-specific types. Applications that persist
+// custom AgentMessage values need their own tagged codec instead.
 func CollectMessages(msgs []AgentMessage) []Message {
 	out := make([]Message, 0, len(msgs))
 	for _, m := range msgs {

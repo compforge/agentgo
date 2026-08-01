@@ -35,9 +35,9 @@ type Agent struct {
 	maxToolErrors        int
 	thinkingLevel        ThinkingLevel
 	contextManager       ContextManager
-	convertToLLM         func([]AgentMessage) []Message
 	contextWindow        int
 	contextEstimateFn    ContextEstimateFn
+	toolResultFactory    func(ToolCall, ToolResult) AgentMessage
 	toolGate             ToolGate
 	middlewares          []ToolMiddleware
 	maxToolConcurrency   int
@@ -74,10 +74,9 @@ type Agent struct {
 
 // NewAgent creates a new Agent with the given options.
 //
-// When a ContextManager is set, the agent auto-wires ConvertToLLM, the
-// context-token estimator, and the context window from the manager when it
-// implements the optional ContextLLMConverter / ContextEstimator /
-// ContextWindowProvider interfaces.
+// When a ContextManager is set, the agent auto-wires the context-token
+// estimator and context window when the manager implements the optional
+// ContextEstimator / ContextWindowProvider interfaces.
 func NewAgent(opts ...AgentOption) *Agent {
 	a := &Agent{
 		maxTurns:         defaultMaxTurns,
@@ -88,9 +87,6 @@ func NewAgent(opts ...AgentOption) *Agent {
 		opt(a)
 	}
 	if a.contextManager != nil {
-		if c, ok := a.contextManager.(ContextLLMConverter); ok {
-			a.convertToLLM = c.ConvertToLLM
-		}
 		if e, ok := a.contextManager.(ContextEstimator); ok {
 			a.contextEstimateFn = e.EstimateContext
 		}
@@ -393,7 +389,8 @@ func (a *Agent) SetMessages(msgs []AgentMessage) error {
 	return nil
 }
 
-// ExportMessages returns concrete Messages for serialization.
+// ExportMessages returns only concrete model Messages. Use Messages with an
+// application codec when custom AgentMessage values must survive persistence.
 func (a *Agent) ExportMessages() []Message {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -607,7 +604,6 @@ func (a *Agent) BuildLLMMessages() ([]Message, error) {
 	blocks := a.systemBlocks
 	sp := a.systemPrompt
 	mgr := a.contextManager
-	convertFn := a.convertToLLM
 	a.mu.Unlock()
 
 	if mgr != nil {
@@ -620,10 +616,7 @@ func (a *Agent) BuildLLMMessages() ([]Message, error) {
 		}
 	}
 
-	if convertFn == nil {
-		convertFn = DefaultConvertToLLM
-	}
-	llmMessages := RepairMessageSequence(convertFn(msgs))
+	llmMessages := RepairMessageSequence(ToMessages(msgs))
 
 	if len(blocks) > 0 {
 		sysMsgs := make([]Message, len(blocks))
@@ -748,13 +741,13 @@ func (a *Agent) buildConfig() LoopConfig {
 	a.skipNextInitialSteeringPoll = false
 
 	return LoopConfig{
-		Model:          a.model,
-		MaxTurns:       a.maxTurns,
-		MaxRetries:     a.maxRetries,
-		MaxToolErrors:  a.maxToolErrors,
-		ThinkingLevel:  a.thinkingLevel,
-		ContextManager: a.contextManager,
-		ConvertToLLM:   a.convertToLLM,
+		Model:                    a.model,
+		MaxTurns:                 a.maxTurns,
+		MaxRetries:               a.maxRetries,
+		MaxToolErrors:            a.maxToolErrors,
+		ThinkingLevel:            a.thinkingLevel,
+		ContextManager:           a.contextManager,
+		ToolResultMessageFactory: a.toolResultFactory,
 		CommitContext: func(msgs []AgentMessage, usage *ContextUsage) error {
 			a.mu.Lock()
 			defer a.mu.Unlock()
