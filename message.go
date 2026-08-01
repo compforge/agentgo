@@ -200,10 +200,13 @@ func NormalizeThinkingLevel(level ThinkingLevel) ThinkingLevel {
 // AgentMessage is the application-layer message abstraction used by the
 // agent loop, context management, events, and persistence. Message implements
 // this interface; applications can add richer message types without lowering
-// them to the model protocol until ToMessage is called.
+// them to the model protocol until ToMessage is called. Priority is application
+// information importance: higher values are preserved longer by context
+// policies and are not part of the model-level Message.
 type AgentMessage interface {
 	GetRole() Role
 	GetTimestamp() time.Time
+	Priority() int
 	TextContent() string
 	ThinkingContent() string
 	HasToolCalls() bool
@@ -215,8 +218,9 @@ type AgentMessage interface {
 // type's own compaction sequence; no shared notion of compaction levels is
 // imposed across unrelated message types.
 //
-// Implementations must return a new value rather than mutate the receiver.
-// ok=false means the message has no smaller representation.
+// Implementations must return a new value rather than mutate the receiver and
+// preserve Priority across stages. ok=false means the message has no smaller
+// representation.
 type CompactableAgentMessage interface {
 	AgentMessage
 	Compact() (next AgentMessage, ok bool)
@@ -234,6 +238,7 @@ type Message struct {
 
 func (m Message) GetRole() Role           { return m.Role }
 func (m Message) GetTimestamp() time.Time { return m.Timestamp }
+func (m Message) Priority() int           { return 0 }
 
 // ToMessage returns the model representation of m. Failed and aborted model
 // responses stay available to persistence and observers but are not replayed

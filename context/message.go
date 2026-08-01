@@ -18,6 +18,7 @@ type ContextSummary struct {
 
 func (c ContextSummary) GetRole() agentgo.Role   { return agentgo.RoleUser }
 func (c ContextSummary) GetTimestamp() time.Time { return c.Timestamp }
+func (c ContextSummary) Priority() int           { return 0 }
 func (c ContextSummary) TextContent() string     { return c.Summary }
 func (c ContextSummary) ThinkingContent() string { return "" }
 func (c ContextSummary) HasToolCalls() bool      { return false }
