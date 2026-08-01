@@ -82,7 +82,7 @@ func recoverToEnd(sink eventSink) {
 }
 
 // AgentLoopContinue continues from existing context without adding new messages.
-// The last message in context must convert to user or tool role via ConvertToLLM.
+// The last message in context must convert to user or tool role via ToMessage.
 //
 // The returned channel follows the same consumption contract as AgentLoop:
 // drain until close, or cancel ctx and keep draining to stop early.
@@ -320,7 +320,7 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 				afterToolExec = true
 
 				for _, tr := range turnToolResults {
-					resultMsg := toolResultToMessage(tr)
+					resultMsg := toolResultMessage(config, findToolCall(toolCalls, tr.ToolCallID), tr)
 					sink.emit(Event{Type: EventMessageStart, Message: resultMsg})
 					if !commit(resultMsg) {
 						return
@@ -608,13 +608,9 @@ func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, sin
 		}
 	}
 
-	// Stage 2: ConvertToLLM (AgentMessage[] → Message[]) + repair tool-call /
-	// tool-result pairing for provider compatibility.
-	convertFn := config.ConvertToLLM
-	if convertFn == nil {
-		convertFn = DefaultConvertToLLM
-	}
-	llmMessages := RepairMessageSequence(convertFn(messages))
+	// Stage 2: AgentMessage[] → Message[] + repair tool-call / tool-result
+	// pairing for provider compatibility.
+	llmMessages := RepairMessageSequence(ToMessages(messages))
 
 	// Build tool specs
 	toolSpecs := buildToolSpecs(agentCtx.Tools)
@@ -1044,7 +1040,26 @@ func skipToolCallWithMessage(call ToolCall, tools []Tool, sink eventSink, messag
 	return failToolCall(sink, call, label, message, false)
 }
 
-// toolResultToMessage converts a ToolResult into a Message for the context.
+func findToolCall(calls []ToolCall, id string) ToolCall {
+	for _, call := range calls {
+		if call.ID == id {
+			return call
+		}
+	}
+	return ToolCall{ID: id}
+}
+
+func toolResultMessage(config LoopConfig, call ToolCall, result ToolResult) AgentMessage {
+	if config.ToolResultMessageFactory != nil {
+		if message := config.ToolResultMessageFactory(call, result); message != nil {
+			return message
+		}
+	}
+	return toolResultToMessage(result)
+}
+
+// toolResultToMessage converts a ToolResult into the default Message stored in
+// context when the application has not installed a richer message factory.
 func toolResultToMessage(tr ToolResult) Message {
 	if len(tr.ContentBlocks) > 0 {
 		return Message{

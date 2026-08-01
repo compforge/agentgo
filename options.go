@@ -111,11 +111,19 @@ func WithMaxRetries(n int) AgentOption {
 
 // WithContextManager sets the context lifecycle manager.
 // When configured, it drives prompt projection, overflow recovery, and usage
-// reporting. The agent auto-wires ConvertToLLM, context-token estimation,
-// and the context window from the manager when it implements the optional
-// ContextLLMConverter / ContextEstimator / ContextWindowProvider interfaces.
+// reporting. The agent auto-wires context-token estimation and the context
+// window from the manager when it implements the optional ContextEstimator /
+// ContextWindowProvider interfaces.
 func WithContextManager(mgr ContextManager) AgentOption {
 	return func(a *Agent) { a.contextManager = mgr }
+}
+
+// WithToolResultMessageFactory converts raw tool results into application
+// AgentMessage values before they enter the transcript. The default keeps the
+// built-in model Message representation. The returned message must project to
+// a tool Message with the matching tool_call_id.
+func WithToolResultMessageFactory(factory func(ToolCall, ToolResult) AgentMessage) AgentOption {
+	return func(a *Agent) { a.toolResultFactory = factory }
 }
 
 // ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ A restrained core with open extensibility tends to be more reliable than a compl
 
 ## Stability
 
-- Keep `Agent`, `AgentLoop`, `Event`, `Tool`, and `Message` stable first
+- Keep `Agent`, `AgentLoop`, `Event`, `Tool`, `AgentMessage`, and `Message` stable first
 - `examples/` and internal implementation details are not stable API
 
 ## Architecture
@@ -38,7 +38,8 @@ Core design:
 
 - **Standalone loop + stateful Agent** — `loop.go` is a free function with all dependencies injected; `agent.go` is the sole consumer of loop events, updating internal state and dispatching to listeners. Double loop: inner processes tool calls + steering, outer handles follow-up
 - **Event stream** — single `<-chan Event` output drives any UI (TUI, Web, Slack, logging)
-- **Context layer** — `ContextManager` (interface) + `agentgo/context` (default engine) drive prompt projection, overflow recovery, and—via auto-wiring—message conversion and token estimation
+- **Message-native loop** — the loop, events, context manager, and persistence use application `AgentMessage` values. Each message lowers itself to the model `Message` protocol only at the model-call boundary
+- **Context layer** — `ContextManager` (interface) + `agentgo/context` (default engine) drive prompt projection, message-owned compaction, overflow recovery, and token estimation
 - **SubAgent tool** (`subagent/`) — multi-agent via tool invocation, four modes: single, parallel, chain, background
 
 ## Quick Start
@@ -306,14 +307,14 @@ agent := agentgo.NewAgent(
 )
 ```
 
-`NewAgent` auto-wires `ConvertToLLM`, token estimation, and context window from the context manager when available.
+`NewAgent` auto-wires token estimation and the context window from the context manager when available. `AgentMessage.ToMessage` is the single model-protocol boundary.
 
 When usage exceeds `ContextWindow - ReserveTokens` (default 16384), compaction:
 
-1. Keeps recent messages (default 20000 tokens)
-2. Summarizes older messages via LLM into a structured checkpoint (Goal / Progress / Key Decisions / Next Steps)
-3. Tracks file operations (read/write/edit paths) across compacted messages
-4. Supports incremental updates — subsequent compactions update the existing summary rather than re-summarizing
+1. Lets `CompactableAgentMessage` values produce progressively smaller semantic representations
+2. Applies generic tool-result and long-text trimming when message-owned compaction is insufficient
+3. Summarizes older messages via LLM into a structured checkpoint (Goal / Progress / Key Decisions / Next Steps)
+4. Tracks file operations (read/write/edit paths) and supports incremental summary updates
 
 ## Built-in Tools
 

@@ -57,10 +57,15 @@ type LoopConfig struct {
 	ThinkingLevel ThinkingLevel // reasoning depth
 
 	// Context lifecycle. ContextManager drives prompt projection, overflow
-	// recovery, and usage reporting; ConvertToLLM is auto-wired from it when
-	// the manager implements ContextLLMConverter.
+	// recovery, and usage reporting. AgentMessage values lower themselves to
+	// Message only at the model-call boundary.
 	ContextManager ContextManager
-	ConvertToLLM   func(msgs []AgentMessage) []Message
+
+	// ToolResultMessageFactory optionally lifts a raw tool result into an
+	// application-specific message before it enters the transcript. Nil keeps
+	// the built-in model Message representation. The returned message's model
+	// projection must preserve the tool role and tool_call_id pairing.
+	ToolResultMessageFactory func(ToolCall, ToolResult) AgentMessage
 
 	// CommitContext replaces the runtime message baseline after an explicit
 	// committed compaction, a committed projection rewrite, or committed

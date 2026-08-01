@@ -139,21 +139,6 @@ func (s eventSink) emitError(err error, summary *RunSummary) {
 // Message Sequence Repair
 // ---------------------------------------------------------------------------
 
-// DefaultConvertToLLM filters AgentMessages to LLM-compatible Messages.
-// Custom message types are dropped; only user/assistant/system/tool messages pass through.
-func DefaultConvertToLLM(msgs []AgentMessage) []Message {
-	out := make([]Message, 0, len(msgs))
-	for _, m := range msgs {
-		if msg, ok := m.(Message); ok {
-			if msg.StopReason == StopReasonError || msg.StopReason == StopReasonAborted {
-				continue
-			}
-			out = append(out, msg)
-		}
-	}
-	return out
-}
-
 // dequeue drains all messages from the queue.
 func dequeue(queue *[]AgentMessage) []AgentMessage {
 	if len(*queue) == 0 {

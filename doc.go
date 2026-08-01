@@ -20,7 +20,9 @@
 // any front end (TUI, web, Slack, logs) without the kernel knowing which.
 //
 // A small, stable surface carries most uses: [Agent], [AgentLoop], [Event],
-// [Tool], and [Message]. The rest is opt-in — context strategies, stop guards,
+// [Tool], [AgentMessage], and [Message]. AgentMessage is the application
+// transcript type; Message is the model protocol type produced only at the
+// call boundary. The rest is opt-in — context strategies, stop guards,
 // sub-agents, middleware — reached only when a use case needs it.
 //
 // Models are adapters behind the [ChatModel] interface; the kernel imports no

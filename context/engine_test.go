@@ -465,7 +465,7 @@ func TestContextEngineSyncPreservesBaselineScope(t *testing.T) {
 	}
 }
 
-func TestContextConvertToLLM_WrapsSummary(t *testing.T) {
+func TestContextSummaryToMessage(t *testing.T) {
 	msgs := []agentgo.AgentMessage{
 		ContextSummary{
 			Summary:       "summary body",
@@ -476,7 +476,7 @@ func TestContextConvertToLLM_WrapsSummary(t *testing.T) {
 		agentgo.UserMsg("keep me"),
 	}
 
-	out := ContextConvertToLLM(msgs)
+	out := agentgo.ToMessages(msgs)
 	if len(out) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(out))
 	}

@@ -248,8 +248,7 @@ func truncateOldestUserGroups(msgs []agentgo.AgentMessage, fraction float64) []a
 	}
 	var starts []int
 	for i, msg := range msgs {
-		m, ok := msg.(agentgo.Message)
-		if ok && m.Role == agentgo.RoleUser {
+		if msg != nil && msg.GetRole() == agentgo.RoleUser {
 			starts = append(starts, i)
 		}
 	}
@@ -275,7 +274,7 @@ func truncateOldestUserGroups(msgs []agentgo.AgentMessage, fraction float64) []a
 	// Ensure the truncated result starts with a user message.
 	// LLM APIs reject conversations that start with an assistant message.
 	if len(result) > 0 {
-		if m, ok := result[0].(agentgo.Message); ok && m.Role != agentgo.RoleUser {
+		if result[0].GetRole() != agentgo.RoleUser {
 			result = append([]agentgo.AgentMessage{
 				agentgo.UserMsg("[Earlier context truncated for summarization]"),
 			}, result...)
@@ -321,36 +320,31 @@ func formatArgsKeyValue(raw json.RawMessage) string {
 func serializeConversation(msgs []agentgo.AgentMessage) string {
 	var parts []string
 
-	for _, m := range msgs {
-		switch v := m.(type) {
-		case agentgo.Message:
-			switch v.Role {
-			case agentgo.RoleUser:
-				if text := v.TextContent(); text != "" {
-					parts = append(parts, "[User]: "+text)
-				}
-			case agentgo.RoleAssistant:
-				if thinking := v.ThinkingContent(); thinking != "" {
-					parts = append(parts, "[Assistant thinking]: "+thinking)
-				}
-				if text := v.TextContent(); text != "" {
-					parts = append(parts, "[Assistant]: "+text)
-				}
-				if toolCalls := v.ToolCalls(); len(toolCalls) > 0 {
-					var calls []string
-					for _, tc := range toolCalls {
-						calls = append(calls, tc.Name+"("+formatArgsKeyValue(tc.Args)+")")
-					}
-					parts = append(parts, "[Assistant tool calls]: "+strings.Join(calls, "; "))
-				}
-			case agentgo.RoleTool:
-				content := truncateForSummary(v.TextContent(), 497)
-				if content != "" {
-					parts = append(parts, "[Tool result]: "+content)
-				}
+	for _, message := range agentgo.ToMessages(msgs) {
+		switch message.Role {
+		case agentgo.RoleUser:
+			if text := message.TextContent(); text != "" {
+				parts = append(parts, "[User]: "+text)
 			}
-		case ContextSummary:
-			parts = append(parts, "[Previous summary]: "+v.Summary)
+		case agentgo.RoleAssistant:
+			if thinking := message.ThinkingContent(); thinking != "" {
+				parts = append(parts, "[Assistant thinking]: "+thinking)
+			}
+			if text := message.TextContent(); text != "" {
+				parts = append(parts, "[Assistant]: "+text)
+			}
+			if toolCalls := message.ToolCalls(); len(toolCalls) > 0 {
+				var calls []string
+				for _, tc := range toolCalls {
+					calls = append(calls, tc.Name+"("+formatArgsKeyValue(tc.Args)+")")
+				}
+				parts = append(parts, "[Assistant tool calls]: "+strings.Join(calls, "; "))
+			}
+		case agentgo.RoleTool:
+			content := truncateForSummary(message.TextContent(), 497)
+			if content != "" {
+				parts = append(parts, "[Tool result]: "+content)
+			}
 		}
 	}
 

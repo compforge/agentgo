@@ -250,32 +250,24 @@ func findCutPoint(msgs []agentgo.AgentMessage, keepTokens int) cutResult {
 	// Never split tool pair (assistant with toolCalls + following tool results)
 	for cutIndex < len(msgs) {
 		msg := msgs[cutIndex]
-		if m, ok := msg.(agentgo.Message); ok {
-			// Don't cut at a tool result — it belongs to the previous assistant
-			if m.Role == agentgo.RoleTool {
-				cutIndex++
-				continue
-			}
-			// Good cut point: user message
-			if m.Role == agentgo.RoleUser {
-				break
-			}
-			// Assistant message with tool calls: skip past all its tool results
-			if m.Role == agentgo.RoleAssistant && m.HasToolCalls() {
-				cutIndex++
-				for cutIndex < len(msgs) {
-					if next, ok := msgs[cutIndex].(agentgo.Message); ok && next.Role == agentgo.RoleTool {
-						cutIndex++
-					} else {
-						break
-					}
-				}
-				continue
-			}
-			// Assistant without tool calls — valid cut point
+		// Don't cut at a tool result — it belongs to the previous assistant.
+		if msg.GetRole() == agentgo.RoleTool {
+			cutIndex++
+			continue
+		}
+		// Good cut point: user message.
+		if msg.GetRole() == agentgo.RoleUser {
 			break
 		}
-		// ContextSummary or other custom type — valid cut point
+		// Assistant message with tool calls: skip past all its tool results.
+		if msg.GetRole() == agentgo.RoleAssistant && msg.HasToolCalls() {
+			cutIndex++
+			for cutIndex < len(msgs) && msgs[cutIndex].GetRole() == agentgo.RoleTool {
+				cutIndex++
+			}
+			continue
+		}
+		// Assistant without tool calls and custom roles are valid cut points.
 		break
 	}
 
@@ -287,10 +279,10 @@ func findCutPoint(msgs []agentgo.AgentMessage, keepTokens int) cutResult {
 	// Detect split turn: if cut is not at a user message, find the turn start
 	isSplitTurn := false
 	turnStartIndex := -1
-	if m, ok := msgs[cutIndex].(agentgo.Message); !ok || m.Role != agentgo.RoleUser {
+	if msgs[cutIndex].GetRole() != agentgo.RoleUser {
 		// Walk backwards from cutIndex to find the user message that started this turn
 		for i := cutIndex - 1; i >= 0; i-- {
-			if um, ok := msgs[i].(agentgo.Message); ok && um.Role == agentgo.RoleUser {
+			if msgs[i].GetRole() == agentgo.RoleUser {
 				turnStartIndex = i
 				isSplitTurn = true
 				break
@@ -311,8 +303,8 @@ func extractFileOps(msgs []agentgo.AgentMessage) (readFiles, modifiedFiles []str
 	modifiedSet := make(map[string]struct{})
 
 	for _, m := range msgs {
-		msg, ok := m.(agentgo.Message)
-		if !ok || msg.Role != agentgo.RoleAssistant {
+		msg, include := m.ToMessage()
+		if !include || msg.Role != agentgo.RoleAssistant {
 			continue
 		}
 		for _, tc := range msg.ToolCalls() {

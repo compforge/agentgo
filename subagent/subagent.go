@@ -76,9 +76,9 @@ type Config struct {
 	OnMessage func(agentName, task string, msg agentgo.AgentMessage)
 
 	// Optional context lifecycle hooks for long-running sub-agents.
-	ContextManager        agentgo.ContextManager
-	ContextManagerFactory func(model agentgo.ChatModel) agentgo.ContextManager
-	ConvertToLLM          func(msgs []agentgo.AgentMessage) []agentgo.Message
+	ContextManager           agentgo.ContextManager
+	ContextManagerFactory    func(model agentgo.ChatModel) agentgo.ContextManager
+	ToolResultMessageFactory func(agentgo.ToolCall, agentgo.ToolResult) agentgo.AgentMessage
 
 	// CacheLastMessage, when non-empty, tags the last non-system message of
 	// every LLM request in this sub-agent's loop with the given cache_control
@@ -325,8 +325,8 @@ func (r *Runner) AsTool() *Tool {
 // Tool implements agentgo.Tool as an adapter over Runner.
 type Tool struct {
 	runner          *Runner
-	notifyFn        func(agentgo.AgentMessage)                                   // called when a background task completes
-	createModel     func(name string) (agentgo.ChatModel, error)                 // resolves model name to ChatModel at runtime
+	notifyFn        func(agentgo.AgentMessage)                                     // called when a background task completes
+	createModel     func(name string) (agentgo.ChatModel, error)                   // resolves model name to ChatModel at runtime
 	bgOutputFactory func(taskID, agentName string) (io.WriteCloser, string, error) // creates output writer for background tasks
 	taskRT          *task.Runtime                                                  // shared background task registry
 	teamSpawner     TeamSpawner                                                    // routes team-mode calls; nil means team spawn is rejected
@@ -892,17 +892,6 @@ func (r *Runner) run(ctx context.Context, agentName, taskStr string, modelOverri
 		contextManager = cfg.ContextManagerFactory(runModel)
 	}
 
-	// Mirror NewAgent's auto-wiring: a ContextManager that implements
-	// ContextLLMConverter owns the AgentMessage→Message projection (e.g. to
-	// render summary entries). Without this, DefaultConvertToLLM silently
-	// drops manager-specific message kinds from the LLM request.
-	convertToLLM := cfg.ConvertToLLM
-	if convertToLLM == nil && contextManager != nil {
-		if c, ok := contextManager.(agentgo.ContextLLMConverter); ok {
-			convertToLLM = c.ConvertToLLM
-		}
-	}
-
 	runSeq := r.runSeq.Add(1)
 
 	// One conversation, one cache key: suffix the per-run sequence so each
@@ -914,16 +903,16 @@ func (r *Runner) run(ctx context.Context, agentName, taskStr string, modelOverri
 	}
 
 	loopCfg := agentgo.LoopConfig{
-		Model:            runModel,
-		MaxTurns:         cfg.MaxTurns,
-		MaxRetries:       cfg.MaxRetries,
-		ToolGate:         cfg.ToolGate,
-		Middlewares:      cfg.Middlewares,
-		ContextManager:   contextManager,
-		ConvertToLLM:     convertToLLM,
-		ThinkingLevel:    r.resolveThinking(agentName, cfg.ThinkingLevel),
-		CacheLastMessage: cfg.CacheLastMessage,
-		PromptCacheKey:   promptCacheKey,
+		Model:                    runModel,
+		MaxTurns:                 cfg.MaxTurns,
+		MaxRetries:               cfg.MaxRetries,
+		ToolGate:                 cfg.ToolGate,
+		Middlewares:              cfg.Middlewares,
+		ContextManager:           contextManager,
+		ToolResultMessageFactory: cfg.ToolResultMessageFactory,
+		ThinkingLevel:            r.resolveThinking(agentName, cfg.ThinkingLevel),
+		CacheLastMessage:         cfg.CacheLastMessage,
+		PromptCacheKey:           promptCacheKey,
 	}
 
 	loopCfg.GetSteeringMessages = opts.getSteeringMessages

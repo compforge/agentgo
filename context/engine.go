@@ -113,7 +113,8 @@ func NewEngine(cfg EngineConfig) *ContextEngine {
 }
 
 // NewDefaultEngine creates a ContextEngine with the default rewrite pipeline:
-// tool-result microcompact, light trim, then full summary.
+// message-owned compaction, tool-result microcompact, light trim, then full
+// summary.
 //
 // This is the recommended entry point for applications that want context
 // management without custom strategy wiring.
@@ -124,6 +125,7 @@ func NewDefaultEngine(model agentgo.ChatModel, contextWindow int) *ContextEngine
 	return NewEngine(EngineConfig{
 		ContextWindow: contextWindow,
 		Strategies: []Strategy{
+			NewMessageCompaction(),
 			NewToolResultMicrocompact(ToolResultMicrocompactConfig{}),
 			NewLightTrim(LightTrimConfig{}),
 			NewFullSummary(FullSummaryConfig{Model: model}),
@@ -638,13 +640,6 @@ func cloneMetadata(src map[string]any) map[string]any {
 		dst[k] = v
 	}
 	return dst
-}
-
-// --- Optional interfaces for auto-wiring in NewAgent ---
-
-// ConvertToLLM implements agentgo.ContextLLMConverter.
-func (e *ContextEngine) ConvertToLLM(msgs []agentgo.AgentMessage) []agentgo.Message {
-	return ContextConvertToLLM(msgs)
 }
 
 // EstimateContext implements agentgo.ContextEstimator.
