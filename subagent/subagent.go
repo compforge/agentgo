@@ -681,7 +681,10 @@ func (t *Tool) executeBackground(callerCtx context.Context, agentName, taskStr, 
 						}
 					}
 				case agentgo.EventMessageEnd:
-					message, ok := ev.Message.(agentgo.Message)
+					if ev.Message == nil {
+						return
+					}
+					message, ok := ev.Message.ToMessage()
 					if !ok {
 						return
 					}

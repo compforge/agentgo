@@ -180,7 +180,7 @@ func runSummaryCompaction(
 func stripImageBlocks(msgs []agentgo.AgentMessage) []agentgo.AgentMessage {
 	out := make([]agentgo.AgentMessage, 0, len(msgs))
 	for _, m := range msgs {
-		msg, ok := m.(agentgo.Message)
+		msg, ok := m.ToMessage()
 		if !ok {
 			out = append(out, m)
 			continue

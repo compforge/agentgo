@@ -104,11 +104,11 @@ func calculateContextTokens(u *agentgo.Usage) int {
 // non-aborted assistant message, plus chars/4 estimates for trailing messages.
 // This approximates the current context window occupancy.
 func EstimateContextTokens(msgs []agentgo.AgentMessage) ContextUsageEstimate {
-	// Walk backwards to find last assistant Message with valid Usage
+	// Walk backwards to find the last assistant projection with valid Usage.
 	lastIdx := -1
 	var lastUsage *agentgo.Usage
 	for i := len(msgs) - 1; i >= 0; i-- {
-		msg, ok := msgs[i].(agentgo.Message)
+		msg, ok := msgs[i].ToMessage()
 		if !ok || msg.Role != agentgo.RoleAssistant {
 			continue
 		}

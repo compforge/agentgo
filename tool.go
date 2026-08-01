@@ -266,7 +266,7 @@ func ReactivateDeferred(tools []Tool, msgs []AgentMessage) {
 
 	var names []string
 	for _, am := range msgs {
-		msg, ok := am.(Message)
+		msg, ok := am.ToMessage()
 		if !ok {
 			continue
 		}
