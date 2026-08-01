@@ -125,7 +125,7 @@ func NewDefaultEngine(model agentgo.ChatModel, contextWindow int) *ContextEngine
 	return NewEngine(EngineConfig{
 		ContextWindow: contextWindow,
 		Strategies: []Strategy{
-			NewMessageCompaction(),
+			NewCompactionStrategy(),
 			NewToolResultMicrocompact(ToolResultMicrocompactConfig{}),
 			NewLightTrim(LightTrimConfig{}),
 			NewFullSummary(FullSummaryConfig{Model: model}),

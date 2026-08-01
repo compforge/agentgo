@@ -11,6 +11,7 @@ import (
 type stagedMessage struct {
 	contents []string
 	stage    int
+	priority int
 }
 
 func (m stagedMessage) GetRole() agentgo.Role   { return agentgo.RoleUser }
@@ -18,6 +19,7 @@ func (m stagedMessage) GetTimestamp() time.Time { return time.Time{} }
 func (m stagedMessage) TextContent() string     { return m.contents[m.stage] }
 func (m stagedMessage) ThinkingContent() string { return "" }
 func (m stagedMessage) HasToolCalls() bool      { return false }
+func (m stagedMessage) Priority() int           { return m.priority }
 func (m stagedMessage) ToMessage() (agentgo.Message, bool) {
 	return agentgo.Message{
 		Role:    agentgo.RoleUser,
@@ -38,7 +40,7 @@ func TestMessageCompactionUsesMessageOwnedStages(t *testing.T) {
 	outline := strings.Repeat("x", 2000)
 	reference := "artifact:path"
 	original := stagedMessage{contents: []string{full, outline, reference}}
-	strategy := NewMessageCompaction()
+	strategy := NewCompactionStrategy()
 
 	view, result, err := strategy.Apply(t.Context(), nil, []agentgo.AgentMessage{original}, Budget{
 		Tokens:    EstimateTokens(original),
@@ -61,7 +63,7 @@ func TestMessageCompactionUsesMessageOwnedStages(t *testing.T) {
 
 func TestMessageCompactionIgnoresNonShrinkingStep(t *testing.T) {
 	message := stagedMessage{contents: []string{"short", "a longer replacement"}}
-	strategy := NewMessageCompaction()
+	strategy := NewCompactionStrategy()
 
 	view, result, err := strategy.Apply(t.Context(), nil, []agentgo.AgentMessage{message}, Budget{
 		Tokens:    EstimateTokens(message),
@@ -75,5 +77,77 @@ func TestMessageCompactionIgnoresNonShrinkingStep(t *testing.T) {
 	}
 	if got := view[0].(stagedMessage).stage; got != 0 {
 		t.Fatalf("stage = %d, want original stage", got)
+	}
+}
+
+func TestCompactionStrategyUsesNewestFirstWithinPriority(t *testing.T) {
+	full := strings.Repeat("x", 8000)
+	outline := strings.Repeat("x", 2000)
+	messages := []agentgo.AgentMessage{
+		stagedMessage{contents: []string{full, outline}},
+		stagedMessage{contents: []string{full, outline}},
+	}
+	strategy := NewCompactionStrategy()
+
+	view, _, err := strategy.Apply(t.Context(), nil, messages, Budget{
+		Tokens:    4000,
+		Threshold: 3000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := view[0].(stagedMessage).stage; got != 0 {
+		t.Fatalf("oldest stage = %d, want 0", got)
+	}
+	if got := view[1].(stagedMessage).stage; got != 1 {
+		t.Fatalf("newest stage = %d, want 1", got)
+	}
+}
+
+func TestCompactionStrategyExhaustsLowerPriorityFirst(t *testing.T) {
+	full := strings.Repeat("x", 8000)
+	outline := strings.Repeat("x", 2000)
+	messages := []agentgo.AgentMessage{
+		stagedMessage{contents: []string{full, outline, "reference"}, priority: 0},
+		stagedMessage{contents: []string{full, outline}, priority: 10},
+	}
+	strategy := NewCompactionStrategy()
+
+	view, _, err := strategy.Apply(t.Context(), nil, messages, Budget{
+		Tokens:    4000,
+		Threshold: 2400,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := view[0].(stagedMessage).stage; got != 2 {
+		t.Fatalf("low-priority stage = %d, want 2", got)
+	}
+	if got := view[1].(stagedMessage).stage; got != 0 {
+		t.Fatalf("high-priority stage = %d, want 0", got)
+	}
+}
+
+func TestCompactionStrategyPriorityOverridesRecency(t *testing.T) {
+	full := strings.Repeat("x", 8000)
+	outline := strings.Repeat("x", 2000)
+	messages := []agentgo.AgentMessage{
+		stagedMessage{contents: []string{full, outline}, priority: 0},
+		stagedMessage{contents: []string{full, outline}, priority: 10},
+	}
+	strategy := NewCompactionStrategy()
+
+	view, _, err := strategy.Apply(t.Context(), nil, messages, Budget{
+		Tokens:    4000,
+		Threshold: 3000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := view[0].(stagedMessage).stage; got != 1 {
+		t.Fatalf("low-priority stage = %d, want 1", got)
+	}
+	if got := view[1].(stagedMessage).stage; got != 0 {
+		t.Fatalf("high-priority stage = %d, want 0", got)
 	}
 }
