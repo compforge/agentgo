@@ -1,0 +1,287 @@
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestEditFuzzyMatchTrailingUnicodeSpace(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	if err := os.WriteFile(path, []byte("line\u00A0\nnext\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	tool := NewEdit(dir, NewFileReadState())
+	args, err := json.Marshal(map[string]any{
+		"file_path":  "test.txt",
+		"old_string": "line\n",
+		"new_string": "repl\n",
+	})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	if _, err := tool.Execute(context.Background(), args); err != nil {
+		t.Fatalf("execute edit: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	if string(got) != "repl\nnext\n" {
+		t.Fatalf("unexpected content:\nwant %q\ngot  %q", "repl\nnext\n", string(got))
+	}
+}
+
+func TestEditFuzzyDoesNotChangeUnrelatedSameLineText(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	input := "note=\"“保留”\"; target=‘old’\n"
+	if err := os.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	tool := NewEdit(dir, NewFileReadState())
+	args, err := json.Marshal(map[string]any{
+		"file_path":  "test.txt",
+		"old_string": "target='old'",
+		"new_string": "target='new'",
+	})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	if _, err := tool.Execute(context.Background(), args); err != nil {
+		t.Fatalf("execute edit: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	want := "note=\"“保留”\"; target='new'\n"
+	if string(got) != want {
+		t.Fatalf("unexpected content:\nwant %q\ngot  %q", want, string(got))
+	}
+}
+
+func TestEditPreviewFuzzyNoMutation(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	input := "note=\"“保留”\"; target=‘old’\n"
+	if err := os.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	tool := NewEdit(dir, NewFileReadState())
+	args, err := json.Marshal(map[string]any{
+		"file_path":  "test.txt",
+		"old_string": "target='old'",
+		"new_string": "target='new'",
+	})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	preview, err := tool.Preview(context.Background(), args)
+	if err != nil {
+		t.Fatalf("preview edit: %v", err)
+	}
+
+	var payload struct {
+		Diff string `json:"diff"`
+	}
+	if err := json.Unmarshal(preview, &payload); err != nil {
+		t.Fatalf("unmarshal preview: %v", err)
+	}
+	if !strings.Contains(payload.Diff, "“保留”") {
+		t.Fatalf("preview diff unexpectedly normalized unrelated text: %q", payload.Diff)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	if string(got) != input {
+		t.Fatalf("preview mutated file:\nwant %q\ngot  %q", input, string(got))
+	}
+}
+
+func TestEditIndentAwareMatch(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	input := "func main() {\n\tif true {\n\t\tprintln(\"old\")\n\t}\n}\n"
+	if err := os.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	tool := NewEdit(dir, NewFileReadState())
+	args, err := json.Marshal(map[string]any{
+		"file_path":  "test.txt",
+		"old_string": "if true {\n\tprintln(\"old\")\n}",
+		"new_string": "if true {\n\tprintln(\"new\")\n}",
+	})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	if _, err := tool.Execute(context.Background(), args); err != nil {
+		t.Fatalf("execute edit: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	want := "func main() {\n\tif true {\n\t\tprintln(\"new\")\n\t}\n}\n"
+	if string(got) != want {
+		t.Fatalf("unexpected content:\nwant %q\ngot  %q", want, string(got))
+	}
+}
+
+func TestEditIndentAwareRequiresUniqueMatch(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	input := "func a() {\n\tif true {\n\t\tprintln(\"old\")\n\t}\n}\n\nfunc b() {\n\tif true {\n\t\tprintln(\"old\")\n\t}\n}\n"
+	if err := os.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	tool := NewEdit(dir, NewFileReadState())
+	args, err := json.Marshal(map[string]any{
+		"file_path":  "test.txt",
+		"old_string": "if true {\n\tprintln(\"old\")\n}",
+		"new_string": "if true {\n\tprintln(\"new\")\n}",
+	})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	if _, err := tool.Execute(context.Background(), args); err == nil {
+		t.Fatalf("expected ambiguity error")
+	}
+}
+
+func TestEditFailureIncludesClosestMatchHint(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	input := "func main() {\n\tif enabled {\n\t\tprintln(\"old\")\n\t}\n}\n"
+	if err := os.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	tool := NewEdit(dir, NewFileReadState())
+	args, err := json.Marshal(map[string]any{
+		"file_path":  "test.txt",
+		"old_string": "if true {\n\tprintln(\"old\")\n}",
+		"new_string": "if true {\n\tprintln(\"new\")\n}",
+	})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	_, err = tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatalf("expected edit error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "Possible old_string candidates (copy one exactly):") {
+		t.Fatalf("expected closest match hint, got %q", msg)
+	}
+	if !strings.Contains(msg, "lines 2-4") {
+		t.Fatalf("expected line range hint, got %q", msg)
+	}
+	if !strings.Contains(msg, "```text") {
+		t.Fatalf("expected fenced code block hint, got %q", msg)
+	}
+	if !strings.Contains(msg, "if enabled {") {
+		t.Fatalf("expected candidate snippet, got %q", msg)
+	}
+}
+
+func TestEditFailureIncludesClosestChineseMatchHint(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chapter.md")
+	input := "她没有立刻回答，只是看向窗外。\n她说这话的时候语气很平，没有愤怒，也没有嘲讽，只是在陈述事实。\n沈渡没有再问。\n"
+	if err := os.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	tool := NewEdit(dir, NewFileReadState())
+	args, err := json.Marshal(map[string]any{
+		"file_path":  "chapter.md",
+		"old_string": "她说这话的时候，语气很平，没有愤怒，没有嘲讽，只是在陈述。",
+		"new_string": "她的语气依然平静。",
+	})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	_, err = tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatalf("expected edit error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "Possible old_string candidates (copy one exactly):") {
+		t.Fatalf("expected closest match hint, got %q", msg)
+	}
+	if !strings.Contains(msg, "她说这话的时候语气很平，没有愤怒，也没有嘲讽，只是在陈述事实。") {
+		t.Fatalf("expected exact Chinese candidate, got %q", msg)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	if string(got) != input {
+		t.Fatalf("failed edit mutated file:\nwant %q\ngot  %q", input, string(got))
+	}
+}
+
+func TestEditFailureOmitsUnrelatedChineseCandidate(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chapter.md")
+	if err := os.WriteFile(path, []byte("雨落在青石板上。\n远处传来晚钟。\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	tool := NewEdit(dir, NewFileReadState())
+	args, err := json.Marshal(map[string]any{
+		"file_path":  "chapter.md",
+		"old_string": "实验数据已经完成全部校验。",
+		"new_string": "实验结束。",
+	})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	_, err = tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatalf("expected edit error")
+	}
+	if strings.Contains(err.Error(), "Possible old_string candidates") {
+		t.Fatalf("unexpected unrelated candidate hint: %q", err)
+	}
+}

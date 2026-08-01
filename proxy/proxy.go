@@ -1,0 +1,177 @@
+// Package proxy provides a ChatModel adapter that forwards LLM calls to a
+// remote proxy server. The wire format ("frames") is bandwidth-optimized:
+// frames carry only deltas, and the client reconstructs the full streaming
+// message incrementally.
+package proxy
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"time"
+
+	"github.com/compforge/agentgo"
+)
+
+// FrameType identifies a proxy stream frame.
+type FrameType string
+
+const (
+	FrameTextDelta     FrameType = "text_delta"
+	FrameThinkingDelta FrameType = "thinking_delta"
+	FrameToolCallStart FrameType = "toolcall_start"
+	FrameToolCallDelta FrameType = "toolcall_delta"
+	FrameDone          FrameType = "done"
+	FrameError         FrameType = "error"
+)
+
+// Frame is a single bandwidth-optimized event from a remote proxy server.
+type Frame struct {
+	Type       FrameType            `json:"type"`
+	Delta      string               `json:"delta,omitempty"`
+	ToolCallID string               `json:"tool_call_id,omitempty"`
+	ToolName   string               `json:"tool_name,omitempty"`
+	StopReason agentgo.StopReason `json:"stop_reason,omitempty"`
+	Usage      *agentgo.Usage     `json:"usage,omitempty"`
+	// Error carries a FrameError message. It is a string (not error) so it
+	// survives the JSON wire round-trip — the whole point of this adapter.
+	Error string `json:"error,omitempty"`
+}
+
+// StreamFn makes an LLM call through a remote proxy and returns a channel of
+// bandwidth-optimized frames.
+type StreamFn func(ctx context.Context, req *agentgo.LLMRequest) (<-chan Frame, error)
+
+// Model implements agentgo.ChatModel by forwarding to a proxy stream
+// function. It reconstructs streaming events from incoming frames.
+//
+// Usage:
+//
+//	m := proxy.New(myStreamFn)
+//	agent := agentgo.NewAgent(agentgo.WithModel(m))
+type Model struct {
+	streamFn StreamFn
+}
+
+// New creates a Model that delegates to the given proxy stream function.
+func New(fn StreamFn) *Model {
+	return &Model{streamFn: fn}
+}
+
+// Generate collects the full streamed response synchronously.
+func (p *Model) Generate(ctx context.Context, messages []agentgo.Message, tools []agentgo.ToolSpec, opts ...agentgo.CallOption) (*agentgo.LLMResponse, error) {
+	ch, err := p.GenerateStream(ctx, messages, tools, opts...)
+	if err != nil {
+		return nil, err
+	}
+	var final agentgo.Message
+	for ev := range ch {
+		switch ev.Type {
+		case agentgo.StreamEventDone:
+			final = ev.Message
+		case agentgo.StreamEventError:
+			return nil, ev.Err
+		}
+	}
+	return &agentgo.LLMResponse{Message: final}, nil
+}
+
+// GenerateStream converts proxy frames into standard StreamEvents.
+func (p *Model) GenerateStream(ctx context.Context, messages []agentgo.Message, tools []agentgo.ToolSpec, opts ...agentgo.CallOption) (<-chan agentgo.StreamEvent, error) {
+	frames, err := p.streamFn(ctx, &agentgo.LLMRequest{Messages: messages, Tools: tools})
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(chan agentgo.StreamEvent, 100)
+	go func() {
+		defer close(out)
+
+		var (
+			partial      = agentgo.Message{Role: agentgo.RoleAssistant}
+			textStarted  bool
+			thinkStarted bool
+		)
+
+		for fr := range frames {
+			switch fr.Type {
+			case FrameTextDelta:
+				idx := findOrCreate(&partial.Content, agentgo.ContentText)
+				partial.Content[idx].Text += fr.Delta
+				if !textStarted {
+					textStarted = true
+					out <- agentgo.StreamEvent{Type: agentgo.StreamEventTextStart, ContentIndex: idx, Message: partial}
+				}
+				out <- agentgo.StreamEvent{Type: agentgo.StreamEventTextDelta, ContentIndex: idx, Delta: fr.Delta, Message: partial}
+
+			case FrameThinkingDelta:
+				idx := findOrCreate(&partial.Content, agentgo.ContentThinking)
+				partial.Content[idx].Thinking += fr.Delta
+				if !thinkStarted {
+					thinkStarted = true
+					out <- agentgo.StreamEvent{Type: agentgo.StreamEventThinkingStart, ContentIndex: idx, Message: partial}
+				}
+				out <- agentgo.StreamEvent{Type: agentgo.StreamEventThinkingDelta, ContentIndex: idx, Delta: fr.Delta, Message: partial}
+
+			case FrameToolCallStart:
+				partial.Content = append(partial.Content, agentgo.ToolCallBlock(agentgo.ToolCall{
+					ID:   fr.ToolCallID,
+					Name: fr.ToolName,
+				}))
+				out <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallStart, Message: partial}
+
+			case FrameToolCallDelta:
+				if idx := lastToolCall(partial.Content); idx >= 0 && partial.Content[idx].ToolCall != nil {
+					partial.Content[idx].ToolCall.Args = append(partial.Content[idx].ToolCall.Args, json.RawMessage(fr.Delta)...)
+				}
+				out <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallDelta, Delta: fr.Delta, Message: partial}
+
+			case FrameDone:
+				partial.StopReason = fr.StopReason
+				partial.Usage = fr.Usage
+				partial.Timestamp = time.Now()
+				out <- agentgo.StreamEvent{Type: agentgo.StreamEventDone, Message: partial, StopReason: fr.StopReason}
+
+			case FrameError:
+				msg := fr.Error
+				if msg == "" {
+					msg = "proxy stream error"
+				}
+				out <- agentgo.StreamEvent{Type: agentgo.StreamEventError, Err: errors.New(msg)}
+				return
+			}
+		}
+	}()
+
+	return out, nil
+}
+
+// SupportsTools reports that the proxy can handle tool calls.
+func (p *Model) SupportsTools() bool { return true }
+
+// findOrCreate returns the index of the last block of the given type, or
+// appends a new empty block and returns its index.
+func findOrCreate(blocks *[]agentgo.ContentBlock, ct agentgo.ContentType) int {
+	for i := len(*blocks) - 1; i >= 0; i-- {
+		if (*blocks)[i].Type == ct {
+			return i
+		}
+	}
+	switch ct {
+	case agentgo.ContentText:
+		*blocks = append(*blocks, agentgo.TextBlock(""))
+	case agentgo.ContentThinking:
+		*blocks = append(*blocks, agentgo.ThinkingBlock(""))
+	}
+	return len(*blocks) - 1
+}
+
+// lastToolCall returns the index of the last tool call block, or -1.
+func lastToolCall(blocks []agentgo.ContentBlock) int {
+	for i := len(blocks) - 1; i >= 0; i-- {
+		if blocks[i].Type == agentgo.ContentToolCall {
+			return i
+		}
+	}
+	return -1
+}

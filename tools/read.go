@@ -1,0 +1,482 @@
+package tools
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"image"
+	"image/jpeg"
+	"image/png"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	_ "image/gif"
+
+	"github.com/compforge/agentgo"
+	"github.com/compforge/agentgo/schema"
+	"golang.org/x/image/draw"
+	_ "golang.org/x/image/webp"
+)
+
+// supportedImageMIME is the whitelist of image types we send to the LLM.
+var supportedImageMIME = map[string]bool{
+	"image/jpeg": true,
+	"image/png":  true,
+	"image/gif":  true,
+	"image/webp": true,
+}
+
+const (
+	readDefaultLimit = 2000
+	readMaxLineLen   = 2000
+)
+
+// ReadTool reads file contents with optional offset and limit.
+// Supports directory listings and image files. Text output is streamed and
+// truncated by line count / byte size. Binary files are rejected.
+//
+// Successful reads record a stamp when state is non-nil. Write and Edit tools
+// constructed with the same state enforce read-before-write and detect stale
+// writes.
+type ReadTool struct {
+	WorkDir   string
+	readState *FileReadState
+	fs        WorkspaceFS
+}
+
+// NewRead creates a read tool rooted at workDir.
+//
+// Pass the same non-nil FileReadState to NewRead, NewWrite, and NewEdit to
+// enable read-before-write/edit validation. Pass nil to disable this tracking.
+// By default the tool operates on the local filesystem; pass WithFS to inject
+// a different WorkspaceFS backend.
+func NewRead(workDir string, state *FileReadState, opts ...Option) *ReadTool {
+	return &ReadTool{WorkDir: workDir, readState: state, fs: resolveFS(opts)}
+}
+
+func (t *ReadTool) Name() string                                 { return "read" }
+func (t *ReadTool) Label() string                                { return "Read File" }
+func (t *ReadTool) ReadOnly(_ json.RawMessage) bool              { return true }
+func (t *ReadTool) ConcurrencySafe(_ json.RawMessage) bool       { return true }
+func (t *ReadTool) ActivityDescription(_ json.RawMessage) string { return "Reading file" }
+func (t *ReadTool) Description() string {
+	return fmt.Sprintf(
+		`Reads a file from the local filesystem. You can access any file directly by using this tool.
+
+Usage:
+- The file_path parameter accepts relative or absolute paths.
+- By default, reads up to %d lines starting from the beginning of the file.
+- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters.
+- Results are returned using cat -n format, with line numbers starting at 1.
+- This tool also lists directory contents when file_path points to a directory; entries are returned one per line with a trailing '/' for subdirectories.
+- Long lines are truncated. Output is capped at %d lines or %s (whichever is hit first).
+- Use grep to find specific content in large files, and glob if you are unsure of the path.
+- Supports JPEG, PNG, GIF, and WebP images. Binary files are rejected.`,
+		defaultMaxLines, defaultMaxLines, formatSize(defaultMaxBytes),
+	)
+}
+func (t *ReadTool) Schema() map[string]any {
+	return schema.Object(
+		schema.Property("file_path", schema.String("The path to the file or directory to read (relative or absolute)")).Required(),
+		schema.Property("offset", schema.Int("The line number to start reading from. Only provide if the file is too large to read at once")),
+		schema.Property("limit", schema.Int("The number of lines to read. Only provide if the file is too large to read at once")),
+	)
+}
+
+type readArgs struct {
+	FilePath string `json:"file_path"`
+	Offset   int    `json:"offset"`
+	Limit    int    `json:"limit"`
+}
+
+type resolvedRead struct {
+	path    string
+	offset  int
+	limit   int
+	info    FileInfo
+	partial bool // user explicitly passed offset or limit
+}
+
+// Execute returns a text-only result (for backward compatibility / middleware).
+func (t *ReadTool) Execute(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	a, err := t.parseArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := t.readTextual(ctx, a)
+	if err != nil {
+		return nil, err
+	}
+	t.recordRead(a)
+	return json.Marshal(result)
+}
+
+// ExecuteContent returns rich content blocks (text or image).
+// Implements agentgo.ContentTool.
+func (t *ReadTool) ExecuteContent(ctx context.Context, args json.RawMessage) ([]agentgo.ContentBlock, error) {
+	a, err := t.parseArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	if !a.info.IsDir {
+		if mime := t.detectImageMIME(ctx, a.path); mime != "" {
+			blocks, err := t.readImage(ctx, a.path, mime)
+			if err == nil {
+				t.recordRead(a)
+			}
+			return blocks, err
+		}
+	}
+
+	result, err := t.readTextual(ctx, a)
+	if err != nil {
+		return nil, err
+	}
+	t.recordRead(a)
+	return []agentgo.ContentBlock{agentgo.TextBlock(result)}, nil
+}
+
+func (t *ReadTool) parseArgs(ctx context.Context, args json.RawMessage) (resolvedRead, error) {
+	var a readArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return resolvedRead{}, fmt.Errorf("invalid args: %w", err)
+	}
+	if a.Offset < 0 {
+		return resolvedRead{}, fmt.Errorf("offset must be greater than or equal to 1")
+	}
+
+	p := ResolvePath(effectiveWorkDir(ctx, t.WorkDir), a.FilePath)
+	info, err := t.fs.Stat(ctx, p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return resolvedRead{}, fmt.Errorf("%s", t.notFoundWithSuggestions(ctx, p))
+		}
+		return resolvedRead{}, fmt.Errorf("read %s: %w", p, err)
+	}
+
+	partial := a.Offset > 0 || a.Limit > 0
+	offset := a.Offset
+	if offset <= 0 {
+		offset = 1
+	}
+	limit := a.Limit
+	if limit <= 0 {
+		limit = readDefaultLimit
+	}
+
+	return resolvedRead{
+		path:    p,
+		offset:  offset,
+		limit:   limit,
+		info:    info,
+		partial: partial,
+	}, nil
+}
+
+// recordRead writes the read timestamp to FileReadState. Skipped for
+// directories. Files are keyed by absolute path so write/edit (which also
+// use ResolvePath) hit the same bucket.
+func (t *ReadTool) recordRead(a resolvedRead) {
+	if t.readState == nil || a.path == "" || a.info.IsDir {
+		return
+	}
+	t.readState.Set(a.path, FileReadStamp{
+		ReadAt:  time.Now(),
+		Mtime:   a.info.ModTime,
+		Version: a.info.Version,
+		Partial: a.partial,
+	})
+}
+
+func (t *ReadTool) readTextual(ctx context.Context, a resolvedRead) (string, error) {
+	if a.info.IsDir {
+		return t.readDirectory(ctx, a)
+	}
+
+	if mime := t.detectImageMIME(ctx, a.path); mime != "" {
+		return fmt.Sprintf("Read image file [%s]", mime), nil
+	}
+
+	isBinary, err := t.isBinaryFile(ctx, a.path, a.info.Size)
+	if err != nil {
+		return "", err
+	}
+	if isBinary {
+		return "", fmt.Errorf("cannot read binary file: %s", a.path)
+	}
+
+	return t.readTextFile(ctx, a)
+}
+
+// readImage reads a file as an image, optionally resizes, and returns content blocks.
+func (t *ReadTool) readImage(ctx context.Context, path, mime string) ([]agentgo.ContentBlock, error) {
+	data, err := t.fs.ReadFile(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+
+	note := fmt.Sprintf("Read image file [%s] (%s)", mime, formatSize(len(data)))
+
+	// Auto-resize large images to reduce token usage
+	resized, resMIME, resNote := resizeImage(data, mime)
+	if resNote != "" {
+		data = resized
+		mime = resMIME
+		note += " " + resNote
+	}
+
+	encoded := base64.StdEncoding.EncodeToString(data)
+	return []agentgo.ContentBlock{
+		agentgo.TextBlock(note),
+		agentgo.ImageBlock(encoded, mime),
+	}, nil
+}
+
+const imageMaxDim = 2000
+
+// resizeImage downscales an image if either dimension exceeds imageMaxDim.
+// Returns original data unchanged if no resize is needed or on error.
+func resizeImage(data []byte, mime string) ([]byte, string, string) {
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return data, mime, ""
+	}
+
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	if w <= imageMaxDim && h <= imageMaxDim {
+		return data, mime, ""
+	}
+
+	scale := float64(imageMaxDim) / float64(max(w, h))
+	newW := int(float64(w) * scale)
+	newH := int(float64(h) * scale)
+
+	dst := image.NewRGBA(image.Rect(0, 0, newW, newH))
+	draw.CatmullRom.Scale(dst, dst.Bounds(), img, bounds, draw.Over, nil)
+
+	var jpegBuf bytes.Buffer
+	if err := jpeg.Encode(&jpegBuf, dst, &jpeg.Options{Quality: 85}); err != nil {
+		return data, mime, ""
+	}
+
+	var pngBuf bytes.Buffer
+	if err := png.Encode(&pngBuf, dst); err == nil && pngBuf.Len() < jpegBuf.Len() {
+		return pngBuf.Bytes(), "image/png", fmt.Sprintf("[Resized %dx%d → %dx%d]", w, h, newW, newH)
+	}
+
+	return jpegBuf.Bytes(), "image/jpeg", fmt.Sprintf("[Resized %dx%d → %dx%d]", w, h, newW, newH)
+}
+
+func (t *ReadTool) readDirectory(ctx context.Context, a resolvedRead) (string, error) {
+	entries, err := t.fs.ReadDir(ctx, a.path)
+	if err != nil {
+		return "", fmt.Errorf("read directory %s: %w", a.path, err)
+	}
+
+	list := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name
+		if entry.IsDir {
+			name += "/"
+		}
+		list = append(list, name)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return strings.ToLower(list[i]) < strings.ToLower(list[j])
+	})
+	if len(list) == 0 {
+		return "(empty directory)", nil
+	}
+
+	start := a.offset - 1
+	if start >= len(list) {
+		return "", fmt.Errorf("offset %d is beyond end of directory listing (%d entries)", a.offset, len(list))
+	}
+
+	end := min(start+a.limit, len(list))
+	slice := list[start:end]
+	if len(slice) == 0 {
+		return "(empty directory)", nil
+	}
+
+	result := strings.Join(slice, "\n")
+	if end < len(list) {
+		result += fmt.Sprintf("\n\n[Showing entries %d-%d of %d. Use offset=%d to continue.]", start+1, end, len(list), end+1)
+	} else {
+		result += fmt.Sprintf("\n\n[End of directory listing - total %d entries.]", len(list))
+	}
+	return result, nil
+}
+
+func (t *ReadTool) readTextFile(ctx context.Context, a resolvedRead) (string, error) {
+	f, err := t.fs.Open(ctx, a.path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", a.path, err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 256*1024), 2*1024*1024)
+
+	var sb strings.Builder
+	written := 0
+	readLines := 0
+	totalLines := 0
+	hasMore := false
+	truncatedByBytes := false
+
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		totalLines++
+		if totalLines < a.offset {
+			continue
+		}
+		if readLines >= a.limit {
+			hasMore = true
+			continue
+		}
+
+		line := scanner.Text()
+		if tl, truncated := truncateLine(line, readMaxLineLen); truncated {
+			line = tl
+		}
+		rendered := fmt.Sprintf("%d\t%s\n", totalLines, line)
+		if written+len(rendered) > defaultMaxBytes {
+			if readLines == 0 {
+				return fmt.Sprintf("[File %s: first line exceeds %s limit. Use offset/limit to read in chunks.]", a.path, formatSize(defaultMaxBytes)), nil
+			}
+			truncatedByBytes = true
+			hasMore = true
+			break
+		}
+		sb.WriteString(rendered)
+		written += len(rendered)
+		readLines++
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("scan %s: %w", a.path, err)
+	}
+
+	if totalLines == 0 {
+		if a.offset > 1 {
+			return "", fmt.Errorf("offset %d is beyond end of file (0 lines)", a.offset)
+		}
+		return "[End of file - total 0 lines.]", nil
+	}
+	if a.offset > totalLines {
+		return "", fmt.Errorf("offset %d is beyond end of file (%d lines)", a.offset, totalLines)
+	}
+
+	result := strings.TrimRight(sb.String(), "\n")
+	if truncatedByBytes || hasMore {
+		lastRead := a.offset + readLines - 1
+		nextOffset := lastRead + 1
+		result += fmt.Sprintf("\n\n[Showing lines %d-%d of %d. Use offset=%d to continue.]", a.offset, lastRead, totalLines, nextOffset)
+	} else if result != "" {
+		result += fmt.Sprintf("\n\n[End of file - total %d lines.]", totalLines)
+	}
+	return result, nil
+}
+
+func (t *ReadTool) notFoundWithSuggestions(ctx context.Context, target string) string {
+	dir := dirOf(target)
+	base := filepath.Base(target)
+	entries, err := t.fs.ReadDir(ctx, dir)
+	if err != nil {
+		return fmt.Sprintf("file not found: %s", target)
+	}
+
+	var suggestions []string
+	lowerBase := strings.ToLower(base)
+	lowerStem := strings.ToLower(strings.TrimSuffix(base, filepath.Ext(base)))
+	for _, entry := range entries {
+		name := entry.Name
+		lowerName := strings.ToLower(name)
+		lowerNameStem := strings.ToLower(strings.TrimSuffix(name, filepath.Ext(name)))
+		if strings.Contains(lowerName, lowerBase) ||
+			strings.Contains(lowerBase, lowerName) ||
+			(lowerStem != "" && (strings.Contains(lowerNameStem, lowerStem) || strings.Contains(lowerStem, lowerNameStem))) {
+			suggestions = append(suggestions, joinOf(dir, name))
+			if len(suggestions) >= 3 {
+				break
+			}
+		}
+	}
+	if len(suggestions) == 0 {
+		return fmt.Sprintf("file not found: %s", target)
+	}
+	return fmt.Sprintf("file not found: %s\n\nDid you mean one of these?\n%s", target, strings.Join(suggestions, "\n"))
+}
+
+// detectImageMIME sniffs the file's content type and returns the MIME type
+// if it's a supported image format, or "" otherwise.
+func (t *ReadTool) detectImageMIME(ctx context.Context, path string) string {
+	f, err := t.fs.Open(ctx, path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	buf := make([]byte, 512)
+	n, err := f.Read(buf)
+	if err != nil || n == 0 {
+		return ""
+	}
+
+	mime := http.DetectContentType(buf[:n])
+	if supportedImageMIME[mime] {
+		return mime
+	}
+	return ""
+}
+
+func (t *ReadTool) isBinaryFile(ctx context.Context, path string, size int64) (bool, error) {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".zip", ".tar", ".gz", ".exe", ".dll", ".so", ".class", ".jar", ".war",
+		".7z", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".ods",
+		".odp", ".bin", ".dat", ".obj", ".o", ".a", ".lib", ".wasm", ".pyc", ".pyo", ".pdf":
+		return true, nil
+	}
+	if size == 0 {
+		return false, nil
+	}
+
+	f, err := t.fs.Open(ctx, path)
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	defer f.Close()
+
+	sampleSize := min(int(size), 4096)
+	buf := make([]byte, sampleSize)
+	n, err := f.Read(buf)
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+
+	nonPrintable := 0
+	for i := 0; i < n; i++ {
+		if buf[i] == 0 {
+			return true, nil
+		}
+		if buf[i] < 9 || (buf[i] > 13 && buf[i] < 32) {
+			nonPrintable++
+		}
+	}
+	return float64(nonPrintable)/float64(n) > 0.3, nil
+}

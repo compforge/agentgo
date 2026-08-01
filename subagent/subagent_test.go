@@ -1,0 +1,755 @@
+package subagent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/compforge/agentgo"
+	"github.com/compforge/agentgo/task"
+)
+
+// mockModel returns the responses one at a time. Generate and GenerateStream
+// each consume from the same cursor independently (one call advances exactly
+// once, never both).
+type mockModel struct {
+	responses []agentgo.Message
+	idx       int64
+}
+
+func newMock(responses ...agentgo.Message) *mockModel {
+	return &mockModel{responses: responses}
+}
+
+func (m *mockModel) take() (agentgo.Message, error) {
+	i := int(atomic.AddInt64(&m.idx, 1) - 1)
+	if i >= len(m.responses) {
+		return agentgo.Message{}, errors.New("mock model: no more responses")
+	}
+	return m.responses[i], nil
+}
+
+func (m *mockModel) Generate(ctx context.Context, _ []agentgo.Message, _ []agentgo.ToolSpec, _ ...agentgo.CallOption) (*agentgo.LLMResponse, error) {
+	msg, err := m.take()
+	if err != nil {
+		return nil, err
+	}
+	return &agentgo.LLMResponse{Message: msg}, nil
+}
+
+func (m *mockModel) GenerateStream(ctx context.Context, _ []agentgo.Message, _ []agentgo.ToolSpec, _ ...agentgo.CallOption) (<-chan agentgo.StreamEvent, error) {
+	msg, err := m.take()
+	if err != nil {
+		return nil, err
+	}
+	ch := make(chan agentgo.StreamEvent, 1)
+	ch <- agentgo.StreamEvent{Type: agentgo.StreamEventDone, Message: msg, StopReason: msg.StopReason}
+	close(ch)
+	return ch, nil
+}
+
+func (m *mockModel) SupportsTools() bool { return true }
+
+// sequentialModel calls fn(i, req) on every Generate/GenerateStream call.
+type sequentialModel struct {
+	fn  func(i int, req *agentgo.LLMRequest) (*agentgo.LLMResponse, error)
+	idx int64
+}
+
+func newSequential(fn func(i int, req *agentgo.LLMRequest) (*agentgo.LLMResponse, error)) *sequentialModel {
+	return &sequentialModel{fn: fn}
+}
+
+func (m *sequentialModel) Generate(ctx context.Context, messages []agentgo.Message, tools []agentgo.ToolSpec, _ ...agentgo.CallOption) (*agentgo.LLMResponse, error) {
+	i := int(atomic.AddInt64(&m.idx, 1) - 1)
+	return m.fn(i, &agentgo.LLMRequest{Messages: messages, Tools: tools})
+}
+
+func (m *sequentialModel) GenerateStream(ctx context.Context, messages []agentgo.Message, tools []agentgo.ToolSpec, _ ...agentgo.CallOption) (<-chan agentgo.StreamEvent, error) {
+	i := int(atomic.AddInt64(&m.idx, 1) - 1)
+	resp, err := m.fn(i, &agentgo.LLMRequest{Messages: messages, Tools: tools})
+	if err != nil {
+		return nil, err
+	}
+	ch := make(chan agentgo.StreamEvent, 1)
+	ch <- agentgo.StreamEvent{Type: agentgo.StreamEventDone, Message: resp.Message, StopReason: resp.Message.StopReason}
+	close(ch)
+	return ch, nil
+}
+
+func (m *sequentialModel) SupportsTools() bool { return true }
+
+// simpleAgent creates a Config that always replies with the given text.
+func simpleAgent(name, reply string) Config {
+	return Config{
+		Name:        name,
+		Description: name + " agent",
+		Model: newMock(agentgo.Message{
+			Role:       agentgo.RoleAssistant,
+			Content:    []agentgo.ContentBlock{agentgo.TextBlock(reply)},
+			StopReason: agentgo.StopReasonStop,
+		}),
+		MaxTurns: 3,
+	}
+}
+
+func parseResult(t *testing.T, raw json.RawMessage) map[string]any {
+	t.Helper()
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	return out
+}
+
+func TestTool_Single(t *testing.T) {
+	tool := NewRunner(simpleAgent("writer", "hello")).AsTool()
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"writer","task":"greet"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := parseResult(t, result)
+	if out["output"] != "hello" {
+		t.Fatalf("expected 'hello', got %v", out["output"])
+	}
+}
+
+func TestRunner_Run(t *testing.T) {
+	runner := NewRunner(simpleAgent("writer", "hello"))
+	result, err := runner.Run(context.Background(), "writer", "greet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Agent != "writer" || result.Output != "hello" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestNewRunnerRejectsInvalidRegistry(t *testing.T) {
+	tests := []struct {
+		name   string
+		agents []Config
+		want   string
+	}{
+		{name: "empty name", agents: []Config{{}}, want: "agent name is required"},
+		{name: "duplicate name", agents: []Config{{Name: "writer"}, {Name: "writer"}}, want: `duplicate agent "writer"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				recovered := recover()
+				if recovered == nil || !strings.Contains(fmt.Sprint(recovered), tt.want) {
+					t.Fatalf("NewRunner panic = %v, want containing %q", recovered, tt.want)
+				}
+			}()
+			NewRunner(tt.agents...)
+		})
+	}
+}
+
+func TestTool_ModelOverrideRequiresResolver(t *testing.T) {
+	tool := NewRunner(simpleAgent("writer", "hello")).AsTool()
+	_, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"writer","task":"greet","model":"other"}`))
+	if err == nil || !strings.Contains(err.Error(), "no model resolver configured") {
+		t.Fatalf("expected explicit model resolver error, got %v", err)
+	}
+}
+
+func TestTool_UnknownAgent(t *testing.T) {
+	tool := NewRunner(simpleAgent("writer", "x")).AsTool()
+	_, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"unknown","task":"hi"}`))
+	if err == nil || !strings.Contains(err.Error(), "unknown agent") {
+		t.Fatalf("expected unknown agent error, got %v", err)
+	}
+}
+
+// Background=true without a wired TaskRuntime must fail fast — silent
+// degradation to synchronous execution would violate the "return immediately,
+// notify on completion" contract callers expect from background mode.
+func TestTool_BackgroundRequiresTaskRuntime(t *testing.T) {
+	tool := NewRunner(simpleAgent("writer", "x")).AsTool()
+	_, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"writer","task":"go","background":true}`))
+	if err == nil {
+		t.Fatal("expected error when background=true and TaskRuntime is missing, got nil")
+	}
+	if !strings.Contains(err.Error(), "TaskRuntime") {
+		t.Fatalf("expected error mentioning TaskRuntime, got %v", err)
+	}
+}
+
+func TestTool_SinglePropagatesFinalErrorAfterPartialOutput(t *testing.T) {
+	noop := agentgo.NewFuncTool("noop", "noop", map[string]any{
+		"type": "object", "properties": map[string]any{},
+	}, func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+		return json.Marshal(map[string]bool{"ok": true})
+	})
+
+	cfg := Config{
+		Name:        "writer",
+		Description: "writer agent",
+		Tools:       []agentgo.Tool{noop},
+		Model: newSequential(func(i int, req *agentgo.LLMRequest) (*agentgo.LLMResponse, error) {
+			if i == 0 {
+				return &agentgo.LLMResponse{Message: agentgo.Message{
+					Role: agentgo.RoleAssistant,
+					Content: []agentgo.ContentBlock{
+						agentgo.TextBlock("partial output before failure"),
+						agentgo.ToolCallBlock(agentgo.ToolCall{ID: "tc1", Name: "noop", Args: json.RawMessage(`{}`)}),
+					},
+					StopReason: agentgo.StopReasonToolUse,
+				}}, nil
+			}
+			return nil, errors.New("llm failed after partial output")
+		}),
+		MaxTurns: 3,
+	}
+
+	tool := NewRunner(cfg).AsTool()
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"writer","task":"write"}`))
+	if err == nil {
+		t.Fatalf("expected final LLM error to propagate, got result %s", string(result))
+	}
+	if !strings.Contains(err.Error(), "llm failed after partial output") {
+		t.Fatalf("expected original error in message, got %v", err)
+	}
+}
+
+func TestTool_Chain(t *testing.T) {
+	tool := NewRunner(
+		simpleAgent("step1", "first-output"),
+		simpleAgent("step2", "final-output"),
+	).AsTool()
+	args := `{"chain":[{"agent":"step1","task":"do A"},{"agent":"step2","task":"continue from {previous}"}]}`
+	result, err := tool.Execute(context.Background(), json.RawMessage(args))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := parseResult(t, result)
+	if out["output"] != "final-output" {
+		t.Fatalf("expected last chain output, got %v", out["output"])
+	}
+	results, _ := out["results"].([]any)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 chain results, got %d", len(results))
+	}
+}
+
+func TestTool_Parallel(t *testing.T) {
+	tool := NewRunner(
+		simpleAgent("a", "result-a"),
+		simpleAgent("b", "result-b"),
+	).AsTool()
+	args := `{"tasks":[{"agent":"a","task":"t1"},{"agent":"b","task":"t2"}]}`
+	result, err := tool.Execute(context.Background(), json.RawMessage(args))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := parseResult(t, result)
+	if out["summary"] != "2/2 succeeded" {
+		t.Fatalf("expected 2/2 succeeded, got %v", out["summary"])
+	}
+}
+
+func TestTool_ModeValidation(t *testing.T) {
+	tool := NewRunner(simpleAgent("x", "y")).AsTool()
+
+	// No mode
+	_, err := tool.Execute(context.Background(), json.RawMessage(`{}`))
+	if err == nil || !strings.Contains(err.Error(), "exactly one mode") {
+		t.Fatalf("expected mode validation error, got %v", err)
+	}
+
+	// Multiple modes
+	_, err = tool.Execute(context.Background(), json.RawMessage(`{"agent":"x","task":"t","tasks":[{"agent":"x","task":"t"}]}`))
+	if err == nil || !strings.Contains(err.Error(), "exactly one mode") {
+		t.Fatalf("expected mode validation error, got %v", err)
+	}
+}
+
+func TestTool_ModelOverrideRebuildsContextManager(t *testing.T) {
+	baseModel := &fakeNamedModel{name: "base"}
+	overrideModel := &fakeNamedModel{name: "override"}
+
+	var received string
+	cfg := Config{
+		Name:        "writer",
+		Description: "writer agent",
+		Model:       baseModel,
+		ContextManagerFactory: func(model agentgo.ChatModel) agentgo.ContextManager {
+			if named, ok := model.(*fakeNamedModel); ok {
+				received = named.name
+			}
+			return nil
+		},
+		MaxTurns: 3,
+	}
+
+	tool := NewRunner(cfg).AsTool()
+	tool.SetCreateModel(func(name string) (agentgo.ChatModel, error) {
+		return overrideModel, nil
+	})
+
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"writer","task":"greet","model":"override"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if received != "override" {
+		t.Fatalf("expected context manager factory to receive override model, got %q", received)
+	}
+}
+
+type fakeNamedModel struct {
+	name string
+}
+
+func (m *fakeNamedModel) Generate(ctx context.Context, messages []agentgo.Message, tools []agentgo.ToolSpec, _ ...agentgo.CallOption) (*agentgo.LLMResponse, error) {
+	return &agentgo.LLMResponse{Message: agentgo.Message{Role: agentgo.RoleAssistant, Content: []agentgo.ContentBlock{agentgo.TextBlock(m.name)}}}, nil
+}
+
+func (m *fakeNamedModel) GenerateStream(ctx context.Context, messages []agentgo.Message, tools []agentgo.ToolSpec, _ ...agentgo.CallOption) (<-chan agentgo.StreamEvent, error) {
+	msg := agentgo.Message{Role: agentgo.RoleAssistant, Content: []agentgo.ContentBlock{agentgo.TextBlock(m.name)}, StopReason: agentgo.StopReasonStop}
+	ch := make(chan agentgo.StreamEvent, 1)
+	ch <- agentgo.StreamEvent{Type: agentgo.StreamEventDone, Message: msg, StopReason: agentgo.StopReasonStop}
+	close(ch)
+	return ch, nil
+}
+
+func (m *fakeNamedModel) SupportsTools() bool { return true }
+
+// Background spawn must refuse to nest beyond task.MaxAgentDepth so a future
+// peer-spawn channel (added with team support) can't trigger runaway
+// recursion. We simulate "the caller is already at depth N" by threading the
+// depth into ctx, then asserting the spawn either succeeds with childDepth=N+1
+// or rejects when N+1 > MaxAgentDepth.
+func TestTool_BackgroundRespectsMaxAgentDepth(t *testing.T) {
+	tool := NewRunner(simpleAgent("writer", "ok")).AsTool()
+	tool.SetTaskRuntime(task.NewRuntime())
+
+	cases := []struct {
+		callerDepth int
+		wantError   bool
+		wantBgDepth int // entry.Depth on success path
+	}{
+		{callerDepth: 0, wantError: false, wantBgDepth: 1},                      // main agent
+		{callerDepth: task.MaxAgentDepth - 1, wantError: false, wantBgDepth: 5}, // last legal level
+		{callerDepth: task.MaxAgentDepth, wantError: true},                      // childDepth = 6, rejected
+		{callerDepth: task.MaxAgentDepth + 5, wantError: true},                  // way past
+	}
+
+	for _, tc := range cases {
+		ctx := task.WithDepth(context.Background(), tc.callerDepth)
+		raw, err := tool.Execute(ctx, json.RawMessage(`{"agent":"writer","task":"go","background":true}`))
+		if err != nil {
+			t.Fatalf("callerDepth=%d: unexpected execute error: %v", tc.callerDepth, err)
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			t.Fatalf("callerDepth=%d: parse: %v (%s)", tc.callerDepth, err, raw)
+		}
+		if tc.wantError {
+			errMsg, _ := resp["error"].(string)
+			if !strings.Contains(errMsg, "depth") {
+				t.Errorf("callerDepth=%d: want depth error, got %v", tc.callerDepth, resp)
+			}
+			continue
+		}
+		taskID, _ := resp["task_id"].(string)
+		if taskID == "" {
+			t.Fatalf("callerDepth=%d: missing task_id in success response: %v", tc.callerDepth, resp)
+		}
+		// Wait briefly for the registered entry to appear with its depth set.
+		// Registration is synchronous inside executeBackground, so a single
+		// Get() should suffice — but guard with a short retry to make the
+		// test resilient to scheduler timing.
+		var entry *task.Entry
+		for range 20 {
+			if e := tool.taskRT.Get(taskID); e != nil {
+				entry = e
+				break
+			}
+		}
+		if entry == nil {
+			t.Fatalf("callerDepth=%d: entry never appeared in runtime", tc.callerDepth)
+		}
+		if entry.Depth != tc.wantBgDepth {
+			t.Errorf("callerDepth=%d: entry.Depth = %d, want %d", tc.callerDepth, entry.Depth, tc.wantBgDepth)
+		}
+	}
+}
+
+type errorWriteCloser struct {
+	writeErr error
+	closeErr error
+}
+
+func (w *errorWriteCloser) Write(p []byte) (int, error) {
+	if w.writeErr != nil {
+		return 0, w.writeErr
+	}
+	return len(p), nil
+}
+
+func (w *errorWriteCloser) Close() error { return w.closeErr }
+
+func TestTool_BackgroundOutputErrorsFailTask(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  Config
+		factory func(string, string) (io.WriteCloser, string, error)
+		want    []string
+	}{
+		{
+			name: "create",
+			factory: func(string, string) (io.WriteCloser, string, error) {
+				return nil, "", errors.New("disk unavailable")
+			},
+			want: []string{"create background output: disk unavailable"},
+		},
+		{
+			name: "write",
+			factory: func(string, string) (io.WriteCloser, string, error) {
+				return &errorWriteCloser{writeErr: errors.New("disk full")}, "output.jsonl", nil
+			},
+			want: []string{"write background output: disk full"},
+		},
+		{
+			name: "close",
+			factory: func(string, string) (io.WriteCloser, string, error) {
+				return &errorWriteCloser{closeErr: errors.New("flush failed")}, "output.jsonl", nil
+			},
+			want: []string{"close background output: flush failed"},
+		},
+		{
+			name: "run and close",
+			config: Config{
+				Name:        "writer",
+				Description: "writer",
+				Model: newSequential(func(int, *agentgo.LLMRequest) (*agentgo.LLMResponse, error) {
+					return nil, errors.New("llm failed")
+				}),
+				MaxTurns: 3,
+			},
+			factory: func(string, string) (io.WriteCloser, string, error) {
+				return &errorWriteCloser{closeErr: errors.New("flush failed")}, "output.jsonl", nil
+			},
+			want: []string{"llm failed", "close background output: flush failed"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := task.NewRuntime()
+			cfg := tt.config
+			if cfg.Name == "" {
+				cfg = simpleAgent("writer", "done")
+			}
+			tool := NewRunner(cfg).AsTool()
+			tool.SetTaskRuntime(rt)
+			tool.SetBgOutputFactory(tt.factory)
+
+			raw, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"writer","task":"write","background":true}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := parseResult(t, raw)
+			taskID, _ := result["task_id"].(string)
+			if taskID == "" {
+				t.Fatalf("missing task_id: %s", raw)
+			}
+
+			deadline := time.Now().Add(3 * time.Second)
+			var entry *task.Entry
+			for time.Now().Before(deadline) {
+				entry = rt.Get(taskID)
+				if entry != nil && entry.Status.IsTerminal() {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if entry == nil || entry.Status != task.Failed {
+				t.Fatalf("task status = %+v, want failed", entry)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(entry.Error, want) {
+					t.Fatalf("task error = %q, want containing %q", entry.Error, want)
+				}
+			}
+		})
+	}
+}
+
+// Verifies the parent→child wiring end-to-end: a message queued via
+// task.Runtime.AppendPending while the background sub-agent is running must
+// reach the sub-agent's next LLM call. The chain under test is:
+//
+//	AppendPending → Runtime.pendingMessages
+//	             → loopCfg.GetSteeringMessages (bound in Runner.run)
+//	             → injected as UserMsg before turn 2
+//
+// If any link breaks, the second LLM call won't see "follow-up steered".
+func TestTool_BackgroundDrainsPendingMessagesIntoNextTurn(t *testing.T) {
+	rt := task.NewRuntime()
+
+	// The injecting tool needs to know its own task ID to call AppendPending.
+	// We hand it off via a buffered channel — the main goroutine writes after
+	// Execute returns; the tool reads when the first turn invokes it.
+	taskIDCh := make(chan string, 1)
+	const steeringMsg = "follow-up steered"
+
+	injectTool := agentgo.NewFuncTool("inject", "queues a pending message", map[string]any{
+		"type": "object", "properties": map[string]any{},
+	}, func(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+		select {
+		case id := <-taskIDCh:
+			rt.AppendPending(id, steeringMsg)
+			taskIDCh <- id // re-fill for any subsequent tool call
+		case <-time.After(time.Second):
+			return nil, errors.New("taskID channel never received")
+		}
+		return json.Marshal("ok")
+	})
+
+	var sawSteering atomic.Bool
+	cfg := Config{
+		Name:        "writer",
+		Description: "writer",
+		Tools:       []agentgo.Tool{injectTool},
+		Model: newSequential(func(i int, req *agentgo.LLMRequest) (*agentgo.LLMResponse, error) {
+			switch i {
+			case 0:
+				return &agentgo.LLMResponse{Message: agentgo.Message{
+					Role: agentgo.RoleAssistant,
+					Content: []agentgo.ContentBlock{
+						agentgo.ToolCallBlock(agentgo.ToolCall{
+							ID: "tc1", Name: "inject", Args: json.RawMessage(`{}`),
+						}),
+					},
+					StopReason: agentgo.StopReasonToolUse,
+				}}, nil
+			default:
+				// Inspect the prompt at the second LLM call: the steering
+				// message should have been injected before this turn.
+				for _, msg := range req.Messages {
+					if msg.Role == agentgo.RoleUser && strings.Contains(msg.TextContent(), steeringMsg) {
+						sawSteering.Store(true)
+						break
+					}
+				}
+				return &agentgo.LLMResponse{Message: agentgo.Message{
+					Role:       agentgo.RoleAssistant,
+					Content:    []agentgo.ContentBlock{agentgo.TextBlock("done")},
+					StopReason: agentgo.StopReasonStop,
+				}}, nil
+			}
+		}),
+		MaxTurns: 5,
+	}
+
+	tool := NewRunner(cfg).AsTool()
+	tool.SetTaskRuntime(rt)
+
+	raw, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"writer","task":"start","background":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("parse background response: %v", err)
+	}
+	taskID, _ := resp["task_id"].(string)
+	if taskID == "" {
+		t.Fatalf("missing task_id in background response: %s", string(raw))
+	}
+	taskIDCh <- taskID
+
+	// Wait for the background goroutine to reach a terminal state.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if e := rt.Get(taskID); e != nil && e.Status.IsTerminal() {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if e := rt.Get(taskID); e == nil || !e.Status.IsTerminal() {
+		t.Fatalf("background task did not finish in time: %+v", e)
+	}
+	if !sawSteering.Load() {
+		t.Fatal("steering message was not injected into the second LLM call — wiring is broken")
+	}
+}
+
+// thinkingCaptureModel records the reasoning level resolved from the call
+// options on each model call, then returns a terminal assistant message.
+type thinkingCaptureModel struct {
+	mu   sync.Mutex
+	last agentgo.ThinkingLevel
+}
+
+func (m *thinkingCaptureModel) record(opts []agentgo.CallOption) {
+	cfg := agentgo.ResolveCallConfig(opts)
+	m.mu.Lock()
+	m.last = cfg.ThinkingLevel
+	m.mu.Unlock()
+}
+
+func (m *thinkingCaptureModel) thinking() agentgo.ThinkingLevel {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.last
+}
+
+func (m *thinkingCaptureModel) reply() agentgo.Message {
+	return agentgo.Message{
+		Role:       agentgo.RoleAssistant,
+		Content:    []agentgo.ContentBlock{agentgo.TextBlock("done")},
+		StopReason: agentgo.StopReasonStop,
+	}
+}
+
+func (m *thinkingCaptureModel) Generate(ctx context.Context, _ []agentgo.Message, _ []agentgo.ToolSpec, opts ...agentgo.CallOption) (*agentgo.LLMResponse, error) {
+	m.record(opts)
+	return &agentgo.LLMResponse{Message: m.reply()}, nil
+}
+
+func (m *thinkingCaptureModel) GenerateStream(ctx context.Context, _ []agentgo.Message, _ []agentgo.ToolSpec, opts ...agentgo.CallOption) (<-chan agentgo.StreamEvent, error) {
+	m.record(opts)
+	msg := m.reply()
+	ch := make(chan agentgo.StreamEvent, 1)
+	ch <- agentgo.StreamEvent{Type: agentgo.StreamEventDone, Message: msg, StopReason: msg.StopReason}
+	close(ch)
+	return ch, nil
+}
+
+func (m *thinkingCaptureModel) SupportsTools() bool { return true }
+
+// Config.ThinkingLevel must reach the LLM call as the resolved reasoning level.
+func TestTool_ThinkingLevelFromConfig(t *testing.T) {
+	model := &thinkingCaptureModel{}
+	tool := NewRunner(Config{Name: "writer", Description: "w", Model: model, MaxTurns: 3, ThinkingLevel: agentgo.ThinkingHigh}).AsTool()
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"writer","task":"go"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := model.thinking(); got != agentgo.ThinkingHigh {
+		t.Fatalf("config thinking: got %q, want %q", got, agentgo.ThinkingHigh)
+	}
+}
+
+// SetThinkingLevel installs a runtime override that wins over Config.ThinkingLevel.
+func TestRunner_SetThinkingLevelOverridesConfig(t *testing.T) {
+	model := &thinkingCaptureModel{}
+	runner := NewRunner(Config{Name: "writer", Description: "w", Model: model, MaxTurns: 3, ThinkingLevel: agentgo.ThinkingLow})
+	runner.SetThinkingLevel("writer", agentgo.ThinkingXHigh)
+	tool := runner.AsTool()
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"writer","task":"go"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := model.thinking(); got != agentgo.ThinkingXHigh {
+		t.Fatalf("override thinking: got %q, want %q", got, agentgo.ThinkingXHigh)
+	}
+}
+
+// Config.ToolGate and Config.Middlewares must reach the sub-agent's loop —
+// without the pass-through a harness cannot gate sub-agent tool calls at all.
+// Gate semantics themselves are covered by TestAgentLoop_ToolGate; this test
+// only proves the threading.
+func TestTool_GateAndMiddlewarePassThrough(t *testing.T) {
+	echoModel := func() agentgo.ChatModel {
+		return newSequential(func(i int, req *agentgo.LLMRequest) (*agentgo.LLMResponse, error) {
+			if i == 0 {
+				return &agentgo.LLMResponse{Message: agentgo.Message{
+					Role: agentgo.RoleAssistant,
+					Content: []agentgo.ContentBlock{
+						agentgo.ToolCallBlock(agentgo.ToolCall{ID: "tc1", Name: "echo", Args: json.RawMessage(`{"value":"original"}`)}),
+					},
+					StopReason: agentgo.StopReasonToolUse,
+				}}, nil
+			}
+			return &agentgo.LLMResponse{Message: agentgo.Message{
+				Role:       agentgo.RoleAssistant,
+				Content:    []agentgo.ContentBlock{agentgo.TextBlock("done")},
+				StopReason: agentgo.StopReasonStop,
+			}}, nil
+		})
+	}
+	echoSchema := map[string]any{
+		"type": "object", "properties": map[string]any{"value": map[string]any{"type": "string"}},
+	}
+
+	t.Run("gate rewrite reaches the tool and middleware wraps execution", func(t *testing.T) {
+		var received string
+		middlewareCalls := 0
+		echo := agentgo.NewFuncTool("echo", "echo", echoSchema, func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+			received = string(args)
+			return json.Marshal("ok")
+		})
+		cfg := Config{
+			Name: "writer", Description: "w", Model: echoModel(), MaxTurns: 3,
+			Tools: []agentgo.Tool{echo},
+			ToolGate: func(ctx context.Context, req agentgo.GateRequest) (*agentgo.GateDecision, error) {
+				return &agentgo.GateDecision{Allowed: true, UpdatedArgs: json.RawMessage(`{"value":"rewritten"}`)}, nil
+			},
+			Middlewares: []agentgo.ToolMiddleware{
+				func(ctx context.Context, call agentgo.ToolCall, next agentgo.ToolExecuteFunc) (json.RawMessage, error) {
+					middlewareCalls++
+					return next(ctx, call.Args)
+				},
+			},
+		}
+		if _, err := NewRunner(cfg).Run(context.Background(), "writer", "go"); err != nil {
+			t.Fatal(err)
+		}
+		if received != `{"value":"rewritten"}` {
+			t.Fatalf("tool args = %s, want the gate rewrite", received)
+		}
+		if middlewareCalls != 1 {
+			t.Fatalf("middleware calls = %d, want 1", middlewareCalls)
+		}
+	})
+
+	t.Run("gate denial blocks execution", func(t *testing.T) {
+		executed := false
+		echo := agentgo.NewFuncTool("echo", "echo", echoSchema, func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+			executed = true
+			return json.Marshal("ok")
+		})
+		cfg := Config{
+			Name: "writer", Description: "w", Model: echoModel(), MaxTurns: 3,
+			Tools: []agentgo.Tool{echo},
+			ToolGate: func(ctx context.Context, req agentgo.GateRequest) (*agentgo.GateDecision, error) {
+				return &agentgo.GateDecision{Allowed: false, Reason: "denied by policy"}, nil
+			},
+		}
+		res, err := NewRunner(cfg).Run(context.Background(), "writer", "go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if executed {
+			t.Fatal("tool executed despite gate denial")
+		}
+		if res.Output != "done" {
+			t.Fatalf("output = %q, want the loop to continue after denial", res.Output)
+		}
+	})
+}
+
+// ThinkingOff must be forwarded explicitly (not dropped like an empty level), so
+// downstream adapters can issue a real "disabled" request to turn off models
+// that think by default.
+func TestTool_ThinkingOffIsForwarded(t *testing.T) {
+	model := &thinkingCaptureModel{}
+	tool := NewRunner(Config{Name: "writer", Description: "w", Model: model, MaxTurns: 3, ThinkingLevel: agentgo.ThinkingOff}).AsTool()
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"writer","task":"go"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := model.thinking(); got != agentgo.ThinkingOff {
+		t.Fatalf("off thinking: got %q, want %q (must be forwarded, not dropped)", got, agentgo.ThinkingOff)
+	}
+}

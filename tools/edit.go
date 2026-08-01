@@ -1,0 +1,991 @@
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+	"unicode"
+
+	"github.com/compforge/agentgo"
+	"github.com/compforge/agentgo/schema"
+)
+
+// EditTool performs exact string replacement in a file.
+// Supports line ending normalization, fuzzy matching, and returns unified diff.
+//
+// Validate enforces read-before-edit and detects stale writes when state is
+// non-nil.
+type EditTool struct {
+	WorkDir   string
+	readState *FileReadState
+	fs        WorkspaceFS
+}
+
+// NewEdit creates an edit tool rooted at workDir.
+//
+// Pass the same non-nil FileReadState to NewRead, NewWrite, and NewEdit to
+// enable read-before-write/edit validation. Pass nil to disable this tracking.
+// By default the tool operates on the local filesystem; pass WithFS to inject
+// a different WorkspaceFS backend.
+func NewEdit(workDir string, state *FileReadState, opts ...Option) *EditTool {
+	return &EditTool{WorkDir: workDir, readState: state, fs: resolveFS(opts)}
+}
+
+func (t *EditTool) Name() string                                 { return "edit" }
+func (t *EditTool) Label() string                                { return "Edit File" }
+func (t *EditTool) ReadOnly(_ json.RawMessage) bool              { return false }
+func (t *EditTool) ConcurrencySafe(_ json.RawMessage) bool       { return false }
+func (t *EditTool) ActivityDescription(_ json.RawMessage) string { return "Editing file" }
+func (t *EditTool) Description() string {
+	return `Performs exact string replacements in files.
+
+Usage:
+- You must use the read tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
+- When editing text from read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + tab. Everything after that is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
+- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
+- The edit will FAIL if ` + "`old_string`" + ` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use ` + "`replace_all`" + ` to change every instance of ` + "`old_string`" + `.
+- Use ` + "`replace_all`" + ` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.`
+}
+func (t *EditTool) Schema() map[string]any {
+	return schema.Object(
+		schema.Property("file_path", schema.String("The path to the file to modify (relative or absolute)")).Required(),
+		schema.Property("old_string", schema.String("The text to replace (must be unique unless replace_all is true)")).Required(),
+		schema.Property("new_string", schema.String("The text to replace it with (must be different from old_string)")).Required(),
+		schema.Property("replace_all", schema.Bool("Replace all occurrences of old_string (default: false)")),
+	)
+}
+
+type editArgs struct {
+	FilePath   string `json:"file_path"`
+	OldString  string `json:"old_string"`
+	NewString  string `json:"new_string"`
+	ReplaceAll bool   `json:"replace_all"`
+}
+
+// editResult holds the parsed and computed edit state, shared by Preview and Execute.
+type editResult struct {
+	path       string
+	bom        string
+	ending     string // original line ending
+	oldContent string // normalized-to-LF content before edit
+	newContent string
+}
+
+// Validate enforces read-before-edit and detects stale writes. Unlike Write,
+// edit always requires an existing file — a non-existent path fails.
+// Error codes match WriteTool.Validate.
+func (t *EditTool) Validate(ctx context.Context, args json.RawMessage) agentgo.ValidationResult {
+	if t.readState == nil {
+		return agentgo.ValidationResult{OK: true}
+	}
+
+	var a editArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return agentgo.ValidationResult{OK: false, Message: "invalid args: " + err.Error()}
+	}
+	path := ResolvePath(effectiveWorkDir(ctx, t.WorkDir), a.FilePath)
+
+	info, err := t.fs.Stat(ctx, path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return agentgo.ValidationResult{OK: false, Message: "file not found: " + path}
+		}
+		return agentgo.ValidationResult{OK: false, Message: "stat " + path + ": " + err.Error()}
+	}
+	if info.IsDir {
+		return agentgo.ValidationResult{OK: false, Message: "path is a directory: " + path}
+	}
+
+	stamp, ok := t.readState.Get(path)
+	if !ok || stamp.Partial {
+		return agentgo.ValidationResult{
+			OK:        false,
+			ErrorCode: 2,
+			Message:   "File has not been read yet. Read it first before editing.",
+		}
+	}
+	// Compare against the content token / mtime recorded at read time, not just
+	// "after ReadAt". Catches mtime regressions too (e.g. git checkout of an
+	// older version), and unsaved-buffer changes when the backend sets Version.
+	if !stampMatches(stamp, info) {
+		return agentgo.ValidationResult{
+			OK:        false,
+			ErrorCode: 3,
+			Message:   "File has been modified since read, either by the user or by a linter. Read it again before attempting to edit it.",
+		}
+	}
+	return agentgo.ValidationResult{OK: true}
+}
+
+func (t *EditTool) parseAndMatch(ctx context.Context, args json.RawMessage) (*editResult, error) {
+	var a editArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return nil, fmt.Errorf("invalid args: %w", err)
+	}
+
+	a.FilePath = ResolvePath(effectiveWorkDir(ctx, t.WorkDir), a.FilePath)
+
+	data, err := t.fs.ReadFile(ctx, a.FilePath)
+	if err != nil {
+		return nil, fmt.Errorf("file not found: %s", a.FilePath)
+	}
+
+	raw := string(data)
+	bom, raw := stripBOM(raw)
+
+	originalEnding := detectLineEnding(raw)
+	content := normalizeToLF(raw)
+	oldText := normalizeToLF(a.OldString)
+	newText := normalizeToLF(a.NewString)
+	multiline := strings.Contains(oldText, "\n")
+
+	// Matching chain: exact/fuzzy → escape → blockAnchor → indentAware
+	idx, matchLen := fuzzyFind(content, oldText)
+	needsReindent := false
+
+	if idx < 0 {
+		idx, matchLen = escapeFind(content, oldText)
+	}
+	if idx < 0 && multiline {
+		idx, matchLen = blockAnchorFind(content, oldText)
+		if idx >= 0 {
+			needsReindent = true
+		}
+	}
+	if idx < 0 && multiline {
+		var count int
+		idx, matchLen, count = indentAwareFind(content, oldText)
+		if count > 1 && !a.ReplaceAll {
+			return nil, fmt.Errorf("found %d indentation-insensitive occurrences of the text in %s. Provide more context or use replace_all=true", count, a.FilePath)
+		}
+		if idx >= 0 {
+			needsReindent = true
+		}
+	}
+
+	if idx < 0 {
+		if hints := formatEditCandidates(content, oldText); hints != "" {
+			return nil, fmt.Errorf("could not find the exact text in %s. The old text must match exactly including all whitespace and newlines.\n\nPossible old_string candidates (copy one exactly):\n%s", a.FilePath, hints)
+		}
+		return nil, fmt.Errorf("could not find the exact text in %s. The old text must match exactly including all whitespace and newlines", a.FilePath)
+	}
+
+	matchedText := content[idx : idx+matchLen]
+	replacement := newText
+	if needsReindent {
+		replacement = reindentReplacement(newText, oldText, matchedText)
+	}
+
+	// Apply replacement
+	var newContent string
+	if a.ReplaceAll {
+		newContent = strings.ReplaceAll(content, matchedText, replacement)
+	} else {
+		count := strings.Count(content, matchedText)
+		if count > 1 {
+			return nil, fmt.Errorf("found %d occurrences of the text in %s. Use replace_all=true to replace all, or provide more context to make the match unique", count, a.FilePath)
+		}
+		newContent = content[:idx] + replacement + content[idx+matchLen:]
+	}
+
+	if content == newContent {
+		if replacement == matchedText {
+			return nil, fmt.Errorf("old_string and new_string are identical in %s. Provide a new_string that is different from the matched text", a.FilePath)
+		}
+		return nil, fmt.Errorf("no changes made to %s. The replacement produced identical content (likely a whitespace or line-ending difference was normalized away)", a.FilePath)
+	}
+
+	return &editResult{
+		path:       a.FilePath,
+		bom:        bom,
+		ending:     originalEnding,
+		oldContent: content,
+		newContent: newContent,
+	}, nil
+}
+
+// Preview computes the diff without writing the file.
+func (t *EditTool) Preview(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r, err := t.parseAndMatch(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	diff, firstLine := generateDiff(r.oldContent, r.newContent)
+	return json.Marshal(map[string]any{
+		"diff":               diff,
+		"first_changed_line": firstLine,
+	})
+}
+
+func (t *EditTool) Execute(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r, err := t.parseAndMatch(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	finalContent := r.bom + restoreLineEndings(r.newContent, r.ending)
+	if err := t.fs.WriteFile(ctx, r.path, []byte(finalContent), 0o644); err != nil {
+		return nil, fmt.Errorf("write %s: %w", r.path, err)
+	}
+
+	diff, firstLine := generateDiff(r.oldContent, r.newContent)
+	return json.Marshal(map[string]any{
+		"message":            fmt.Sprintf("Successfully replaced text in %s.", r.path),
+		"diff":               diff,
+		"first_changed_line": firstLine,
+	})
+}
+
+// --- Line ending utilities ---
+
+func detectLineEnding(content string) string {
+	crlfIdx := strings.Index(content, "\r\n")
+	lfIdx := strings.Index(content, "\n")
+	if lfIdx == -1 || crlfIdx == -1 {
+		return "\n"
+	}
+	if crlfIdx < lfIdx {
+		return "\r\n"
+	}
+	return "\n"
+}
+
+func normalizeToLF(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	return text
+}
+
+func restoreLineEndings(text, ending string) string {
+	if ending == "\r\n" {
+		return strings.ReplaceAll(text, "\n", "\r\n")
+	}
+	return text
+}
+
+// --- BOM ---
+
+func stripBOM(s string) (bom, text string) {
+	if strings.HasPrefix(s, "\uFEFF") {
+		return "\uFEFF", s[len("\uFEFF"):]
+	}
+	return "", s
+}
+
+// --- Fuzzy matching ---
+
+// normalizeRuneForFuzzy normalizes one rune for fuzzy matching.
+func normalizeRuneForFuzzy(r rune) rune {
+	switch r {
+	case '\u2018', '\u2019', '\u201A', '\u201B':
+		return '\''
+	case '\u201C', '\u201D', '\u201E', '\u201F':
+		return '"'
+	case '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015', '\u2212':
+		return '-'
+	}
+	for _, s := range unicodeSpaces {
+		if r == s {
+			return ' '
+		}
+	}
+	return r
+}
+
+// normalizeForFuzzy strips trailing whitespace per line and normalizes
+// smart quotes, dashes, Unicode spaces to ASCII equivalents.
+func normalizeForFuzzy(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		line = strings.TrimRightFunc(line, unicode.IsSpace)
+		lines[i] = strings.Map(normalizeRuneForFuzzy, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+type fuzzyNormalized struct {
+	runes      []rune
+	runeToByte []int
+}
+
+func normalizeForFuzzyWithMap(text string) fuzzyNormalized {
+	lines := strings.Split(text, "\n")
+	outRunes := make([]rune, 0, len(text))
+	runeToByte := make([]int, 0, len(text)+1)
+
+	globalByte := 0
+	for li, line := range lines {
+		trimmed := strings.TrimRightFunc(line, unicode.IsSpace)
+		for relByte, r := range trimmed {
+			outRunes = append(outRunes, normalizeRuneForFuzzy(r))
+			runeToByte = append(runeToByte, globalByte+relByte)
+		}
+		if li < len(lines)-1 {
+			outRunes = append(outRunes, '\n')
+			runeToByte = append(runeToByte, globalByte+len(line))
+		}
+		globalByte += len(line)
+		if li < len(lines)-1 {
+			globalByte++
+		}
+	}
+
+	runeToByte = append(runeToByte, len(text))
+	return fuzzyNormalized{
+		runes:      outRunes,
+		runeToByte: runeToByte,
+	}
+}
+
+func indexRuneSlice(haystack, needle []rune) int {
+	if len(needle) == 0 {
+		return 0
+	}
+	if len(needle) > len(haystack) {
+		return -1
+	}
+outer:
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		for j := 0; j < len(needle); j++ {
+			if haystack[i+j] != needle[j] {
+				continue outer
+			}
+		}
+		return i
+	}
+	return -1
+}
+
+// fuzzyFind tries exact match first, then fuzzy match.
+// Fuzzy matching is only used for locating the replacement range.
+// The returned index/length always point to the original content bytes.
+func fuzzyFind(content, oldText string) (idx, matchLen int) {
+	if i := strings.Index(content, oldText); i >= 0 {
+		return i, len(oldText)
+	}
+
+	normContent := normalizeForFuzzyWithMap(content)
+	fuzzyOld := normalizeForFuzzy(oldText)
+	oldRunes := []rune(fuzzyOld)
+	runeIdx := indexRuneSlice(normContent.runes, oldRunes)
+	if runeIdx < 0 {
+		return -1, 0
+	}
+
+	if runeIdx+len(oldRunes) > len(normContent.runeToByte)-1 {
+		return -1, 0
+	}
+	startByte := normContent.runeToByte[runeIdx]
+	endByte := normContent.runeToByte[runeIdx+len(oldRunes)]
+	if startByte < 0 || endByte < startByte || endByte > len(content) {
+		return -1, 0
+	}
+	return startByte, endByte - startByte
+}
+
+// --- Escape normalization ---
+
+// escapeFind handles LLM sending literal escape sequences (\n, \t, etc.)
+// instead of actual characters. Tries unescaping oldText and matching.
+func escapeFind(content, oldText string) (idx, matchLen int) {
+	unescaped := unescapeText(oldText)
+	if unescaped == oldText {
+		return -1, 0
+	}
+	if i := strings.Index(content, unescaped); i >= 0 {
+		return i, len(unescaped)
+	}
+	return -1, 0
+}
+
+var escapeMap = map[byte]byte{
+	'n': '\n', 't': '\t', 'r': '\r',
+	'\\': '\\', '\'': '\'', '"': '"',
+}
+
+func unescapeText(s string) string {
+	var sb strings.Builder
+	sb.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if i+1 < len(s) && s[i] == '\\' {
+			if replacement, ok := escapeMap[s[i+1]]; ok {
+				sb.WriteByte(replacement)
+				i++
+				continue
+			}
+		}
+		sb.WriteByte(s[i])
+	}
+	return sb.String()
+}
+
+// --- Block anchor matching ---
+
+// blockAnchorFind uses the first and last lines of oldText as anchors,
+// then checks middle content similarity via line-level Levenshtein distance.
+// Returns the range in content that matches, or (-1, 0) if no match.
+func blockAnchorFind(content, oldText string) (idx, matchLen int) {
+	oldLines := strings.Split(oldText, "\n")
+	if len(oldLines) < 3 {
+		return -1, 0
+	}
+	if oldLines[len(oldLines)-1] == "" {
+		oldLines = oldLines[:len(oldLines)-1]
+	}
+	if len(oldLines) < 3 {
+		return -1, 0
+	}
+
+	contentLines := strings.Split(content, "\n")
+	firstAnchor := strings.TrimSpace(oldLines[0])
+	lastAnchor := strings.TrimSpace(oldLines[len(oldLines)-1])
+
+	type candidate struct {
+		startLine, endLine int
+		similarity         float64
+	}
+	var candidates []candidate
+
+	for i, line := range contentLines {
+		if strings.TrimSpace(line) != firstAnchor {
+			continue
+		}
+		for j := i + 2; j < len(contentLines); j++ {
+			if strings.TrimSpace(contentLines[j]) != lastAnchor {
+				continue
+			}
+			sim := blockSimilarity(contentLines[i:j+1], oldLines)
+			candidates = append(candidates, candidate{i, j, sim})
+			break
+		}
+	}
+
+	if len(candidates) == 0 {
+		return -1, 0
+	}
+
+	// Pick the highest-similarity candidate.
+	// Multiple candidates require > 0.3 similarity to avoid false positives.
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		if c.similarity > best.similarity {
+			best = c
+		}
+	}
+	if len(candidates) > 1 && best.similarity < 0.3 {
+		return -1, 0
+	}
+
+	offsets := lineStartOffsets(content)
+	start := offsets[best.startLine]
+	end := offsets[best.endLine+1]
+	// Trim trailing newline from the matched range
+	if end > start && content[end-1] == '\n' {
+		end--
+	}
+	return start, end - start
+}
+
+// blockSimilarity computes average line similarity for middle lines (0.0 - 1.0).
+func blockSimilarity(block, search []string) float64 {
+	middleCount := min(len(block)-2, len(search)-2)
+	if middleCount <= 0 {
+		return 1.0
+	}
+	var total float64
+	for i := 1; i <= middleCount; i++ {
+		a := strings.TrimSpace(block[i])
+		b := strings.TrimSpace(search[i])
+		maxLen := max(len(a), len(b))
+		if maxLen == 0 {
+			continue
+		}
+		dist := levenshteinDistance(a, b)
+		total += 1.0 - float64(dist)/float64(maxLen)
+	}
+	return total / float64(middleCount)
+}
+
+// levenshteinDistance computes the edit distance between two strings.
+func levenshteinDistance(a, b string) int {
+	if a == "" {
+		return len(b)
+	}
+	if b == "" {
+		return len(a)
+	}
+	ra, rb := []rune(a), []rune(b)
+	prev := make([]int, len(rb)+1)
+	curr := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		curr[0] = i
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			curr[j] = min(prev[j]+1, min(curr[j-1]+1, prev[j-1]+cost))
+		}
+		prev, curr = curr, prev
+	}
+	return prev[len(rb)]
+}
+
+func indentAwareFind(content, oldText string) (idx, matchLen, count int) {
+	oldLines := strings.Split(oldText, "\n")
+	contentLines := strings.Split(content, "\n")
+	if len(oldLines) == 0 || len(oldLines) > len(contentLines) {
+		return -1, 0, 0
+	}
+
+	target := normalizeLinesForIndentAware(oldLines)
+	lineStarts := lineStartOffsets(content)
+
+	var matches []struct{ start, end int }
+	for i := 0; i+len(oldLines) <= len(contentLines); i++ {
+		window := contentLines[i : i+len(oldLines)]
+		if normalizeLinesForIndentAware(window) != target {
+			continue
+		}
+		matches = append(matches, struct{ start, end int }{
+			start: lineStarts[i],
+			end:   lineStarts[i+len(oldLines)],
+		})
+	}
+
+	if len(matches) == 0 {
+		return -1, 0, 0
+	}
+	if len(matches) > 1 {
+		return -1, 0, len(matches)
+	}
+	m := matches[0]
+	return m.start, m.end - m.start, 1
+}
+
+func normalizeLinesForIndentAware(lines []string) string {
+	processed := make([]string, len(lines))
+	minIndent := -1
+	for i, line := range lines {
+		line = strings.TrimRightFunc(line, unicode.IsSpace)
+		line = strings.Map(normalizeRuneForFuzzy, line)
+		processed[i] = line
+
+		trimmed := strings.TrimLeft(line, " \t")
+		if trimmed == "" {
+			continue
+		}
+		indent := len(line) - len(trimmed)
+		if minIndent == -1 || indent < minIndent {
+			minIndent = indent
+		}
+	}
+
+	if minIndent > 0 {
+		for i, line := range processed {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			if len(line) >= minIndent {
+				processed[i] = line[minIndent:]
+			}
+		}
+	}
+	return strings.Join(processed, "\n")
+}
+
+func reindentReplacement(newText, oldText, matchedText string) string {
+	oldIndent := commonIndentPrefix(strings.Split(oldText, "\n"))
+	matchIndent := commonIndentPrefix(strings.Split(matchedText, "\n"))
+	if oldIndent == matchIndent {
+		return preserveMatchedTrailingNewline(newText, matchedText)
+	}
+
+	lines := strings.Split(newText, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		lines[i] = matchIndent + removeIndentPrefix(line, oldIndent)
+	}
+	return preserveMatchedTrailingNewline(strings.Join(lines, "\n"), matchedText)
+}
+
+func commonIndentPrefix(lines []string) string {
+	var common string
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		indent := leadingIndent(line)
+		if common == "" {
+			common = indent
+			continue
+		}
+		common = sharedPrefix(common, indent)
+		if common == "" {
+			return ""
+		}
+	}
+	return common
+}
+
+func leadingIndent(line string) string {
+	i := 0
+	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+		i++
+	}
+	return line[:i]
+}
+
+func sharedPrefix(a, b string) string {
+	n := min(len(a), len(b))
+	i := 0
+	for i < n && a[i] == b[i] {
+		i++
+	}
+	return a[:i]
+}
+
+func removeIndentPrefix(line, indent string) string {
+	if indent == "" {
+		return line
+	}
+	if strings.HasPrefix(line, indent) {
+		return line[len(indent):]
+	}
+
+	trim := len(indent)
+	i := 0
+	for i < len(line) && trim > 0 && (line[i] == ' ' || line[i] == '\t') {
+		i++
+		trim--
+	}
+	return line[i:]
+}
+
+func preserveMatchedTrailingNewline(text, matchedText string) string {
+	if strings.HasSuffix(matchedText, "\n") && !strings.HasSuffix(text, "\n") {
+		return text + "\n"
+	}
+	return text
+}
+
+type editCandidate struct {
+	startLine int
+	endLine   int
+	block     string
+	score     int
+}
+
+const (
+	candidatePreviewLines      = 8
+	candidateSimilarityScale   = 100
+	minimumCandidateSimilarity = candidateSimilarityScale / 2
+)
+
+func formatEditCandidates(content, oldText string) string {
+	candidates := suggestEditCandidates(content, oldText)
+	if len(candidates) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	for i, c := range candidates {
+		preview := candidatePreview(c.block)
+		fmt.Fprintf(&sb, "%d. lines %d-%d\n```text\n%s\n```\n", i+1, c.startLine, c.endLine, preview)
+		if c.endLine-c.startLine+1 > candidatePreviewLines {
+			fmt.Fprintf(&sb, "   Use read with offset=%d limit=%d to see the full block.\n", c.startLine, c.endLine-c.startLine+1)
+		}
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func candidatePreview(block string) string {
+	block = strings.TrimRight(block, "\n")
+	lines := strings.Split(block, "\n")
+	if len(lines) <= candidatePreviewLines {
+		return block
+	}
+	head := candidatePreviewLines / 2
+	tail := candidatePreviewLines - head
+	var sb strings.Builder
+	for _, l := range lines[:head] {
+		sb.WriteString(l)
+		sb.WriteByte('\n')
+	}
+	fmt.Fprintf(&sb, "... (%d lines omitted)\n", len(lines)-head-tail)
+	for _, l := range lines[len(lines)-tail:] {
+		sb.WriteString(l)
+		sb.WriteByte('\n')
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func suggestEditCandidates(content, oldText string) []editCandidate {
+	targetLines := splitCandidateLines(oldText)
+	contentLines := splitCandidateLines(content)
+	if len(targetLines) == 0 || len(contentLines) == 0 {
+		return nil
+	}
+
+	if len(targetLines) == 1 {
+		return suggestSingleLineCandidates(contentLines, targetLines[0])
+	}
+	return suggestBlockCandidates(contentLines, targetLines)
+}
+
+func splitCandidateLines(text string) []string {
+	lines := strings.Split(normalizeToLF(text), "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
+func suggestSingleLineCandidates(contentLines []string, target string) []editCandidate {
+	var out []editCandidate
+	for i, line := range contentLines {
+		score := scoreCandidateLine(line, target)
+		if score <= 0 {
+			continue
+		}
+		out = append(out, editCandidate{
+			startLine: i + 1,
+			endLine:   i + 1,
+			block:     line,
+			score:     score,
+		})
+	}
+	return topEditCandidates(out)
+}
+
+func suggestBlockCandidates(contentLines, targetLines []string) []editCandidate {
+	windowSize := len(targetLines)
+	if windowSize > len(contentLines) {
+		return nil
+	}
+
+	var out []editCandidate
+	for i := 0; i+windowSize <= len(contentLines); i++ {
+		window := contentLines[i : i+windowSize]
+		score := scoreCandidateBlock(window, targetLines)
+		if score <= 0 {
+			continue
+		}
+		out = append(out, editCandidate{
+			startLine: i + 1,
+			endLine:   i + windowSize,
+			block:     strings.Join(window, "\n"),
+			score:     score,
+		})
+	}
+	return topEditCandidates(out)
+}
+
+func scoreCandidateBlock(candidateLines, targetLines []string) int {
+	score := 0
+	for i := range targetLines {
+		score += scoreCandidateLine(candidateLines[i], targetLines[i])
+	}
+
+	if trimmedLine(candidateLines[0]) == trimmedLine(targetLines[0]) {
+		score += candidateSimilarityScale / 2
+	}
+	last := len(targetLines) - 1
+	if trimmedLine(candidateLines[last]) == trimmedLine(targetLines[last]) {
+		score += candidateSimilarityScale / 2
+	}
+
+	if normalizeLinesForIndentAware(candidateLines) == normalizeLinesForIndentAware(targetLines) {
+		score += candidateSimilarityScale
+	}
+	return score
+}
+
+func scoreCandidateLine(candidate, target string) int {
+	c := normalizeSearchText(candidate)
+	t := normalizeSearchText(target)
+	if c == "" || t == "" {
+		return 0
+	}
+	if c == t {
+		return candidateSimilarityScale
+	}
+
+	c = collapseWhitespace(c)
+	t = collapseWhitespace(t)
+	if c == t {
+		return candidateSimilarityScale - 1
+	}
+	similarity := runeBigramSimilarity(c, t)
+	if similarity >= minimumCandidateSimilarity {
+		return similarity
+	}
+	return 0
+}
+
+func normalizeSearchText(text string) string {
+	text = strings.Map(normalizeRuneForFuzzy, text)
+	return strings.TrimSpace(text)
+}
+
+func collapseWhitespace(text string) string {
+	return strings.Join(strings.Fields(normalizeSearchText(text)), " ")
+}
+
+type runeBigram struct {
+	first  rune
+	second rune
+}
+
+func runeBigramSimilarity(a, b string) int {
+	ar := []rune(a)
+	br := []rune(b)
+	if len(ar) < 2 || len(br) < 2 {
+		return 0
+	}
+
+	counts := make(map[runeBigram]int, len(ar)-1)
+	for i := 1; i < len(ar); i++ {
+		counts[runeBigram{first: ar[i-1], second: ar[i]}]++
+	}
+
+	overlap := 0
+	for i := 1; i < len(br); i++ {
+		pair := runeBigram{first: br[i-1], second: br[i]}
+		if counts[pair] > 0 {
+			overlap++
+			counts[pair]--
+		}
+	}
+
+	return overlap * 2 * candidateSimilarityScale / (len(ar) + len(br) - 2)
+}
+
+func trimmedLine(text string) string {
+	return strings.TrimSpace(strings.Map(normalizeRuneForFuzzy, text))
+}
+
+func topEditCandidates(candidates []editCandidate) []editCandidate {
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	for i := 0; i < len(candidates); i++ {
+		best := i
+		for j := i + 1; j < len(candidates); j++ {
+			if candidates[j].score > candidates[best].score ||
+				(candidates[j].score == candidates[best].score && candidates[j].startLine < candidates[best].startLine) {
+				best = j
+			}
+		}
+		candidates[i], candidates[best] = candidates[best], candidates[i]
+	}
+
+	if len(candidates) > 3 {
+		candidates = candidates[:3]
+	}
+	return candidates
+}
+
+func lineStartOffsets(text string) []int {
+	offsets := []int{0}
+	for i := 0; i < len(text); i++ {
+		if text[i] == '\n' {
+			offsets = append(offsets, i+1)
+		}
+	}
+	if offsets[len(offsets)-1] != len(text) {
+		offsets = append(offsets, len(text))
+	}
+	return offsets
+}
+
+// --- Diff generation ---
+
+// generateDiff produces a unified diff with line numbers and context.
+func generateDiff(oldContent, newContent string) (string, int) {
+	const contextLines = 4
+
+	oldLines := strings.Split(oldContent, "\n")
+	newLines := strings.Split(newContent, "\n")
+
+	// Find the first and last differing lines
+	maxOld := len(oldLines)
+	maxNew := len(newLines)
+
+	// Find common prefix
+	prefix := 0
+	for prefix < maxOld && prefix < maxNew && oldLines[prefix] == newLines[prefix] {
+		prefix++
+	}
+
+	// Find common suffix (from the end, not overlapping prefix)
+	suffixOld := maxOld - 1
+	suffixNew := maxNew - 1
+	for suffixOld > prefix && suffixNew > prefix && oldLines[suffixOld] == newLines[suffixNew] {
+		suffixOld--
+		suffixNew--
+	}
+
+	firstChangedLine := prefix + 1 // 1-based
+
+	if prefix > suffixOld+1 && prefix > suffixNew+1 {
+		return "(no changes)", firstChangedLine
+	}
+
+	// Build diff output with context
+	maxLineNum := max(maxOld, maxNew)
+	lineNumWidth := len(fmt.Sprintf("%d", maxLineNum))
+
+	var sb strings.Builder
+
+	// Leading context
+	ctxStart := max(prefix-contextLines, 0)
+	if ctxStart < prefix {
+		if ctxStart > 0 {
+			fmt.Fprintf(&sb, " %*s ...\n", lineNumWidth, "")
+		}
+		for i := ctxStart; i < prefix; i++ {
+			fmt.Fprintf(&sb, " %*d %s\n", lineNumWidth, i+1, oldLines[i])
+		}
+	}
+
+	// Removed lines
+	for i := prefix; i <= suffixOld; i++ {
+		fmt.Fprintf(&sb, "-%*d %s\n", lineNumWidth, i+1, oldLines[i])
+	}
+
+	// Added lines
+	for i := prefix; i <= suffixNew; i++ {
+		fmt.Fprintf(&sb, "+%*d %s\n", lineNumWidth, i+1, newLines[i])
+	}
+
+	// Trailing context
+	trailStart := suffixOld + 1
+	trailEnd := min(trailStart+contextLines, maxOld)
+	for i := trailStart; i < trailEnd; i++ {
+		fmt.Fprintf(&sb, " %*d %s\n", lineNumWidth, i+1, oldLines[i])
+	}
+	if trailEnd < maxOld {
+		fmt.Fprintf(&sb, " %*s ...\n", lineNumWidth, "")
+	}
+
+	return sb.String(), firstChangedLine
+}
