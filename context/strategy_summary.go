@@ -13,6 +13,10 @@ import (
 type FullSummaryConfig struct {
 	// Model performs the actual summary generation.
 	Model agentgo.ChatModel
+	// ContextWindow and ReserveTokens bound the summarization request. The
+	// default engine keeps them aligned with its active model window.
+	ContextWindow int
+	ReserveTokens int
 	// StripImages controls whether images are removed before summarization.
 	// Nil defaults to true.
 	StripImages *bool
@@ -31,65 +35,72 @@ type FullSummaryConfig struct {
 	TurnPrefixPrompt    string
 }
 
-// FullSummaryStrategy rewrites older context into a ContextSummary checkpoint
+// SummaryCompactor rewrites older context into a ContextSummary checkpoint
 // while keeping a recent suffix of messages verbatim.
-type FullSummaryStrategy struct {
+type SummaryCompactor struct {
 	cfg FullSummaryConfig
 }
 
-// NewFullSummary constructs the terminal summary strategy used when lighter
+const minSummaryReserveTokens = 1024
+
+// NewSummaryCompactor constructs the terminal summary compactor used when lighter
 // rewrites are insufficient. Model is required for actual summarization.
-func NewFullSummary(cfg FullSummaryConfig) *FullSummaryStrategy {
-	return &FullSummaryStrategy{cfg: cfg}
+func NewSummaryCompactor(cfg FullSummaryConfig) *SummaryCompactor {
+	return &SummaryCompactor{cfg: cfg}
 }
 
-// keepRecentTokens scales the verbatim tail with the current threshold.
-func (s *FullSummaryStrategy) keepRecentTokens(budget Budget) int {
+func (s *SummaryCompactor) setContextWindow(window, reserve int) {
+	s.cfg.ContextWindow = window
+	s.cfg.ReserveTokens = reserve
+}
+
+// keepRecentTokens scales the verbatim tail with the requested output size.
+func (s *SummaryCompactor) keepRecentTokens(target int) int {
 	if s.cfg.KeepRecentTokens > 0 {
 		return s.cfg.KeepRecentTokens
 	}
-	return min(maxKeepRecentTokens, max(minKeepRecentTokens, budget.Threshold/4))
+	return min(maxKeepRecentTokens, max(minKeepRecentTokens, target/4))
 }
 
-func (s *FullSummaryStrategy) Name() string { return "full_summary" }
-
-func (s *FullSummaryStrategy) Apply(ctx context.Context, _ []agentgo.AgentMessage, view []agentgo.AgentMessage, budget Budget) ([]agentgo.AgentMessage, StrategyResult, error) {
-	if budget.Window <= 0 || budget.Tokens <= budget.Threshold {
-		return view, StrategyResult{Name: s.Name()}, nil
+func (s *SummaryCompactor) Compact(ctx context.Context, messages []agentgo.AgentMessage, expect float64) ([]agentgo.AgentMessage, error) {
+	if expect >= 1 {
+		return messages, nil
 	}
-	return s.apply(ctx, view, budget, false)
-}
-
-func (s *FullSummaryStrategy) ForceApply(ctx context.Context, _ []agentgo.AgentMessage, view []agentgo.AgentMessage, budget Budget) ([]agentgo.AgentMessage, StrategyResult, error) {
-	return s.apply(ctx, view, budget, true)
+	return s.apply(ctx, messages, clampRatio(expect))
 }
 
 // SetPostSummaryHooks replaces the hook list used to inject lightweight
 // reminder messages after a summary checkpoint is produced.
-func (s *FullSummaryStrategy) SetPostSummaryHooks(hooks ...PostSummaryHook) {
+func (s *SummaryCompactor) SetPostSummaryHooks(hooks ...PostSummaryHook) {
 	s.cfg.PostSummaryHooks = hooks
 }
 
-func (s *FullSummaryStrategy) apply(ctx context.Context, view []agentgo.AgentMessage, budget Budget, force bool) ([]agentgo.AgentMessage, StrategyResult, error) {
-	if len(view) == 0 || s.cfg.Model == nil {
-		return view, StrategyResult{Name: s.Name()}, nil
+func (s *SummaryCompactor) apply(ctx context.Context, messages []agentgo.AgentMessage, expect float64) ([]agentgo.AgentMessage, error) {
+	if len(messages) == 0 || s.cfg.Model == nil {
+		return messages, nil
 	}
 
-	ctxWindow := budget.Window
-	reserve := budget.Window - budget.Threshold
-	if reserve <= 0 {
-		reserve = 1
+	tokens := EstimateTotal(messages)
+	target := int(float64(tokens) * expect)
+	ctxWindow := s.cfg.ContextWindow
+	if ctxWindow <= 0 {
+		ctxWindow = max(tokens, 2)
 	}
-	if force {
-		ctxWindow = max(budget.Tokens, 2)
-		reserve = 1
+	reserve := s.cfg.ReserveTokens
+	if reserve <= 0 {
+		reserve = max(1, ctxWindow-target)
+	}
+	if expect == 0 {
+		// A forced compact still needs enough output space for a useful
+		// checkpoint. The resulting ratio may therefore be greater than zero.
+		reserve = minSummaryReserveTokens
 	}
 
 	cfg := summaryRunConfig{
 		Model:               s.cfg.Model,
 		ContextWindow:       ctxWindow,
 		ReserveTokens:       reserve,
-		KeepRecentTokens:    s.keepRecentTokens(budget),
+		KeepRecentTokens:    s.keepRecentTokens(target),
 		SystemPrompt:        s.cfg.SystemPrompt,
 		SummaryPrompt:       s.cfg.SummaryPrompt,
 		UpdateSummaryPrompt: s.cfg.UpdateSummaryPrompt,
@@ -100,17 +111,20 @@ func (s *FullSummaryStrategy) apply(ctx context.Context, view []agentgo.AgentMes
 		stripImages = *s.cfg.StripImages
 	}
 
-	next, info, err := runSummaryCompaction(ctx, cfg, view, stripImages)
+	// Summarize original domain evidence, but keep the already-compacted recent
+	// suffix. Otherwise the terminal stage would undo earlier message/tool
+	// compaction exactly when composing compactors should be most useful.
+	next, info, err := runSummaryCompaction(ctx, cfg, messages, rawSummaryView(messages), stripImages)
 	if err != nil {
-		return nil, StrategyResult{Name: s.Name()}, err
+		return nil, err
 	}
 	if info == nil || !containsContextSummary(next) {
-		return view, StrategyResult{Name: s.Name()}, nil
+		return messages, nil
 	}
 
 	next, err = s.applyHooks(ctx, next, *info)
 	if err != nil {
-		return nil, StrategyResult{Name: s.Name()}, err
+		return nil, err
 	}
 
 	info.TokensAfter = EstimateTotal(next)
@@ -118,15 +132,10 @@ func (s *FullSummaryStrategy) apply(ctx context.Context, view []agentgo.AgentMes
 		info.Duration = time.Millisecond
 	}
 
-	return next, StrategyResult{
-		Applied:     true,
-		TokensSaved: max(0, budget.Tokens-EstimateTotal(next)),
-		Name:        s.Name(),
-		Info:        info,
-	}, nil
+	return next, nil
 }
 
-func (s *FullSummaryStrategy) applyHooks(ctx context.Context, msgs []agentgo.AgentMessage, info SummaryInfo) ([]agentgo.AgentMessage, error) {
+func (s *SummaryCompactor) applyHooks(ctx context.Context, msgs []agentgo.AgentMessage, info SummaryInfo) ([]agentgo.AgentMessage, error) {
 	if len(s.cfg.PostSummaryHooks) == 0 || len(msgs) == 0 {
 		return msgs, nil
 	}

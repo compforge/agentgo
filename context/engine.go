@@ -1,4 +1,4 @@
-// Package context provides strategy-driven context compression for agentgo:
+// Package context provides message-native context compression for agentgo:
 // prompt projection, summary checkpoints, overflow recovery, and usage estimation.
 //
 //	engine := context.NewDefaultEngine(model, 128000)
@@ -10,7 +10,6 @@ package context
 
 import (
 	"context"
-	"slices"
 	"sync"
 
 	"github.com/compforge/agentgo"
@@ -24,21 +23,20 @@ const (
 	defaultMaxConsecutiveFailures = 3
 )
 
-// EngineConfig configures the default strategy-driven ContextEngine.
-// ContextWindow is required. Strategies run in order until the projected view
-// drops below the threshold implied by ContextWindow and ReserveTokens.
+// EngineConfig configures ContextEngine. ContextWindow and Compactor are the
+// only required capabilities for automatic projection.
 type EngineConfig struct {
 	// ContextWindow is the model's maximum supported context window.
 	ContextWindow int
 	// ReserveTokens is the minimum prompt headroom to preserve. When zero, a
 	// conservative default is used.
 	ReserveTokens int
-	// Strategies are applied in order until the projected view fits.
-	Strategies []Strategy
-	// CommitStrategies lists rewrites that replace the runtime baseline.
-	CommitStrategies []string
-	// OnStrategy brackets execution; its finish callback also runs on failure.
-	OnStrategy func(strategy string) func()
+	// Compactor owns the complete reduction policy. The engine only computes
+	// the aggregate target ratio and validates the resulting size.
+	Compactor Compactor
+	// CommitOnProject makes threshold-triggered projections replace the runtime
+	// baseline. Explicit Compact and overflow recovery always commit changes.
+	CommitOnProject bool
 	// OnProject is called when Project rewrites the prompt view.
 	OnProject func(RewriteEvent)
 	// OnRecover is called when RecoverOverflow rewrites the prompt view.
@@ -49,26 +47,15 @@ type EngineConfig struct {
 	MaxConsecutiveFailures int
 }
 
-// RewriteStep records a single strategy execution within the apply pipeline.
-type RewriteStep struct {
-	Name         string
-	Applied      bool
-	TokensBefore int
-	TokensAfter  int
-}
-
 // RewriteEvent reports a projection or recovery rewrite that actually changed
-// the active view. Info is populated when the rewrite produced a summary
-// checkpoint. Steps records every strategy attempted during the pipeline run.
+// the active view. Info is populated when the rewrite produced a summary.
 type RewriteEvent struct {
 	Reason       string
-	Strategy     string
 	Changed      bool
 	Committed    bool
 	TokensBefore int
 	TokensAfter  int
 	Info         *SummaryInfo
-	Steps        []RewriteStep
 	// View is what the rewrite produced. Carried on the event because the hook
 	// fires before the loop installs a committed view: a host that reacts to
 	// Committed by reading the agent's messages would still see the old
@@ -79,8 +66,8 @@ type RewriteEvent struct {
 	Failures int
 }
 
-// ContextEngine implements agentgo.ContextManager with a strategy-driven
-// prompt projection pipeline.
+// ContextEngine implements agentgo.ContextManager with one replaceable
+// compaction policy.
 type ContextEngine struct {
 	cfg EngineConfig
 
@@ -98,38 +85,43 @@ type ContextEngine struct {
 }
 
 type changeState struct {
-	strategy string
-	changed  bool
-	info     *SummaryInfo
+	changed bool
+	info    *SummaryInfo
 }
 
-// NewEngine constructs a ContextEngine from an explicit strategy pipeline.
+// NewEngine constructs a ContextEngine from an explicit compactor.
 func NewEngine(cfg EngineConfig) *ContextEngine {
 	maxFail := cfg.MaxConsecutiveFailures
 	if maxFail <= 0 {
 		maxFail = defaultMaxConsecutiveFailures
 	}
-	return &ContextEngine{cfg: cfg, maxFailures: maxFail}
+	engine := &ContextEngine{cfg: cfg, maxFailures: maxFail}
+	engine.syncCompactorWindow()
+	return engine
 }
 
-// NewDefaultEngine creates a ContextEngine with the default rewrite pipeline:
-// message-owned compaction, tool-result microcompact, light trim, then full
-// summary.
+// NewDefaultEngine creates a ContextEngine with the default compactor: domain
+// message reduction, cheap generic projections, then full summary.
 //
 // This is the recommended entry point for applications that want context
-// management without custom strategy wiring.
+// management without custom compactor wiring.
 //
 //	engine := context.NewDefaultEngine(model, 128000)
 //	agentgo.WithContextManager(engine)
 func NewDefaultEngine(model agentgo.ChatModel, contextWindow int) *ContextEngine {
+	reserve := defaultEngineReserve(contextWindow)
 	return NewEngine(EngineConfig{
 		ContextWindow: contextWindow,
-		Strategies: []Strategy{
-			NewCompactionStrategy(),
-			NewToolResultMicrocompact(ToolResultMicrocompactConfig{}),
-			NewLightTrim(LightTrimConfig{}),
-			NewFullSummary(FullSummaryConfig{Model: model}),
-		},
+		Compactor: Chain(
+			NewMessageCompactor(),
+			NewToolResultCompactor(ToolResultMicrocompactConfig{}),
+			NewLightTrimCompactor(LightTrimConfig{}),
+			NewSummaryCompactor(FullSummaryConfig{
+				Model:         model,
+				ContextWindow: contextWindow,
+				ReserveTokens: reserve,
+			}),
+		),
 	})
 }
 
@@ -139,13 +131,6 @@ func (e *ContextEngine) SetProjectHook(fn func(RewriteEvent)) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.cfg.OnProject = fn
-}
-
-// SetStrategyHook installs the strategy execution hook.
-func (e *ContextEngine) SetStrategyHook(fn func(strategy string) func()) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.cfg.OnStrategy = fn
 }
 
 // SetRecoverHook installs the callback fired when RecoverOverflow rewrites the
@@ -218,7 +203,6 @@ func (e *ContextEngine) Snapshot() *agentgo.ContextSnapshot {
 		ToolMessages:       counts.toolMessages,
 		ClearedToolResults: counts.clearedToolResults,
 		TrimmedTextBlocks:  counts.trimmedTextBlocks,
-		LastStrategy:       e.lastChange.strategy,
 		LastChanged:        e.lastChange.changed,
 		LastCompactedCount: infoValueInt(e.lastChange.info, func(i *SummaryInfo) int { return i.CompactedCount }),
 		LastKeptCount:      infoValueInt(e.lastChange.info, func(i *SummaryInfo) int { return i.KeptCount }),
@@ -242,7 +226,7 @@ func (e *ContextEngine) Project(ctx context.Context, msgs []agentgo.AgentMessage
 	e.mu.Unlock()
 	if tripped {
 		usage := ptrUsage(e.estimateUsage(msgs))
-		e.setLastState(msgs, usage, "skipped", "circuit_breaker", false, nil)
+		e.setLastState(msgs, usage, "skipped", false, nil)
 		e.mu.Lock()
 		if e.maxFailures > 1 {
 			e.consecutiveFailures = e.maxFailures - 1
@@ -253,7 +237,6 @@ func (e *ContextEngine) Project(ctx context.Context, msgs []agentgo.AgentMessage
 		if e.cfg.OnProject != nil {
 			e.cfg.OnProject(RewriteEvent{
 				Reason:       "circuit_breaker",
-				Strategy:     "circuit_breaker",
 				Changed:      false,
 				Committed:    false,
 				TokensBefore: EstimateTotal(msgs),
@@ -281,13 +264,11 @@ func (e *ContextEngine) Project(ctx context.Context, msgs []agentgo.AgentMessage
 	if r.Changed && e.cfg.OnProject != nil {
 		e.cfg.OnProject(RewriteEvent{
 			Reason:       "threshold",
-			Strategy:     r.Strategy,
 			Changed:      true,
-			Committed:    e.commits(r.Strategy),
+			Committed:    e.cfg.CommitOnProject,
 			TokensBefore: EstimateTotal(msgs),
 			TokensAfter:  EstimateTotal(r.View),
 			Info:         r.Info,
-			Steps:        r.Steps,
 			View:         r.View,
 		})
 	}
@@ -295,16 +276,11 @@ func (e *ContextEngine) Project(ctx context.Context, msgs []agentgo.AgentMessage
 		Messages: r.View,
 		Usage:    r.Usage,
 	}
-	if e.commits(r.Strategy) {
+	if r.Changed && e.cfg.CommitOnProject {
 		proj.CommitMessages = copyMessages(r.View)
 		proj.ShouldCommit = true
 	}
 	return proj, nil
-}
-
-// commits reports whether a strategy replaces the runtime baseline.
-func (e *ContextEngine) commits(strategy string) bool {
-	return strategy != "" && slices.Contains(e.cfg.CommitStrategies, strategy)
 }
 
 // Compact performs a forced rewrite suitable for explicit committed actions
@@ -320,7 +296,6 @@ func (e *ContextEngine) Compact(ctx context.Context, msgs []agentgo.AgentMessage
 		Messages:       r.View,
 		Usage:          r.Usage,
 		Changed:        r.Changed,
-		Strategy:       r.Strategy,
 		CompactedCount: infoValueInt(r.Info, func(i *SummaryInfo) int { return i.CompactedCount }),
 		KeptCount:      infoValueInt(r.Info, func(i *SummaryInfo) int { return i.KeptCount }),
 		SplitTurn:      infoValueBool(r.Info, func(i *SummaryInfo) bool { return i.IsSplitTurn }),
@@ -336,7 +311,7 @@ func (e *ContextEngine) RecoverOverflow(ctx context.Context, msgs []agentgo.Agen
 	if err != nil {
 		return agentgo.ContextRecoveryResult{}, err
 	}
-	e.setLastState(r.View, r.Usage, "recovered", r.Strategy, r.Changed, r.Info)
+	e.setLastState(r.View, r.Usage, "recovered", r.Changed, r.Info)
 	// Successful recovery proves the LLM is reachable — reset circuit breaker.
 	if r.Changed {
 		e.mu.Lock()
@@ -346,13 +321,11 @@ func (e *ContextEngine) RecoverOverflow(ctx context.Context, msgs []agentgo.Agen
 	if r.Changed && e.cfg.OnRecover != nil {
 		e.cfg.OnRecover(RewriteEvent{
 			Reason:       "overflow",
-			Strategy:     r.Strategy,
 			Changed:      true,
 			Committed:    r.Changed,
 			TokensBefore: EstimateTotal(msgs),
 			TokensAfter:  EstimateTotal(r.View),
 			Info:         r.Info,
-			Steps:        r.Steps,
 			View:         r.View,
 		})
 	}
@@ -362,7 +335,6 @@ func (e *ContextEngine) RecoverOverflow(ctx context.Context, msgs []agentgo.Agen
 		Usage:          r.Usage,
 		Changed:        r.Changed,
 		ShouldCommit:   r.Changed,
-		Strategy:       r.Strategy,
 		CompactedCount: infoValueInt(r.Info, func(i *SummaryInfo) int { return i.CompactedCount }),
 		KeptCount:      infoValueInt(r.Info, func(i *SummaryInfo) int { return i.KeptCount }),
 		SplitTurn:      infoValueBool(r.Info, func(i *SummaryInfo) bool { return i.IsSplitTurn }),
@@ -370,147 +342,64 @@ func (e *ContextEngine) RecoverOverflow(ctx context.Context, msgs []agentgo.Agen
 }
 
 type applyResult struct {
-	View     []agentgo.AgentMessage
-	Usage    *agentgo.ContextUsage
-	Changed  bool
-	Info     *SummaryInfo
-	Strategy string
-	Steps    []RewriteStep
+	View    []agentgo.AgentMessage
+	Usage   *agentgo.ContextUsage
+	Changed bool
+	Info    *SummaryInfo
 }
 
 func (e *ContextEngine) apply(ctx context.Context, msgs []agentgo.AgentMessage, force bool) (applyResult, error) {
 	view := copyMessages(msgs)
-	budget := e.computeBudget(view)
-	if len(e.cfg.Strategies) == 0 {
+	before := EstimateContextTokens(view).Tokens
+	if e.cfg.Compactor == nil {
 		usage := ptrUsage(e.estimateUsage(view))
-		e.setLastState(view, usage, scopeFor(force), "", false, nil)
+		e.setLastState(view, usage, scopeFor(force), false, nil)
 		return applyResult{View: view, Usage: usage}, nil
 	}
 
-	var r applyResult
-
+	expect := 0.0
 	if !force {
-		for _, strategy := range e.cfg.Strategies {
-			if budget.Window <= 0 || budget.Tokens <= budget.Threshold {
-				break
-			}
-
-			tokensBefore := budget.Tokens
-			nextView, result, err := e.runStrategy(ctx, strategy, view, budget)
-			if err != nil {
-				return r, err
-			}
-
-			tokensAfter := tokensBefore
-			if result.Applied {
-				view = nextView
-				r.Changed = true
-				r.Strategy = result.Name
-				budget = e.computeBudget(view)
-				tokensAfter = budget.Tokens
-			}
-			if result.Info != nil {
-				r.Info = result.Info
-			}
-
-			r.Steps = append(r.Steps, RewriteStep{
-				Name:         result.Name,
-				Applied:      result.Applied,
-				TokensBefore: tokensBefore,
-				TokensAfter:  tokensAfter,
-			})
-
-			if result.Applied && budget.Tokens <= budget.Threshold {
-				break
-			}
+		window := e.cfg.ContextWindow
+		threshold := e.threshold(window)
+		if window <= 0 || before <= threshold {
+			usage := ptrUsage(e.estimateUsage(view))
+			e.setLastState(view, usage, scopeFor(false), false, nil)
+			return applyResult{View: view, Usage: usage}, nil
 		}
-	} else {
-		for _, strategy := range e.cfg.Strategies {
-			forced, ok := strategy.(ForceCompactionStrategy)
-			if !ok {
-				continue
-			}
-			tokensBefore := budget.Tokens
-			nextView, result, err := e.forceStrategy(ctx, forced, msgs, budget)
-			if err != nil {
-				return r, err
-			}
-
-			tokensAfter := tokensBefore
-			if result.Applied {
-				view = nextView
-				r.Changed = true
-				r.Strategy = result.Name
-				budget = e.computeBudget(view)
-				tokensAfter = budget.Tokens
-			}
-			if result.Info != nil {
-				r.Info = result.Info
-			}
-
-			r.Steps = append(r.Steps, RewriteStep{
-				Name:         result.Name,
-				Applied:      result.Applied,
-				TokensBefore: tokensBefore,
-				TokensAfter:  tokensAfter,
-			})
-
-			if result.Applied {
-				break
-			}
-		}
+		expect = float64(threshold) / float64(before)
 	}
 
-	r.View = view
-	r.Usage = ptrUsage(e.estimateUsage(view))
-	e.setLastState(view, r.Usage, scopeFor(force), r.Strategy, r.Changed, r.Info)
-	return r, nil
-}
-
-// Strategy calls are centralized so hooks cannot be bypassed.
-func (e *ContextEngine) runStrategy(ctx context.Context, s Strategy, view []agentgo.AgentMessage, budget Budget) ([]agentgo.AgentMessage, StrategyResult, error) {
-	defer e.beginStrategy(s.Name())()
-	return s.Apply(ctx, e.snapshotTranscript(), view, budget)
-}
-
-func (e *ContextEngine) forceStrategy(ctx context.Context, s ForceCompactionStrategy, msgs []agentgo.AgentMessage, budget Budget) ([]agentgo.AgentMessage, StrategyResult, error) {
-	defer e.beginStrategy(s.Name())()
-	return s.ForceApply(ctx, e.snapshotTranscript(), copyMessages(msgs), budget)
-}
-
-// beginStrategy always returns a callable finish function.
-func (e *ContextEngine) beginStrategy(name string) func() {
-	e.mu.Lock()
-	hook := e.cfg.OnStrategy
-	e.mu.Unlock()
-	if hook == nil {
-		return func() {}
+	next, err := e.cfg.Compactor.Compact(ctx, view, clampRatio(expect))
+	if err != nil {
+		return applyResult{}, err
 	}
-	if done := hook(name); done != nil {
-		return done
+	after := EstimateContextTokens(next).Tokens
+	changed := after < before
+	if !changed {
+		next = view
 	}
-	return func() {}
+	info := summaryInfoFromView(next)
+	usage := ptrUsage(e.estimateUsage(next))
+	e.setLastState(next, usage, scopeFor(force), changed, info)
+	return applyResult{View: next, Usage: usage, Changed: changed, Info: info}, nil
 }
 
-func (e *ContextEngine) computeBudget(msgs []agentgo.AgentMessage) Budget {
-	window := e.cfg.ContextWindow
-	estimate := EstimateContextTokens(msgs)
-	return Budget{
-		Tokens:    estimate.Tokens,
-		Window:    window,
-		Threshold: max(0, window-e.reserveTokens(window)),
-	}
+func (e *ContextEngine) threshold(window int) int {
+	return max(0, window-e.reserveTokens(window))
 }
 
-// reserveTokens resolves dynamic headroom after window changes.
 func (e *ContextEngine) reserveTokens(window int) int {
 	if e.cfg.ReserveTokens > 0 {
 		return e.cfg.ReserveTokens
 	}
+	return defaultEngineReserve(window)
+}
+
+func defaultEngineReserve(window int) int {
 	return min(maxEngineReserveTokens, max(minEngineReserveTokens, int(float64(window)*defaultReserveRatio)))
 }
 
-func (e *ContextEngine) setLastState(view []agentgo.AgentMessage, usage *agentgo.ContextUsage, scope, strategy string, changed bool, info *SummaryInfo) {
+func (e *ContextEngine) setLastState(view []agentgo.AgentMessage, usage *agentgo.ContextUsage, scope string, changed bool, info *SummaryInfo) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.lastView = copyMessages(view)
@@ -521,11 +410,10 @@ func (e *ContextEngine) setLastState(view []agentgo.AgentMessage, usage *agentgo
 		cp := *usage
 		e.lastUsage = &cp
 	}
-	if strategy != "" || changed || info != nil {
+	if changed || info != nil {
 		e.lastChange = changeState{
-			strategy: strategy,
-			changed:  changed,
-			info:     copySummaryInfo(info),
+			changed: changed,
+			info:    copySummaryInfo(info),
 		}
 	}
 }
@@ -571,12 +459,6 @@ func infoValueBool(info *SummaryInfo, getter func(*SummaryInfo) bool) bool {
 	return getter(info)
 }
 
-func (e *ContextEngine) snapshotTranscript() []agentgo.AgentMessage {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return copyMessages(e.transcript)
-}
-
 type contextViewCounts struct {
 	summaryMessages    int
 	toolMessages       int
@@ -587,29 +469,50 @@ type contextViewCounts struct {
 func summarizeContextView(msgs []agentgo.AgentMessage) contextViewCounts {
 	var counts contextViewCounts
 	for _, am := range msgs {
-		switch msg := am.(type) {
-		case ContextSummary:
+		if _, ok := am.(ContextSummary); ok {
 			counts.summaryMessages++
-		case agentgo.Message:
-			if msg.Role == agentgo.RoleTool {
-				counts.toolMessages++
-			}
-			if compacted, _ := msg.Metadata["compacted_tool_result"].(bool); compacted {
-				counts.clearedToolResults++
-			}
-			switch v := msg.Metadata["trimmed_text_blocks"].(type) {
-			case int:
-				counts.trimmedTextBlocks += v
-			case int32:
-				counts.trimmedTextBlocks += int(v)
-			case int64:
-				counts.trimmedTextBlocks += int(v)
-			case float64:
-				counts.trimmedTextBlocks += int(v)
-			}
+		}
+		msg, include := am.ToMessage()
+		if !include {
+			continue
+		}
+		if msg.Role == agentgo.RoleTool {
+			counts.toolMessages++
+		}
+		if compacted, _ := msg.Metadata["compacted_tool_result"].(bool); compacted {
+			counts.clearedToolResults++
+		}
+		switch v := msg.Metadata["trimmed_text_blocks"].(type) {
+		case int:
+			counts.trimmedTextBlocks += v
+		case int32:
+			counts.trimmedTextBlocks += int(v)
+		case int64:
+			counts.trimmedTextBlocks += int(v)
+		case float64:
+			counts.trimmedTextBlocks += int(v)
 		}
 	}
 	return counts
+}
+
+func summaryInfoFromView(msgs []agentgo.AgentMessage) *SummaryInfo {
+	for _, message := range msgs {
+		summary, ok := message.(ContextSummary)
+		if !ok {
+			continue
+		}
+		return &SummaryInfo{
+			TokensBefore:   summary.TokensBefore,
+			TokensAfter:    EstimateTotal(msgs),
+			CompactedCount: summary.Compacted,
+			KeptCount:      summary.Kept,
+			IsSplitTurn:    summary.SplitTurn,
+			ReadFiles:      append([]string(nil), summary.ReadFiles...),
+			ModifiedFiles:  append([]string(nil), summary.ModifiedFiles...),
+		}
+	}
+	return nil
 }
 
 func copySummaryInfo(info *SummaryInfo) *SummaryInfo {
@@ -650,8 +553,13 @@ func (e *ContextEngine) EstimateContext(msgs []agentgo.AgentMessage) (tokens, us
 // SetContextWindow updates the context window size used for threshold calculations.
 func (e *ContextEngine) SetContextWindow(n int) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.cfg.ContextWindow = n
+	reserve := e.reserveTokens(n)
+	compactor := e.cfg.Compactor
+	e.mu.Unlock()
+	if aware, ok := compactor.(windowAwareCompactor); ok {
+		aware.setContextWindow(n, reserve)
+	}
 }
 
 // SetReserveTokens updates the prompt headroom reserved when computing the
@@ -659,8 +567,20 @@ func (e *ContextEngine) SetContextWindow(n int) {
 // next threshold calculation.
 func (e *ContextEngine) SetReserveTokens(n int) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.cfg.ReserveTokens = n
+	window := e.cfg.ContextWindow
+	reserve := e.reserveTokens(window)
+	compactor := e.cfg.Compactor
+	e.mu.Unlock()
+	if aware, ok := compactor.(windowAwareCompactor); ok {
+		aware.setContextWindow(window, reserve)
+	}
+}
+
+func (e *ContextEngine) syncCompactorWindow() {
+	if aware, ok := e.cfg.Compactor.(windowAwareCompactor); ok {
+		aware.setContextWindow(e.cfg.ContextWindow, e.reserveTokens(e.cfg.ContextWindow))
+	}
 }
 
 // ContextWindow implements agentgo.ContextWindowProvider.

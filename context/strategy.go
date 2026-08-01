@@ -6,44 +6,60 @@ import (
 	"github.com/compforge/agentgo"
 )
 
-// Budget describes the current context pressure seen by a strategy.
-// Threshold is the maximum token estimate allowed before a rewrite is needed.
-type Budget struct {
-	Tokens    int
-	Window    int
-	Threshold int
+// Compactor is the only extension point for context reduction. AgentGo ships
+// a default policy; applications may replace it directly. expect is the
+// desired output ratio relative to the current model view: 1 means no change
+// and 0 asks for the strongest reduction the compactor can provide.
+type Compactor interface {
+	Compact(ctx context.Context, messages []agentgo.AgentMessage, expect float64) ([]agentgo.AgentMessage, error)
 }
 
-// StrategyResult reports whether a strategy rewrote the prompt view.
-// Info is populated when the strategy produced a summary checkpoint.
-type StrategyResult struct {
-	Applied     bool
-	TokensSaved int
-	Name        string
-	Info        *SummaryInfo
+type compactorChain struct {
+	compactors []Compactor
 }
 
-// Strategy rewrites the current prompt view using the full transcript and
-// current token budget.
-//
-// transcript is the runtime baseline remembered by the engine. view is the
-// current projected view after any earlier strategies in the pipeline.
-type Strategy interface {
-	Name() string
-	Apply(ctx context.Context, transcript []agentgo.AgentMessage, view []agentgo.AgentMessage, budget Budget) ([]agentgo.AgentMessage, StrategyResult, error)
+type windowAwareCompactor interface {
+	setContextWindow(window, reserve int)
 }
 
-// ForceCompactionStrategy is used for explicit /compact and overflow recovery.
-// It can choose to run even when the regular threshold is not crossed.
-// ForceApply should base its rewrite on the full transcript-quality input
-// required by the strategy rather than on a previously degraded prompt view.
-type ForceCompactionStrategy interface {
-	Strategy
-	ForceApply(ctx context.Context, transcript []agentgo.AgentMessage, view []agentgo.AgentMessage, budget Budget) ([]agentgo.AgentMessage, StrategyResult, error)
+// Chain combines compactors into one policy. Every stage receives the ratio
+// still required to reach the original request, and later stages are skipped
+// once that target has been met.
+func Chain(compactors ...Compactor) Compactor {
+	return &compactorChain{compactors: append([]Compactor(nil), compactors...)}
+}
+
+func (c *compactorChain) Compact(ctx context.Context, messages []agentgo.AgentMessage, expect float64) ([]agentgo.AgentMessage, error) {
+	view := copyMessages(messages)
+	target := int(float64(EstimateTotal(view)) * clampRatio(expect))
+	for _, compactor := range c.compactors {
+		if EstimateTotal(view) <= target {
+			break
+		}
+		current := EstimateTotal(view)
+		stageExpect := 0.0
+		if current > 0 {
+			stageExpect = float64(target) / float64(current)
+		}
+		next, err := compactor.Compact(ctx, view, clampRatio(stageExpect))
+		if err != nil {
+			return nil, err
+		}
+		view = next
+	}
+	return view, nil
+}
+
+func (c *compactorChain) setContextWindow(window, reserve int) {
+	for _, compactor := range c.compactors {
+		if aware, ok := compactor.(windowAwareCompactor); ok {
+			aware.setContextWindow(window, reserve)
+		}
+	}
 }
 
 // ToolClassifier returns true when a tool result can be aggressively rewritten
-// by tool-result microcompact strategies.
+// by a tool-result compactor.
 type ToolClassifier func(toolName string) bool
 
 // PostSummaryHook injects lightweight reminder messages after a summary

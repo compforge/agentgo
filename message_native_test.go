@@ -18,7 +18,11 @@ type applicationToolResult struct {
 
 func (m applicationToolResult) GetRole() Role           { return RoleTool }
 func (m applicationToolResult) GetTimestamp() time.Time { return time.Time{} }
+func (m applicationToolResult) Raw() AgentMessage       { return m }
 func (m applicationToolResult) Priority() int           { return 0 }
+func (m applicationToolResult) Compact(float64) (AgentMessage, float64) {
+	return m, 1
+}
 func (m applicationToolResult) TextContent() string     { return string(m.result.Content) }
 func (m applicationToolResult) ThinkingContent() string { return "" }
 func (m applicationToolResult) HasToolCalls() bool      { return false }
@@ -28,7 +32,11 @@ func (m applicationToolResult) ToMessage() (Message, bool) {
 
 func (m applicationMessage) GetRole() Role           { return RoleUser }
 func (m applicationMessage) GetTimestamp() time.Time { return time.Time{} }
+func (m applicationMessage) Raw() AgentMessage       { return m }
 func (m applicationMessage) Priority() int           { return 0 }
+func (m applicationMessage) Compact(float64) (AgentMessage, float64) {
+	return m, 1
+}
 func (m applicationMessage) TextContent() string     { return m.text }
 func (m applicationMessage) ThinkingContent() string { return "" }
 func (m applicationMessage) HasToolCalls() bool      { return false }

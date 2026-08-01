@@ -200,30 +200,27 @@ func NormalizeThinkingLevel(level ThinkingLevel) ThinkingLevel {
 // AgentMessage is the application-layer message abstraction used by the
 // agent loop, context management, events, and persistence. Message implements
 // this interface; applications can add richer message types without lowering
-// them to the model protocol until ToMessage is called. Priority is application
-// information importance: higher values are preserved longer by context
-// policies and are not part of the model-level Message.
+// them to the model protocol until ToMessage is called.
+//
+// Raw returns the original domain message regardless of the current compacted
+// representation. Compact asks the message for the highest-fidelity
+// representation that fits expect, where 1 is the raw size and 0 means the
+// smallest representation the domain can provide. actual is the size ratio the
+// returned value reached, always relative to Raw. Compact must be monotonic and
+// must not mutate the receiver.
+//
+// Priority is application information importance: higher values are preserved
+// longer by context policies and are not part of the model-level Message.
 type AgentMessage interface {
 	GetRole() Role
 	GetTimestamp() time.Time
+	Raw() AgentMessage
 	Priority() int
+	Compact(expect float64) (next AgentMessage, actual float64)
 	TextContent() string
 	ThinkingContent() string
 	HasToolCalls() bool
 	ToMessage() (message Message, include bool)
-}
-
-// CompactableAgentMessage can produce a progressively smaller semantic
-// representation of itself. Each call advances one step in that message
-// type's own compaction sequence; no shared notion of compaction levels is
-// imposed across unrelated message types.
-//
-// Implementations must return a new value rather than mutate the receiver and
-// preserve Priority across stages. ok=false means the message has no smaller
-// representation.
-type CompactableAgentMessage interface {
-	AgentMessage
-	Compact() (next AgentMessage, ok bool)
 }
 
 // Message is an LLM-level message with structured content blocks.
@@ -238,7 +235,11 @@ type Message struct {
 
 func (m Message) GetRole() Role           { return m.Role }
 func (m Message) GetTimestamp() time.Time { return m.Timestamp }
+func (m Message) Raw() AgentMessage       { return m }
 func (m Message) Priority() int           { return 0 }
+func (m Message) Compact(float64) (AgentMessage, float64) {
+	return m, 1
+}
 
 // ToMessage returns the model representation of m. Failed and aborted model
 // responses stay available to persistence and observers but are not replayed
