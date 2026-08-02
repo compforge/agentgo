@@ -56,6 +56,12 @@ type LoopConfig struct {
 	MaxToolErrors int           // consecutive tool failure threshold per tool, 0 = unlimited
 	ThinkingLevel ThinkingLevel // reasoning depth
 
+	// BeforeTurn runs before each model call. Messages it returns are committed
+	// before the request. AfterTurn runs after a normal assistant/tool turn has
+	// been committed and before the loop decides whether to continue or stop.
+	BeforeTurn BeforeTurnHook
+	AfterTurn  AfterTurnHook
+
 	// Context lifecycle. ContextManager drives prompt projection, overflow
 	// recovery, and usage reporting. AgentMessage values lower themselves to
 	// Message only at the model-call boundary.

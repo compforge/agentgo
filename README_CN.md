@@ -226,6 +226,12 @@ agent.Abort()                                            // 立即取消
 
 如果消息必须并入「下一次显式用户输入」（而不是 Agent 队列），应继续放在应用层处理。
 
+### Turn Hook
+
+`WithAfterTurn` 在一轮 assistant/tool 消息完整提交后执行；`WithBeforeTurn`
+在下一次模型调用前执行，并可提交准备好的消息。应用可以通过两者共享状态表达阶段边界，
+AgentGo 无需理解这些阶段的业务含义。
+
 ### 事件流
 
 所有生命周期事件通过单一通道输出 —— 订阅即可驱动任何 UI：
@@ -233,6 +239,8 @@ agent.Abort()                                            // 立即取消
 ```go
 agent.Subscribe(func(ev agentgo.Event) {
     switch ev.Type {
+    case agentgo.EventTurnStart:       // 模型/工具轮次开始
+    case agentgo.EventTurnEnd:         // assistant 和工具结果已提交
     case agentgo.EventMessageStart:    // assistant 开始流式输出
     case agentgo.EventMessageUpdate:   // 流式 token 增量
     case agentgo.EventMessageEnd:      // 消息完成

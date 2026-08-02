@@ -46,6 +46,8 @@ type Agent struct {
 	abortMarkerToolText  string
 	messageCommitter     func(AgentMessage) error
 	onMessage            func(AgentMessage)
+	beforeTurn           BeforeTurnHook
+	afterTurn            AfterTurnHook
 	stopGuard            StopGuard
 	cacheLastMessage     string
 	promptCacheKey       string
@@ -775,6 +777,8 @@ func (a *Agent) buildConfig() LoopConfig {
 		MaxToolConcurrency:    a.maxToolConcurrency,
 		ShouldEmitAbortMarker: a.wantAbortMarker.Load,
 		OnMessage:             a.onMessage,
+		BeforeTurn:            a.beforeTurn,
+		AfterTurn:             a.afterTurn,
 		StopGuard:             a.stopGuard,
 		LengthRecoveryPrompt:  a.lengthRecoveryPrompt,
 		AbortMarkerText:       a.abortMarkerText,
