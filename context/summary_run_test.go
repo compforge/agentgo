@@ -169,3 +169,45 @@ func TestEstimateContextTokens_UsesLastAssistantUsage(t *testing.T) {
 		t.Fatalf("unexpected total tokens: %+v", estimate)
 	}
 }
+
+func TestEstimateContextTokensUsesApplicationProjection(t *testing.T) {
+	assistant := agentgo.Message{
+		Role:    agentgo.RoleAssistant,
+		Content: []agentgo.ContentBlock{agentgo.TextBlock("done")},
+		Usage:   &agentgo.Usage{TotalTokens: 120},
+	}
+	wrapped := newProjectedMessage(assistant, assistant)
+
+	estimate := EstimateContextTokens([]agentgo.AgentMessage{wrapped, agentgo.UserMsg("next")})
+	if estimate.UsageTokens != 120 {
+		t.Fatalf("usage tokens = %d, want 120", estimate.UsageTokens)
+	}
+	if estimate.LastUsageIndex != 0 {
+		t.Fatalf("last usage index = %d, want 0", estimate.LastUsageIndex)
+	}
+}
+
+func TestStripImageBlocksUsesApplicationProjection(t *testing.T) {
+	projected := agentgo.Message{
+		Role: agentgo.RoleUser,
+		Content: []agentgo.ContentBlock{
+			agentgo.TextBlock("screenshot"),
+			agentgo.ImageURLBlock("https://example.com/image.png"),
+		},
+	}
+	wrapped := newProjectedMessage(agentgo.UserMsg("raw image message"), projected)
+
+	out := stripImageBlocks([]agentgo.AgentMessage{wrapped})
+	message, include := out[0].ToMessage()
+	if !include {
+		t.Fatal("projected message was dropped")
+	}
+	for _, block := range message.Content {
+		if block.Type == agentgo.ContentImage {
+			t.Fatal("image block was not stripped")
+		}
+	}
+	if !strings.Contains(message.TextContent(), "image content omitted") {
+		t.Fatalf("missing image placeholder: %q", message.TextContent())
+	}
+}

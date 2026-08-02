@@ -2,6 +2,7 @@ package agentgo
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -14,6 +15,34 @@ type applicationMessage struct {
 type applicationToolResult struct {
 	call   ToolCall
 	result ToolResult
+}
+
+type applicationToolReference struct{ name string }
+
+func (m applicationToolReference) GetRole() Role           { return RoleAssistant }
+func (m applicationToolReference) GetTimestamp() time.Time { return time.Time{} }
+func (m applicationToolReference) Raw() AgentMessage       { return m }
+func (m applicationToolReference) Priority() int           { return 0 }
+func (m applicationToolReference) Compact(float64) (AgentMessage, float64) {
+	return m, 1
+}
+func (m applicationToolReference) TextContent() string     { return "" }
+func (m applicationToolReference) ThinkingContent() string { return "" }
+func (m applicationToolReference) HasToolCalls() bool      { return false }
+func (m applicationToolReference) ToMessage() (Message, bool) {
+	return Message{Role: RoleAssistant, Content: []ContentBlock{ToolRefBlock(m.name)}}, true
+}
+
+type recordingDeferTool struct{ activated []string }
+
+func (t *recordingDeferTool) Name() string             { return "tool_search" }
+func (t *recordingDeferTool) Description() string      { return "tool search" }
+func (t *recordingDeferTool) Schema() map[string]any   { return map[string]any{} }
+func (t *recordingDeferTool) IsDeferred(string) bool   { return false }
+func (t *recordingDeferTool) WasDeferred(string) bool  { return true }
+func (t *recordingDeferTool) Activate(names ...string) { t.activated = append(t.activated, names...) }
+func (t *recordingDeferTool) Execute(context.Context, json.RawMessage) (json.RawMessage, error) {
+	return nil, nil
 }
 
 func (m applicationToolResult) GetRole() Role           { return RoleTool }
@@ -54,6 +83,15 @@ func TestToMessagesUsesApplicationProjection(t *testing.T) {
 	got := ToMessages(messages)
 	if len(got) != 1 || got[0].TextContent() != "domain context" {
 		t.Fatalf("ToMessages() = %#v, want only projected domain message", got)
+	}
+}
+
+func TestReactivateDeferredUsesApplicationProjection(t *testing.T) {
+	tool := &recordingDeferTool{}
+	ReactivateDeferred([]Tool{tool}, []AgentMessage{applicationToolReference{name: "read"}})
+
+	if len(tool.activated) != 1 || tool.activated[0] != "read" {
+		t.Fatalf("activated = %v, want [read]", tool.activated)
 	}
 }
 

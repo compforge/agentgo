@@ -1,6 +1,7 @@
 package subagent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -389,6 +390,33 @@ type errorWriteCloser struct {
 	closeErr error
 }
 
+type bufferWriteCloser struct{ bytes.Buffer }
+
+func (*bufferWriteCloser) Close() error { return nil }
+
+type applicationToolMessage struct {
+	callID string
+	text   string
+}
+
+func (m applicationToolMessage) GetRole() agentgo.Role                           { return agentgo.RoleTool }
+func (m applicationToolMessage) GetTimestamp() time.Time                         { return time.Time{} }
+func (m applicationToolMessage) Raw() agentgo.AgentMessage                       { return m }
+func (m applicationToolMessage) Priority() int                                   { return 0 }
+func (m applicationToolMessage) TextContent() string                             { return m.text }
+func (m applicationToolMessage) ThinkingContent() string                         { return "" }
+func (m applicationToolMessage) HasToolCalls() bool                              { return false }
+func (m applicationToolMessage) Compact(float64) (agentgo.AgentMessage, float64) { return m, 1 }
+func (m applicationToolMessage) ToMessage() (agentgo.Message, bool) {
+	return agentgo.Message{
+		Role:    agentgo.RoleTool,
+		Content: []agentgo.ContentBlock{agentgo.TextBlock(m.text)},
+		Metadata: map[string]any{
+			"tool_call_id": m.callID,
+		},
+	}, true
+}
+
 func (w *errorWriteCloser) Write(p []byte) (int, error) {
 	if w.writeErr != nil {
 		return 0, w.writeErr
@@ -482,6 +510,62 @@ func TestTool_BackgroundOutputErrorsFailTask(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestToolBackgroundOutputIncludesApplicationMessages(t *testing.T) {
+	noop := agentgo.NewFuncTool("noop", "noop", map[string]any{
+		"type": "object", "properties": map[string]any{},
+	}, func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		return json.Marshal("raw result")
+	})
+	model := newSequential(func(i int, _ *agentgo.LLMRequest) (*agentgo.LLMResponse, error) {
+		if i == 0 {
+			return &agentgo.LLMResponse{Message: agentgo.Message{
+				Role: agentgo.RoleAssistant,
+				Content: []agentgo.ContentBlock{agentgo.ToolCallBlock(agentgo.ToolCall{
+					ID: "tc1", Name: "noop", Args: json.RawMessage(`{}`),
+				})},
+				StopReason: agentgo.StopReasonToolUse,
+			}}, nil
+		}
+		return &agentgo.LLMResponse{Message: agentgo.Message{
+			Role:       agentgo.RoleAssistant,
+			Content:    []agentgo.ContentBlock{agentgo.TextBlock("done")},
+			StopReason: agentgo.StopReasonStop,
+		}}, nil
+	})
+	buffer := &bufferWriteCloser{}
+	runtime := task.NewRuntime()
+	tool := NewRunner(Config{
+		Name: "writer", Description: "writer", Model: model, Tools: []agentgo.Tool{noop}, MaxTurns: 3,
+		ToolResultMessageFactory: func(call agentgo.ToolCall, _ agentgo.ToolResult) agentgo.AgentMessage {
+			return applicationToolMessage{callID: call.ID, text: "domain tool result"}
+		},
+	}).AsTool()
+	tool.SetTaskRuntime(runtime)
+	tool.SetBgOutputFactory(func(string, string) (io.WriteCloser, string, error) {
+		return buffer, "output.jsonl", nil
+	})
+
+	raw, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"writer","task":"write","background":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := parseResult(t, raw)
+	taskID, _ := result["task_id"].(string)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if entry := runtime.Get(taskID); entry != nil && entry.Status.IsTerminal() {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if entry := runtime.Get(taskID); entry == nil || !entry.Status.IsTerminal() {
+		t.Fatalf("background task did not finish: %+v", entry)
+	}
+	if !strings.Contains(buffer.String(), "domain tool result") {
+		t.Fatalf("background output dropped application message:\n%s", buffer.String())
 	}
 }
 
