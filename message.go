@@ -486,9 +486,14 @@ func RepairMessageSequence(msgs []Message) []Message {
 // Message Serialization Helpers
 // ---------------------------------------------------------------------------
 
-// CollectMessages extracts concrete model Messages from an AgentMessage
-// slice, dropping application-specific types. Applications that persist
-// custom AgentMessage values need their own tagged codec instead.
+// AgentMessage is the richer long-term session-log unit because it preserves
+// application semantics. The built-in helpers remain Message-granular for now:
+// prompt debugging needs the exact model projection too, while recording both
+// views would duplicate every transcript entry. Applications that need domain
+// replay should persist AgentMessage with their own tagged codec.
+
+// CollectMessages extracts concrete model Messages from an AgentMessage slice,
+// dropping application-specific types.
 func CollectMessages(msgs []AgentMessage) []Message {
 	out := make([]Message, 0, len(msgs))
 	for _, m := range msgs {
