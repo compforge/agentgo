@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,7 @@ func TestAgentLoop_SimpleTextResponse(t *testing.T) {
 	requireEvent(t, events, EventAgentStart)
 	requireEvent(t, events, EventAgentEnd)
 	requireEvent(t, events, EventTurnStart)
+	requireEvent(t, events, EventTurnEnd)
 	requireEvent(t, events, EventModelResponse)
 
 	ev, _ := findEvent(events, EventAgentEnd)
@@ -34,6 +36,108 @@ func TestAgentLoop_SimpleTextResponse(t *testing.T) {
 	if ev.Summary.TurnCount != 1 || ev.Summary.ToolCalls != 0 || ev.Summary.ToolErrors != 0 || ev.Summary.EndReason != EndReasonStop {
 		t.Fatalf("unexpected summary: %#v", ev.Summary)
 	}
+}
+
+func TestAgentLoop_TurnHooksPrepareNextModelCall(t *testing.T) {
+	finish := NewFuncTool("finish_search", "finish search", nil,
+		func(context.Context, json.RawMessage) (json.RawMessage, error) {
+			return json.RawMessage(`{"ok":true}`), nil
+		})
+
+	prepared := false
+	var beforeTurns, afterTurns []int
+	model := sequentialModel(func(i int, req *LLMRequest) (*LLMResponse, error) {
+		if i == 0 {
+			return &LLMResponse{Message: toolCallMsg(ToolCall{
+				ID: "finish-1", Name: "finish_search", Args: json.RawMessage(`{}`),
+			})}, nil
+		}
+		if got := req.Messages[len(req.Messages)-1].TextContent(); got != "prepared answer context" {
+			t.Fatalf("last message before answer = %q, want prepared context", got)
+		}
+		return &LLMResponse{Message: assistantMsg("answer", StopReasonStop)}, nil
+	})
+
+	events := runTestLoop(t,
+		[]AgentMessage{UserMsg("question")},
+		AgentContext{Tools: []Tool{finish}},
+		LoopConfig{
+			Model: model,
+			BeforeTurn: func(_ context.Context, turn BeforeTurnContext) ([]AgentMessage, error) {
+				beforeTurns = append(beforeTurns, turn.TurnIndex)
+				if prepared {
+					prepared = false
+					return []AgentMessage{UserMsg("prepared answer context")}, nil
+				}
+				return nil, nil
+			},
+			AfterTurn: func(_ context.Context, turn AfterTurnContext) error {
+				afterTurns = append(afterTurns, turn.TurnIndex)
+				if len(turn.ToolResults) == 1 && turn.ToolResults[0].ToolName == "finish_search" {
+					prepared = true
+				}
+				return nil
+			},
+		},
+	)
+
+	if !slices.Equal(beforeTurns, []int{1, 2}) {
+		t.Fatalf("before turn calls = %v, want [1 2]", beforeTurns)
+	}
+	if !slices.Equal(afterTurns, []int{1, 2}) {
+		t.Fatalf("after turn calls = %v, want [1 2]", afterTurns)
+	}
+	if got := countEvent(events, EventTurnEnd); got != 2 {
+		t.Fatalf("turn_end events = %d, want 2", got)
+	}
+}
+
+func TestAgentLoop_TurnHookErrorStopsRun(t *testing.T) {
+	t.Run("before turn", func(t *testing.T) {
+		modelCalls := 0
+		events := runTestLoop(t,
+			[]AgentMessage{UserMsg("question")},
+			AgentContext{},
+			LoopConfig{
+				Model: funcModel(func(context.Context, *LLMRequest) (*LLMResponse, error) {
+					modelCalls++
+					return &LLMResponse{Message: assistantMsg("unexpected", StopReasonStop)}, nil
+				}),
+				BeforeTurn: func(context.Context, BeforeTurnContext) ([]AgentMessage, error) {
+					return nil, errors.New("prepare failed")
+				},
+			},
+		)
+
+		if modelCalls != 0 {
+			t.Fatalf("model calls = %d, want 0", modelCalls)
+		}
+		requireEvent(t, events, EventError)
+		end, _ := findEvent(events, EventAgentEnd)
+		if end.Summary == nil || end.Summary.EndReason != EndReasonError {
+			t.Fatalf("unexpected summary: %#v", end.Summary)
+		}
+	})
+
+	t.Run("after turn", func(t *testing.T) {
+		events := runTestLoop(t,
+			[]AgentMessage{UserMsg("question")},
+			AgentContext{},
+			LoopConfig{
+				Model: mockModel(assistantMsg("answer", StopReasonStop)),
+				AfterTurn: func(context.Context, AfterTurnContext) error {
+					return errors.New("flush failed")
+				},
+			},
+		)
+
+		requireEvent(t, events, EventTurnEnd)
+		requireEvent(t, events, EventError)
+		end, _ := findEvent(events, EventAgentEnd)
+		if end.Summary == nil || end.Summary.EndReason != EndReasonError {
+			t.Fatalf("unexpected summary: %#v", end.Summary)
+		}
+	})
 }
 
 func TestCallLLM_CommitsProjectedContextWhenRequested(t *testing.T) {

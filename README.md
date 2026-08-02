@@ -228,6 +228,13 @@ agent.Abort()                                                      // cancel imm
 
 If a message must be merged into the next explicit user prompt (rather than the agent's queues), keep that in the application layer.
 
+### Turn Hooks
+
+`WithAfterTurn` observes a fully committed assistant/tool turn; `WithBeforeTurn`
+runs before the next model call and may commit prepared messages. Applications
+can use shared state between them for phase boundaries without teaching the
+agent core what those phases mean.
+
 ### Event Stream
 
 All lifecycle events flow through a single channel — subscribe to drive any UI:
@@ -235,6 +242,8 @@ All lifecycle events flow through a single channel — subscribe to drive any UI
 ```go
 agent.Subscribe(func(ev agentgo.Event) {
     switch ev.Type {
+    case agentgo.EventTurnStart:       // model/tool turn begins
+    case agentgo.EventTurnEnd:         // assistant and tool results committed
     case agentgo.EventMessageStart:    // assistant starts streaming
     case agentgo.EventMessageUpdate:   // streaming token delta
     case agentgo.EventMessageEnd:      // message complete

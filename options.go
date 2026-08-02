@@ -161,6 +161,18 @@ func WithMaxToolErrors(n int) AgentOption {
 // Hooks — message callbacks
 // ---------------------------------------------------------------------------
 
+// WithBeforeTurn installs a hook that runs before every model call. Messages
+// returned by the hook are committed before that request.
+func WithBeforeTurn(hook BeforeTurnHook) AgentOption {
+	return func(a *Agent) { a.beforeTurn = hook }
+}
+
+// WithAfterTurn installs a hook that runs after every normally completed
+// assistant/tool turn and before the loop continues or stops.
+func WithAfterTurn(hook AfterTurnHook) AgentOption {
+	return func(a *Agent) { a.afterTurn = hook }
+}
+
 // WithMessageCommitter installs a synchronous durable-message callback.
 // Returning an error stops the run before the message enters context or starts
 // requested tools.

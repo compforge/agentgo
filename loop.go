@@ -179,6 +179,42 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 		}
 		return true
 	}
+	runBeforeTurn := func(turnIndex int) bool {
+		if config.BeforeTurn == nil {
+			return true
+		}
+		messages, err := config.BeforeTurn(ctx, BeforeTurnContext{
+			TurnIndex: turnIndex,
+			Context:   snapshotAgentContext(currentCtx),
+		})
+		if err != nil {
+			sink.emitError(fmt.Errorf("before turn %d: %w", turnIndex, err), buildSummary(turnCount, EndReasonError))
+			return false
+		}
+		for _, message := range messages {
+			sink.emit(Event{Type: EventMessageStart, Message: message})
+			if !commit(message) {
+				return false
+			}
+			sink.emit(Event{Type: EventMessageEnd, Message: message})
+		}
+		return true
+	}
+	runAfterTurn := func(turnIndex int, message AgentMessage, results []ToolResult) bool {
+		if config.AfterTurn == nil {
+			return true
+		}
+		if err := config.AfterTurn(ctx, AfterTurnContext{
+			TurnIndex:   turnIndex,
+			Message:     message,
+			ToolResults: append([]ToolResult(nil), results...),
+			Context:     snapshotAgentContext(currentCtx),
+		}); err != nil {
+			sink.emitError(fmt.Errorf("after turn %d: %w", turnIndex, err), buildSummary(turnCount, EndReasonError))
+			return false
+		}
+		return true
+	}
 
 	// Check for steering messages at start
 	var pendingMessages []AgentMessage
@@ -246,6 +282,9 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 				}
 				pendingMessages = nil
 			}
+			if !runBeforeTurn(turnCount + 1) {
+				return
+			}
 
 			// Call LLM with retry (streaming: events emitted inside callLLM)
 			assistantMsg, callInfo, err := callLLMWithRetry(ctx, currentCtx, config, sink)
@@ -278,6 +317,7 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 				sink.emit(Event{Type: EventMessageEnd, Message: assistantMsg})
 				sink.emit(Event{Type: EventModelResponse, Message: assistantMsg})
 				turnCount++
+				sink.emit(Event{Type: EventTurnEnd, Message: assistantMsg})
 				reason := EndReasonError
 				if assistantMsg.StopReason == StopReasonAborted {
 					reason = EndReasonAborted
@@ -338,6 +378,10 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 
 			sink.emit(Event{Type: EventModelResponse, Message: assistantMsg, ToolResults: turnToolResults})
 			turnCount++
+			sink.emit(Event{Type: EventTurnEnd, Message: assistantMsg, ToolResults: turnToolResults})
+			if !runAfterTurn(turnCount, assistantMsg, turnToolResults) {
+				return
+			}
 
 			// Early exit: a terminal tool completed successfully. This is a
 			// normal stop, so it passes through the same StopGuard gate as

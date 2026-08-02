@@ -17,6 +17,7 @@ const (
 	EventAgentStart EventType = "agent_start"
 	EventAgentEnd   EventType = "agent_end"
 	EventTurnStart  EventType = "turn_start"
+	EventTurnEnd    EventType = "turn_end"
 	// EventModelResponse fires after every model call completes, including any
 	// tool executions it triggered. One model invocation produces one event —
 	// not one logical user exchange — so steering injections and length
