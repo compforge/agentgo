@@ -261,20 +261,22 @@ func (e *ContextEngine) Project(ctx context.Context, msgs []agentgo.AgentMessage
 		e.consecutiveFailures = 0
 		e.mu.Unlock()
 	}
+	compaction := newCompactionInfo(agentgo.CompactReasonThreshold, e.cfg.CommitOnProject, msgs, r)
 	if r.Changed && e.cfg.OnProject != nil {
 		e.cfg.OnProject(RewriteEvent{
-			Reason:       "threshold",
+			Reason:       string(compaction.Reason),
 			Changed:      true,
-			Committed:    e.cfg.CommitOnProject,
-			TokensBefore: EstimateTotal(msgs),
-			TokensAfter:  EstimateTotal(r.View),
+			Committed:    compaction.Committed,
+			TokensBefore: compaction.TokensBefore,
+			TokensAfter:  compaction.TokensAfter,
 			Info:         r.Info,
 			View:         r.View,
 		})
 	}
 	proj := agentgo.ContextProjection{
-		Messages: r.View,
-		Usage:    r.Usage,
+		Messages:   r.View,
+		Usage:      r.Usage,
+		Compaction: compaction,
 	}
 	if r.Changed && e.cfg.CommitOnProject {
 		proj.CommitMessages = copyMessages(r.View)
@@ -286,7 +288,7 @@ func (e *ContextEngine) Project(ctx context.Context, msgs []agentgo.AgentMessage
 // Compact performs a forced rewrite suitable for explicit committed actions
 // such as /compact. The caller should replace its runtime baseline with the
 // returned Messages when Changed is true.
-func (e *ContextEngine) Compact(ctx context.Context, msgs []agentgo.AgentMessage, _ agentgo.CompactReason) (agentgo.ContextCommitResult, error) {
+func (e *ContextEngine) Compact(ctx context.Context, msgs []agentgo.AgentMessage, reason agentgo.CompactReason) (agentgo.ContextCommitResult, error) {
 	e.Sync(msgs)
 	r, err := e.apply(ctx, msgs, true)
 	if err != nil {
@@ -296,6 +298,7 @@ func (e *ContextEngine) Compact(ctx context.Context, msgs []agentgo.AgentMessage
 		Messages:       r.View,
 		Usage:          r.Usage,
 		Changed:        r.Changed,
+		Compaction:     newCompactionInfo(reason, true, msgs, r),
 		CompactedCount: infoValueInt(r.Info, func(i *SummaryInfo) int { return i.CompactedCount }),
 		KeptCount:      infoValueInt(r.Info, func(i *SummaryInfo) int { return i.KeptCount }),
 		SplitTurn:      infoValueBool(r.Info, func(i *SummaryInfo) bool { return i.IsSplitTurn }),
@@ -318,13 +321,14 @@ func (e *ContextEngine) RecoverOverflow(ctx context.Context, msgs []agentgo.Agen
 		e.consecutiveFailures = 0
 		e.mu.Unlock()
 	}
+	compaction := newCompactionInfo(agentgo.CompactReasonOverflow, true, msgs, r)
 	if r.Changed && e.cfg.OnRecover != nil {
 		e.cfg.OnRecover(RewriteEvent{
-			Reason:       "overflow",
+			Reason:       string(compaction.Reason),
 			Changed:      true,
-			Committed:    r.Changed,
-			TokensBefore: EstimateTotal(msgs),
-			TokensAfter:  EstimateTotal(r.View),
+			Committed:    compaction.Committed,
+			TokensBefore: compaction.TokensBefore,
+			TokensAfter:  compaction.TokensAfter,
 			Info:         r.Info,
 			View:         r.View,
 		})
@@ -335,6 +339,7 @@ func (e *ContextEngine) RecoverOverflow(ctx context.Context, msgs []agentgo.Agen
 		Usage:          r.Usage,
 		Changed:        r.Changed,
 		ShouldCommit:   r.Changed,
+		Compaction:     compaction,
 		CompactedCount: infoValueInt(r.Info, func(i *SummaryInfo) int { return i.CompactedCount }),
 		KeptCount:      infoValueInt(r.Info, func(i *SummaryInfo) int { return i.KeptCount }),
 		SplitTurn:      infoValueBool(r.Info, func(i *SummaryInfo) bool { return i.IsSplitTurn }),
@@ -346,6 +351,21 @@ type applyResult struct {
 	Usage   *agentgo.ContextUsage
 	Changed bool
 	Info    *SummaryInfo
+}
+
+func newCompactionInfo(reason agentgo.CompactReason, committed bool, before []agentgo.AgentMessage, result applyResult) *agentgo.CompactionInfo {
+	if !result.Changed {
+		return nil
+	}
+	return &agentgo.CompactionInfo{
+		Reason:         reason,
+		Committed:      committed,
+		TokensBefore:   EstimateTotal(before),
+		TokensAfter:    EstimateTotal(result.View),
+		MessagesBefore: len(before),
+		MessagesAfter:  len(result.View),
+		Summarized:     result.Info != nil,
+	}
 }
 
 func (e *ContextEngine) apply(ctx context.Context, msgs []agentgo.AgentMessage, force bool) (applyResult, error) {

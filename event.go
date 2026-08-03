@@ -29,8 +29,12 @@ const (
 	EventToolExecStart  EventType = "tool_exec_start"
 	EventToolExecUpdate EventType = "tool_exec_update"
 	EventToolExecEnd    EventType = "tool_exec_end"
-	EventRetry          EventType = "retry"
-	EventError          EventType = "error"
+	// EventContextCompacted fires once after a ContextManager completes a
+	// context compaction transaction and before the compacted view is sent to
+	// the model. Internal compactor stages do not emit separate events.
+	EventContextCompacted EventType = "context_compacted"
+	EventRetry            EventType = "retry"
+	EventError            EventType = "error"
 )
 
 // ToolExecUpdateKind distinguishes update payload semantics for tool_exec_update events.
@@ -85,11 +89,12 @@ type Event struct {
 	UpdateKind  ToolExecUpdateKind
 	IsError     bool // tool error flag for tool_exec_end
 	Preview     json.RawMessage
-	ToolResults []ToolResult   // for turn_end: all tool results from this turn
-	Err         error          // for error events
-	NewMessages []AgentMessage // for agent_end: messages added during this loop
-	RetryInfo   *RetryInfo     // for retry events
-	Summary     *RunSummary    // for agent_end: factual run summary
+	ToolResults []ToolResult    // for turn_end: all tool results from this turn
+	Err         error           // for error events
+	NewMessages []AgentMessage  // for agent_end: messages added during this loop
+	RetryInfo   *RetryInfo      // for retry events
+	Compaction  *CompactionInfo // for context_compacted
+	Summary     *RunSummary     // for agent_end: factual run summary
 }
 
 // RetryInfo carries retry context for EventRetry events.

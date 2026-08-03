@@ -2,9 +2,7 @@ package agentgo
 
 import "context"
 
-// CompactReason identifies why a committed context rewrite was requested.
-// It is attached to explicit commits such as manual /compact or overflow
-// recovery, not to transient per-request projections.
+// CompactReason identifies why context compaction was requested.
 type CompactReason string
 
 const (
@@ -12,6 +10,20 @@ const (
 	CompactReasonOverflow  CompactReason = "overflow"
 	CompactReasonThreshold CompactReason = "threshold"
 )
+
+// CompactionInfo describes one completed context compaction transaction.
+// It reports the aggregate effect of the configured compactor; individual
+// strategies remain an implementation detail. A nil Compaction means no
+// compaction changed the context.
+type CompactionInfo struct {
+	Reason         CompactReason
+	Committed      bool
+	TokensBefore   int
+	TokensAfter    int
+	MessagesBefore int
+	MessagesAfter  int
+	Summarized     bool
+}
 
 // ContextProjection is the prompt view projected for a single LLM call.
 // By default the projection does not modify the runtime message baseline.
@@ -22,6 +34,7 @@ type ContextProjection struct {
 	Usage          *ContextUsage
 	CommitMessages []AgentMessage
 	ShouldCommit   bool
+	Compaction     *CompactionInfo
 }
 
 // ContextSnapshot describes both the runtime baseline and the current active
@@ -56,6 +69,7 @@ type ContextCommitResult struct {
 	Messages       []AgentMessage
 	Usage          *ContextUsage
 	Changed        bool
+	Compaction     *CompactionInfo
 	CompactedCount int
 	KeptCount      int
 	SplitTurn      bool
@@ -72,6 +86,7 @@ type ContextRecoveryResult struct {
 	Usage          *ContextUsage
 	Changed        bool
 	ShouldCommit   bool
+	Compaction     *CompactionInfo
 	CompactedCount int
 	KeptCount      int
 	SplitTurn      bool

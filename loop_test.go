@@ -168,6 +168,11 @@ func TestCallLLM_CommitsProjectedContextWhenRequested(t *testing.T) {
 					UserMsg("recent"),
 				},
 				ShouldCommit: true,
+				Compaction: &CompactionInfo{
+					Reason: CompactReasonThreshold, Committed: true,
+					TokensBefore: 200, TokensAfter: 128,
+					MessagesBefore: 2, MessagesAfter: 2,
+				},
 			},
 		},
 		Model: funcModel(func(ctx context.Context, req *LLMRequest) (*LLMResponse, error) {
@@ -192,6 +197,62 @@ func TestCallLLM_CommitsProjectedContextWhenRequested(t *testing.T) {
 	}
 	if agentCtx.Messages[0].TextContent() == original {
 		t.Fatal("expected agent context baseline to be replaced with compacted messages")
+	}
+	close(events)
+	gotEvents := collectEvents(events)
+	if len(gotEvents) == 0 || gotEvents[0].Type != EventContextCompacted {
+		t.Fatalf("first event = %+v, want context_compacted before model events", gotEvents)
+	}
+	if got := countEvent(gotEvents, EventContextCompacted); got != 1 {
+		t.Fatalf("context_compacted events = %d, want 1", got)
+	}
+	compacted, _ := findEvent(gotEvents, EventContextCompacted)
+	if compacted.Compaction == nil || compacted.Compaction.Reason != CompactReasonThreshold {
+		t.Fatalf("unexpected context compaction event: %+v", compacted)
+	}
+}
+
+func TestCallLLMWithRetry_EmitsOverflowCompaction(t *testing.T) {
+	calls := 0
+	model := funcModel(func(context.Context, *LLMRequest) (*LLMResponse, error) {
+		calls++
+		if calls == 1 {
+			return nil, &ContextOverflowError{Cause: errors.New("too large")}
+		}
+		return &LLMResponse{Message: assistantMsg("recovered", StopReasonStop)}, nil
+	})
+	manager := projectionCommitManager{
+		projection: ContextProjection{Messages: []AgentMessage{UserMsg("compact")}},
+		recovery: ContextRecoveryResult{
+			View: []AgentMessage{UserMsg("compact")},
+			Compaction: &CompactionInfo{
+				Reason: CompactReasonOverflow, Committed: true,
+				TokensBefore: 200, TokensAfter: 20,
+				MessagesBefore: 2, MessagesAfter: 1, Summarized: true,
+			},
+		},
+	}
+	events := make(chan Event, 32)
+	msg, _, err := callLLMWithRetry(
+		context.Background(),
+		&AgentContext{Messages: []AgentMessage{UserMsg("large"), UserMsg("tail")}},
+		LoopConfig{Model: model, ContextManager: manager},
+		eventSink{ctx: context.Background(), ch: events},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.TextContent() != "recovered" || calls != 2 {
+		t.Fatalf("response = %q calls = %d", msg.TextContent(), calls)
+	}
+	close(events)
+	gotEvents := collectEvents(events)
+	if got := countEvent(gotEvents, EventContextCompacted); got != 1 {
+		t.Fatalf("context_compacted events = %d, want 1", got)
+	}
+	compacted, _ := findEvent(gotEvents, EventContextCompacted)
+	if compacted.Compaction == nil || compacted.Compaction.Reason != CompactReasonOverflow || !compacted.Compaction.Summarized {
+		t.Fatalf("unexpected overflow compaction event: %+v", compacted)
 	}
 }
 
@@ -1607,6 +1668,7 @@ func (t *richContentTool) ExecuteContent(ctx context.Context, args json.RawMessa
 
 type projectionCommitManager struct {
 	projection ContextProjection
+	recovery   ContextRecoveryResult
 }
 
 func (m projectionCommitManager) Project(ctx context.Context, msgs []AgentMessage) (ContextProjection, error) {
@@ -1618,7 +1680,7 @@ func (m projectionCommitManager) Compact(ctx context.Context, msgs []AgentMessag
 }
 
 func (m projectionCommitManager) RecoverOverflow(ctx context.Context, msgs []AgentMessage, cause error) (ContextRecoveryResult, error) {
-	return ContextRecoveryResult{}, nil
+	return m.recovery, nil
 }
 
 func (m projectionCommitManager) Sync(msgs []AgentMessage) {}

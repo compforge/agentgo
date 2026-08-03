@@ -606,6 +606,9 @@ func recoverOverflow(ctx context.Context, agentCtx *AgentContext, config LoopCon
 			return Message{}, llmCallInfo{}, &ContextOverflowError{Cause: fmt.Errorf("commit failed: %w", err)}
 		}
 	}
+	if recovery.Compaction != nil {
+		sink.emit(Event{Type: EventContextCompacted, Compaction: recovery.Compaction})
+	}
 	return callLLM(ctx, agentCtx, config, sink)
 }
 
@@ -649,6 +652,9 @@ func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, sin
 		}
 		if projection.Messages != nil {
 			messages = projection.Messages
+		}
+		if projection.Compaction != nil {
+			sink.emit(Event{Type: EventContextCompacted, Compaction: projection.Compaction})
 		}
 	}
 

@@ -249,6 +249,7 @@ agent.Subscribe(func(ev agentgo.Event) {
     case agentgo.EventMessageEnd:      // message complete
     case agentgo.EventToolExecStart:   // tool execution begins
     case agentgo.EventToolExecEnd:     // tool execution ends
+    case agentgo.EventContextCompacted: // context view was compacted
     case agentgo.EventError:           // error occurred
     }
 })
@@ -324,6 +325,8 @@ When usage exceeds `ContextWindow - ReserveTokens`, the engine converts the rema
 2. Applies generic tool-result and long-text trimming when message-owned compaction is insufficient
 3. Summarizes older raw messages via LLM into a structured checkpoint (Goal / Progress / Key Decisions / Next Steps)
 4. Tracks file operations (read/write/edit paths) and supports incremental summary updates
+
+Each completed rewrite emits one `EventContextCompacted`. Its `Compaction` payload reports the reason, whether the runtime baseline was replaced, before/after token and message counts, and whether the resulting view contains a summary checkpoint. Individual compactor stages remain internal.
 
 ## Built-in Tools
 
