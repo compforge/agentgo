@@ -16,8 +16,12 @@
 //     This is the common case.
 //
 // Every lifecycle signal — streamed text, tool execution, retries, the final
-// summary — flows through the one [Event] channel. A single consumer can drive
-// any front end (TUI, web, Slack, logs) without the kernel knowing which.
+// summary — flows through the one [Event] channel. Context-aware application
+// messages may expose [ContextItem] values; each model call then emits the
+// projected inventory so trajectory evaluators can correlate it with
+// application-defined [ContextDemand] values without moving interpretation
+// policy into the kernel. A single consumer can drive any front end (TUI, web,
+// Slack, logs) without the kernel knowing which.
 //
 // A small, stable surface carries most uses: [Agent], [AgentLoop], [Event],
 // [Tool], [AgentMessage], and [Message]. AgentMessage is the application
