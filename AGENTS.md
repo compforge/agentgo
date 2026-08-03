@@ -11,14 +11,19 @@ Event、调度与多 Agent 的通用执行能力，但不内建具体业务流�
 
 ## 代码地图与核心模块
 
-| 路径 | 角色 |
-|------|------|
-| 根包 | `Agent` / `AgentLoop`、`AgentMessage` / `Message`、Tool、Event、Context 契约及调度入口 |
-| `context/` | 默认 ContextEngine、可替换 Compactor、投影、压缩、summary 与 overflow recovery |
-| `llm/`、`proxy/` | 模型 Provider 与远端代理适配；核心包不依赖具体 LLM SDK |
-| `tools/`、`permission/` | 内置编程工具与可选权限引擎；权限最终通过 `ToolGate` 注入 |
-| `task/`、`subagent/`、`team/` | 后台任务、工具式 SubAgent 与长期多 Agent 协作能力 |
-| `examples/` | 最短使用示例，不属于稳定 API |
+```text
+agentgo/
+├── *.go          Agent / AgentLoop、AgentMessage / Message、Tool、Event、Context 契约及调度入口
+├── context/      默认 ContextEngine、可替换 Compactor、投影、压缩、summary 与 overflow recovery
+├── llm/          模型 Provider 适配；核心包不依赖具体 LLM SDK
+├── proxy/        远端模型代理适配
+├── tools/        内置编程工具
+├── permission/   可选权限引擎；最终通过 ToolGate 注入
+├── task/         后台任务运行时
+├── subagent/     工具式 SubAgent
+├── team/         长期多 Agent 协作能力
+└── examples/     最短使用示例，不属于稳定 API
+```
 
 ## 关键约定
 
