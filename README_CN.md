@@ -246,6 +246,7 @@ agent.Subscribe(func(ev agentgo.Event) {
     case agentgo.EventMessageEnd:      // 消息完成
     case agentgo.EventToolExecStart:   // 工具开始执行
     case agentgo.EventToolExecEnd:     // 工具执行完毕
+    case agentgo.EventContextCompacted: // 上下文视图完成压缩
     case agentgo.EventError:           // 发生错误
     }
 })
@@ -319,6 +320,8 @@ agent := agentgo.NewAgent(
 2. 消息自有压缩仍不够时，再执行通用 tool-result 与长文本裁剪
 3. 基于原始消息通过 LLM 生成结构化检查点（Goal / Progress / Key Decisions / Next Steps）
 4. 追踪文件操作（read/write/edit 路径），并支持增量更新摘要
+
+每次完整改写只发出一条 `EventContextCompacted`。其 `Compaction` 载荷包含触发原因、是否替换运行时基线、压缩前后的 token/消息数，以及结果中是否包含 summary checkpoint；内部各级 Compactor 不单独暴露事件。
 
 ## 内置工具
 

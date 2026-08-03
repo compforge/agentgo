@@ -85,6 +85,12 @@ func TestContextEngineProjectUsesAggregateRatioAndTracksUsage(t *testing.T) {
 	if proj.Messages[0].TextContent() == rawFirst {
 		t.Fatal("expected the projected view to be trimmed")
 	}
+	if proj.Compaction == nil {
+		t.Fatal("expected compaction details")
+	}
+	if got := proj.Compaction; got.Reason != agentgo.CompactReasonThreshold || got.Committed || got.TokensAfter >= got.TokensBefore || got.MessagesBefore != 2 || got.MessagesAfter != 2 || got.Summarized {
+		t.Fatalf("unexpected compaction details: %+v", got)
+	}
 	if msgs[0].TextContent() != rawFirst {
 		t.Fatal("project mutated the original message")
 	}
@@ -117,8 +123,22 @@ func TestContextEngineProjectCanCommitCompactedMessages(t *testing.T) {
 	if !proj.ShouldCommit || len(proj.CommitMessages) != len(proj.Messages) {
 		t.Fatalf("projection did not request a matching commit: %+v", proj)
 	}
+	if proj.Compaction == nil || !proj.Compaction.Committed {
+		t.Fatalf("expected committed compaction details: %+v", proj.Compaction)
+	}
 	if proj.CommitMessages[0].Raw().TextContent() != msgs[0].TextContent() {
 		t.Fatal("committed projection lost its raw message")
+	}
+}
+
+func TestContextEngineProjectBelowThresholdHasNoCompaction(t *testing.T) {
+	engine := NewEngine(EngineConfig{ContextWindow: 128_000, Compactor: trimCompactor()})
+	proj, err := engine.Project(t.Context(), []agentgo.AgentMessage{agentgo.UserMsg("small")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proj.Compaction != nil {
+		t.Fatalf("unexpected compaction below threshold: %+v", proj.Compaction)
 	}
 }
 
@@ -149,6 +169,28 @@ func TestContextEnginePassesCalculatedAndForcedRatios(t *testing.T) {
 	}
 }
 
+func TestContextEngineForcedCompactionReportsReason(t *testing.T) {
+	msgs := []agentgo.AgentMessage{agentgo.UserMsg(strings.Repeat("x", 800))}
+
+	manualEngine := NewEngine(EngineConfig{ContextWindow: 1024, Compactor: &replacingCompactor{text: "small"}})
+	manual, err := manualEngine.Compact(t.Context(), msgs, agentgo.CompactReasonManual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manual.Compaction == nil || manual.Compaction.Reason != agentgo.CompactReasonManual || !manual.Compaction.Committed {
+		t.Fatalf("unexpected manual compaction details: %+v", manual.Compaction)
+	}
+
+	recoveryEngine := NewEngine(EngineConfig{ContextWindow: 1024, Compactor: &replacingCompactor{text: "small"}})
+	recovery, err := recoveryEngine.RecoverOverflow(t.Context(), msgs, context.DeadlineExceeded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovery.Compaction == nil || recovery.Compaction.Reason != agentgo.CompactReasonOverflow || !recovery.Compaction.Committed {
+		t.Fatalf("unexpected recovery compaction details: %+v", recovery.Compaction)
+	}
+}
+
 func TestContextEngineCompactProducesSummaryAndRetainsRaw(t *testing.T) {
 	var maxTokens int
 	model := stubModel{generate: func(_ context.Context, _ []agentgo.Message, _ []agentgo.ToolSpec, opts ...agentgo.CallOption) (*agentgo.LLMResponse, error) {
@@ -174,6 +216,9 @@ func TestContextEngineCompactProducesSummaryAndRetainsRaw(t *testing.T) {
 	}
 	if !result.Changed || len(result.Messages) < 3 {
 		t.Fatalf("unexpected compact result: %+v", result)
+	}
+	if result.Compaction == nil || !result.Compaction.Summarized {
+		t.Fatalf("expected summary compaction details: %+v", result.Compaction)
 	}
 	checkpoint, ok := result.Messages[0].(ContextSummary)
 	if !ok || len(checkpoint.RawMessages) == 0 {
