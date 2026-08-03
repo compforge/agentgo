@@ -29,6 +29,10 @@ const (
 	EventToolExecStart  EventType = "tool_exec_start"
 	EventToolExecUpdate EventType = "tool_exec_update"
 	EventToolExecEnd    EventType = "tool_exec_end"
+	// EventContextProjected fires before each model call with the identifiable
+	// items exposed by the actual projected AgentMessage context. It is a trace
+	// fact, not a judgment that any item was useful or sufficient.
+	EventContextProjected EventType = "context_projected"
 	// EventContextCompacted fires once after a ContextManager completes a
 	// context compaction transaction and before the compacted view is sent to
 	// the model. Internal compactor stages do not emit separate events.
@@ -76,25 +80,26 @@ const (
 // Event is a lifecycle event emitted by the agent loop.
 // This is the single output channel for all lifecycle information.
 type Event struct {
-	Type        EventType
-	Message     AgentMessage    // for message_start/update/end, turn_end
-	Delta       string          // text delta for message_update
-	DeltaKind   DeltaKind       // for message_update: what kind of delta
-	ToolID      string          // for tool_exec_*
-	Tool        string          // tool name for tool_exec_*
-	ToolLabel   string          // human-readable tool label (from ToolLabeler)
-	Args        json.RawMessage // tool args for tool_exec_start/tool_exec_update
-	Result      json.RawMessage // tool result for tool_exec_end and preview updates
-	Progress    *ProgressPayload
-	UpdateKind  ToolExecUpdateKind
-	IsError     bool // tool error flag for tool_exec_end
-	Preview     json.RawMessage
-	ToolResults []ToolResult    // for turn_end: all tool results from this turn
-	Err         error           // for error events
-	NewMessages []AgentMessage  // for agent_end: messages added during this loop
-	RetryInfo   *RetryInfo      // for retry events
-	Compaction  *CompactionInfo // for context_compacted
-	Summary     *RunSummary     // for agent_end: factual run summary
+	Type         EventType
+	Message      AgentMessage    // for message_start/update/end, turn_end
+	Delta        string          // text delta for message_update
+	DeltaKind    DeltaKind       // for message_update: what kind of delta
+	ToolID       string          // for tool_exec_*
+	Tool         string          // tool name for tool_exec_*
+	ToolLabel    string          // human-readable tool label (from ToolLabeler)
+	Args         json.RawMessage // tool args for tool_exec_start/tool_exec_update
+	Result       json.RawMessage // tool result for tool_exec_end and preview updates
+	Progress     *ProgressPayload
+	UpdateKind   ToolExecUpdateKind
+	IsError      bool // tool error flag for tool_exec_end
+	Preview      json.RawMessage
+	ToolResults  []ToolResult    // for turn_end: all tool results from this turn
+	Err          error           // for error events
+	NewMessages  []AgentMessage  // for agent_end: messages added during this loop
+	RetryInfo    *RetryInfo      // for retry events
+	ContextItems []ContextItem   // for context_projected
+	Compaction   *CompactionInfo // for context_compacted
+	Summary      *RunSummary     // for agent_end: factual run summary
 }
 
 // RetryInfo carries retry context for EventRetry events.

@@ -194,6 +194,7 @@ func (e *ContextEngine) Snapshot() *agentgo.ContextSnapshot {
 	}
 	counts := summarizeContextView(e.lastView)
 	return &agentgo.ContextSnapshot{
+		Items:              agentgo.CollectContextItems(e.lastView),
 		BaselineUsage:      baseline,
 		Usage:              usage,
 		Scope:              e.lastScope,

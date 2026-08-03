@@ -75,6 +75,20 @@ func (m projectedMessage) ToMessage() (agentgo.Message, bool) { return m.current
 func (m projectedMessage) Compact(expect float64) (agentgo.AgentMessage, float64) {
 	return m.raw.Compact(expect)
 }
+func (m projectedMessage) ContextItems() []agentgo.ContextItem {
+	provider, ok := m.current.(agentgo.ContextItemProvider)
+	if !ok {
+		return nil
+	}
+	return provider.ContextItems()
+}
+func (m projectedMessage) ContextDemands() []agentgo.ContextDemand {
+	provider, ok := m.current.(agentgo.ContextDemandProvider)
+	if !ok {
+		return nil
+	}
+	return provider.ContextDemands()
+}
 
 // rawSummaryView restores per-message domain evidence before a checkpoint is
 // generated. Existing summaries stay summarized so incremental compaction does

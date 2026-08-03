@@ -163,7 +163,7 @@ type Previewer interface {
 // retrying), without prompting the user.
 //
 // ErrorCode is optional, intended for stable identification by tests and
-// prompts; it is not interpreted by the agent core.
+// prompts; it is not interpreted by the kernel.
 type ValidationResult struct {
 	OK        bool
 	Message   string
@@ -188,7 +188,7 @@ type Validator interface {
 // GateRequest carries the inputs that a ToolGate sees for one tool call.
 // Tool exposes the underlying tool instance so gates can typeswitch against
 // any tool-specific marker interfaces they care about (e.g. capability hints)
-// without the agent core needing to know those interfaces.
+// without the kernel needing to know those interfaces.
 type GateRequest struct {
 	Tool      Tool
 	Call      ToolCall
@@ -214,7 +214,7 @@ type GateDecision struct {
 // ToolGate is the pluggable hook called once per tool call, after argument
 // validation and after the optional Previewer pass, but before tool
 // execution. Returning a non-nil error is treated as deny with the error
-// message as the reason. The agent core does not perform any permission
+// message as the reason. The kernel does not perform any permission
 // reasoning of its own; install a gate (or leave it nil) to control policy.
 type ToolGate func(ctx context.Context, req GateRequest) (*GateDecision, error)
 

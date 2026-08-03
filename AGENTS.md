@@ -1,0 +1,41 @@
+# AGENTS.md — AgentGo
+
+## 项目定位与边界
+
+AgentGo 是一个极简、可组合、message-native 的 Go Agent Loop 内核。它提供 Model、Tool、Context、
+Event、调度与多 Agent 的通用执行能力，但不内建具体业务流程、权限结论、完成标准或轨迹评分。
+
+应用使用 `AgentMessage` 表达领域消息，只有模型调用边界使用 `Message`。Event stream 是运行事实的
+统一出口；轨迹评估可以据此演进 Prompt、Tool surface 与 Execution mechanism，但解释和优化策略归
+应用或 Evaluator 所有。
+
+## 代码地图与核心模块
+
+| 路径 | 角色 |
+|------|------|
+| 根包 | `Agent` / `AgentLoop`、`AgentMessage` / `Message`、Tool、Event、Context 契约及调度入口 |
+| `context/` | 默认 ContextEngine、可替换 Compactor、投影、压缩、summary 与 overflow recovery |
+| `llm/`、`proxy/` | 模型 Provider 与远端代理适配；核心包不依赖具体 LLM SDK |
+| `tools/`、`permission/` | 内置编程工具与可选权限引擎；权限最终通过 `ToolGate` 注入 |
+| `task/`、`subagent/`、`team/` | 后台任务、工具式 SubAgent 与长期多 Agent 协作能力 |
+| `examples/` | 最短使用示例，不属于稳定 API |
+
+## 关键约定
+
+1. **Message-native 边界不可反转**：Loop、Context、Event 和持久化使用 `AgentMessage`；
+   `ToMessage` 是唯一模型协议转换边界，compaction 必须保留 `Raw`。
+2. **Kernel 记录事实，不解释业务**：ContextItem / ContextDemand 共享身份协议，但 kind、representation、
+   signal、提取器和评分含义归应用；权限、终止和 Context 策略均通过扩展点注入。
+3. **Event stream 是统一观测面**：模型、工具、Context 投影/压缩及结束状态都从 Event 输出；新增运行
+   能力时优先补完整事实事件，而不是让 UI、日志或 Harness 猜内部状态。
+4. **Context 投影与提交分离**：单次模型调用的 transient projection 不应悄悄覆盖运行基线；只有显式
+   commit/recovery 契约可以替换历史，并报告可观察的 compaction 事实。
+5. **公开 API 保持克制**：新增接口前先确认是否能作为现有 AgentMessage、Event、Tool 或 Context
+   可选能力表达；Go 改动提交前运行 `go test ./...` 与 `go build ./...`。
+
+## References
+
+- `README.md` / `README_CN.md` —— 产品定位、能力与最短使用路径
+- `docs/kernel.md` —— Message-native 内核、ContextItem / ContextDemand 与轨迹驱动优化
+- `doc.go` —— Go Package 总览
+- `examples/` —— 可运行示例

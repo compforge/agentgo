@@ -132,7 +132,7 @@ func WithToolResultMessageFactory(factory func(ToolCall, ToolResult) AgentMessag
 
 // WithToolGate installs a hook called once per tool call after argument
 // validation and the optional Previewer pass. Returning Allowed=false rejects
-// the call (Reason becomes the tool result error). The agent core does not
+// the call (Reason becomes the tool result error). The kernel does not
 // implement permission reasoning of its own — gates are user-supplied.
 func WithToolGate(gate ToolGate) AgentOption {
 	return func(a *Agent) { a.toolGate = gate }

@@ -657,6 +657,7 @@ func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, sin
 			sink.emit(Event{Type: EventContextCompacted, Compaction: projection.Compaction})
 		}
 	}
+	sink.emit(Event{Type: EventContextProjected, ContextItems: CollectContextItems(messages)})
 
 	// Stage 2: AgentMessage[] → Message[] + repair tool-call / tool-result
 	// pairing for provider compatibility.

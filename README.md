@@ -2,9 +2,20 @@
 
 **AgentGo** is a minimal, composable Go library for building AI agent applications.
 
-AgentGo is adapted from AgentCore and evolves independently.
+AgentGo evolved from [AgentCore](https://github.com/voocel/agentcore) and now develops independently.
 
 [English](README.md) | [中文](README_CN.md)
+
+## What it provides
+
+- A message-native Agent Loop: applications keep `AgentMessage`; model-level `Message` exists only at the call boundary.
+- A single event stream for model output, tools, context projection and compaction, retries, and completion.
+- Replaceable models, tools, context management, compaction, stop guards, turn hooks, and permission gates.
+- Stateful `Agent` and standalone `AgentLoop` entry points over the same execution kernel.
+- Steering, follow-up, background tasks, sub-agents, and multi-agent team primitives.
+- Trajectory-ready context contracts: `ContextItem` records what the projected context contains, while `ContextDemand` provides the matching application-neutral demand shape.
+
+The kernel stays policy-light: applications decide what information means, which tools are allowed, when work is complete, and how trajectories are evaluated.
 
 ## Install
 
@@ -12,39 +23,7 @@ AgentGo is adapted from AgentCore and evolves independently.
 go get github.com/compforge/agentgo
 ```
 
-## Design Philosophy
-
-A restrained core with open extensibility tends to be more reliable than a complex all-in-one solution. Fewer built-ins, more possibilities.
-
-## Stability
-
-- Keep `Agent`, `AgentLoop`, `Event`, `Tool`, `AgentMessage`, and `Message` stable first
-- `examples/` and internal implementation details are not stable API
-
-## Architecture
-
-```
-agentgo/            Agent core (types, loop, agent, events)
-agentgo/llm/        LLM adapters (OpenAI, Anthropic, Gemini via litellm)
-agentgo/tools/      Built-in tools: read, write, edit, bash
-agentgo/context/    Context runtime — projection, rewrite, overflow recovery
-agentgo/task/       Background task registry (Runtime / Entry) shared by bash + subagent
-agentgo/subagent/   SubAgent tool — multi-agent via tool invocation
-agentgo/proxy/      ChatModel adapter that forwards calls to a remote proxy
-agentgo/permission/ Optional permission engine — adapt to ToolGate yourself
-```
-
-Core design:
-
-- **Standalone loop + stateful Agent** — `loop.go` is a free function with all dependencies injected; `agent.go` is the sole consumer of loop events, updating internal state and dispatching to listeners. Double loop: inner processes tool calls + steering, outer handles follow-up
-- **Event stream** — single `<-chan Event` output drives any UI (TUI, Web, Slack, logging)
-- **Message-native loop** — the loop, events, context manager, and persistence use application `AgentMessage` values. Each message lowers itself to the model `Message` protocol only at the model-call boundary
-- **Context layer** — `ContextManager` (interface) + `agentgo/context` (default engine) drive prompt projection, message-owned compaction, overflow recovery, and token estimation
-- **SubAgent tool** (`subagent/`) — multi-agent via tool invocation, four modes: single, parallel, chain, background
-
 ## Quick Start
-
-### Single Agent
 
 ```go
 package main
@@ -59,309 +38,68 @@ import (
 )
 
 func main() {
-    model, err := llm.NewModel("openai", "gpt-5-mini", llm.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
-    if err != nil {
-        panic(err)
-    }
+    model, _ := llm.NewModel(
+        "openai",
+        "gpt-5-mini",
+        llm.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+    )
 
-    // Shared FileReadState so Write/Edit can enforce read-before-write.
-    fileState := tools.NewFileReadState()
     agent := agentgo.NewAgent(
         agentgo.WithModel(model),
         agentgo.WithSystemPrompt("You are a helpful coding assistant."),
-        agentgo.WithTools(
-            tools.NewRead(".", fileState),
-            tools.NewWrite(".", fileState),
-            tools.NewEdit(".", fileState),
-            tools.NewBash("."),
-        ),
+        agentgo.WithTools(tools.NewRead(".", tools.NewFileReadState())),
     )
 
-    agent.Subscribe(func(ev agentgo.Event) {
-        if ev.Type == agentgo.EventMessageEnd {
-            if msg, ok := ev.Message.(agentgo.Message); ok && msg.Role == agentgo.RoleAssistant {
-                fmt.Println(msg.Content)
+    agent.Subscribe(func(event agentgo.Event) {
+        if event.Type == agentgo.EventMessageEnd {
+            if message, ok := event.Message.(agentgo.Message); ok && message.Role == agentgo.RoleAssistant {
+                fmt.Println(message.TextContent())
             }
         }
     })
 
-    agent.Prompt("List the files in the current directory.")
+    agent.Prompt("Summarize this repository.")
     agent.WaitForIdle()
 }
 ```
 
-For tool-call gating, register a `ToolGate` — a single hook called once per tool call after argument validation. The kernel implements no permission policy of its own; gates are user-supplied.
+## Core flow
 
-```go
-gate := func(ctx context.Context, req agentgo.GateRequest) (*agentgo.GateDecision, error) {
-    if req.Call.Name == "bash" {
-        return &agentgo.GateDecision{Allowed: false, Reason: "bash disabled"}, nil
-    }
-    return &agentgo.GateDecision{Allowed: true}, nil
-}
-
-agent := agentgo.NewAgent(
-    // ... model, tools, etc.
-    agentgo.WithToolGate(gate),
-)
+```text
+AgentMessage
+    ─ContextManager / Compactor─▶ projected AgentMessage
+    ─ToMessage─▶ model Message
+    ─Model / Tool─▶ Event stream
+    ─commit─▶ AgentMessage history
 ```
 
-The optional `agentgo/permission` subpackage offers a richer decision engine (modes, rules, filesystem roots, audit). Adapt it to `ToolGate` with a small wrapper.
+`ContextItemProvider` lets an application message expose identifiable information without changing its model rendering. Before each model call, `EventContextProjected` reports the inventory from the actual projected context. `ContextItem` and `ContextDemand` share `ContextKey`; applications and evaluators own all label meanings and demand-extraction rules.
 
-### Provider-Level Config
+## Extension points
 
-`llm.WithExtra` is merged into each request body. Use `llm.WithProviderExtra` for HTTP headers, `User-Agent`, or provider client options:
+| Need | Contract |
+|------|----------|
+| Model provider | `ChatModel` |
+| Application message | `AgentMessage` |
+| Tool capability | `Tool` and optional tool interfaces |
+| Tool authorization | `ToolGate` |
+| Context projection and recovery | `ContextManager` |
+| Compaction policy | `context.Compactor` |
+| Turn preparation and observation | `WithBeforeTurn` / `WithAfterTurn` |
+| Stop policy | `StopGuard` |
+| UI, logging, and trajectory capture | `<-chan Event` / `Agent.Subscribe` |
 
-```go
-model, err := llm.NewModel("anthropic", "claude-sonnet-4",
-    llm.WithAPIKey(apiKey),
-    llm.WithBaseURL(baseURL),
-    llm.WithProviderExtra(map[string]any{
-        "user_agent": "my-client/1.0",
-        "anthropic_beta": "beta-name",
-        "headers": map[string]string{
-            "X-Custom-Client": "my-client",
-        },
-    }),
-)
-```
+Built-in packages include model adapters under `llm/`, context strategies under `context/`, coding tools under `tools/`, and optional `subagent/`, `team/`, `task/`, `proxy/`, and `permission/` capabilities.
 
-### Multi-Agent (SubAgent Tool)
+## Design and API
 
-Sub-agents are invoked as regular tools with isolated contexts. Import the
-`agentgo/subagent` subpackage:
+- [`docs/kernel.md`](docs/kernel.md) — message-native boundaries and trajectory-driven loop optimization.
+- [Go package documentation](https://pkg.go.dev/github.com/compforge/agentgo) — complete public API.
+- [`examples/`](examples/) — runnable single-agent and multi-agent examples.
 
-```go
-import (
-    "github.com/compforge/agentgo"
-    "github.com/compforge/agentgo/llm"
-    "github.com/compforge/agentgo/subagent"
-    "github.com/compforge/agentgo/tools"
-)
+## Stability
 
-model, _ := llm.NewModel("openai", "gpt-5-mini", llm.WithAPIKey(apiKey))
-
-// Each sub-agent gets its own FileReadState — independent read history.
-scoutState := tools.NewFileReadState()
-workerState := tools.NewFileReadState()
-
-scout := subagent.Config{
-    Name:         "scout",
-    Description:  "Fast codebase reconnaissance",
-    Model:        model,
-    SystemPrompt: "Quickly explore and report findings. Be concise.",
-    Tools:        []agentgo.Tool{tools.NewRead(".", scoutState), tools.NewBash(".")},
-    MaxTurns:     5,
-}
-
-worker := subagent.Config{
-    Name:         "worker",
-    Description:  "General-purpose executor",
-    Model:        model,
-    SystemPrompt: "Implement tasks given to you.",
-    Tools:        []agentgo.Tool{tools.NewRead(".", workerState), tools.NewWrite(".", workerState), tools.NewEdit(".", workerState), tools.NewBash(".")},
-}
-
-runner := subagent.NewRunner(scout, worker)
-subagentTool := runner.AsTool()
-agent := agentgo.NewAgent(
-    agentgo.WithModel(model),
-    agentgo.WithTools(subagentTool),
-)
-```
-
-Hosts that own scheduling can bypass the JSON tool protocol:
-
-```go
-result, err := runner.Run(ctx, "worker", "Implement the requested change")
-```
-
-For background mode (async sub-agent runs that notify on completion), wire a
-shared task runtime:
-
-```go
-import "github.com/compforge/agentgo/task"
-
-rt := task.NewRuntime()
-subagentTool.SetTaskRuntime(rt)
-subagentTool.SetNotifyFn(agent.FollowUp) // route completion notifications back to the parent
-```
-
-Four execution modes via tool call:
-
-```jsonc
-// Single: one agent, one task
-{"agent": "scout", "task": "Find all API endpoints"}
-
-// Parallel: concurrent execution
-{"tasks": [{"agent": "scout", "task": "Find auth code"}, {"agent": "scout", "task": "Find DB schema"}]}
-
-// Chain: sequential with {previous} context passing
-{"chain": [{"agent": "scout", "task": "Find auth code"}, {"agent": "worker", "task": "Refactor based on: {previous}"}]}
-
-// Background: async execution, returns immediately, notifies on completion
-{"agent": "worker", "task": "Run full test suite", "background": true, "description": "Running tests"}
-```
-
-### Steering & Injection
-
-`Inject(ctx, msg)` delivers a message according to the agent's current state — preferred when the caller's intent is "deliver this as soon as possible" without manually branching on running vs idle:
-
-```go
-result, _ := agent.Inject(ctx, agentgo.UserMsg("Re-check unfinished tasks before stopping."))
-fmt.Println(result.Disposition)
-```
-
-Outcomes:
-
-- `steered_current_run` — agent was running; message went into the current run's steering path
-- `resumed_idle_run` — agent was idle with an assistant-tail conversation; message queued and `Continue()` started
-- `queued` — message queued, no run started
-
-For finer control, use the lower-level APIs directly:
-
-```go
-agent.Steer(agentgo.UserMsg("Stop and focus on tests instead.")) // mid-run interrupt
-agent.FollowUp(agentgo.UserMsg("Now run the tests."))            // queue for after current run
-agent.Abort()                                                      // cancel immediately
-```
-
-If a message must be merged into the next explicit user prompt (rather than the agent's queues), keep that in the application layer.
-
-### Turn Hooks
-
-`WithAfterTurn` observes a fully committed assistant/tool turn; `WithBeforeTurn`
-runs before the next model call and may commit prepared messages. Applications
-can use shared state between them for phase boundaries without teaching the
-agent core what those phases mean.
-
-### Event Stream
-
-All lifecycle events flow through a single channel — subscribe to drive any UI:
-
-```go
-agent.Subscribe(func(ev agentgo.Event) {
-    switch ev.Type {
-    case agentgo.EventTurnStart:       // model/tool turn begins
-    case agentgo.EventTurnEnd:         // assistant and tool results committed
-    case agentgo.EventMessageStart:    // assistant starts streaming
-    case agentgo.EventMessageUpdate:   // streaming token delta
-    case agentgo.EventMessageEnd:      // message complete
-    case agentgo.EventToolExecStart:   // tool execution begins
-    case agentgo.EventToolExecEnd:     // tool execution ends
-    case agentgo.EventContextCompacted: // context view was compacted
-    case agentgo.EventError:           // error occurred
-    }
-})
-```
-
-### Structured Tool Progress
-
-Long-running tools can emit structured progress updates instead of ad-hoc JSON:
-
-```go
-agentgo.ReportToolProgress(ctx, agentgo.ProgressPayload{
-    Kind:    agentgo.ProgressSummary,
-    Agent:   "worker",
-    Tool:    "bash",
-    Summary: "worker → bash",
-})
-```
-
-Subscribers should read `ev.Progress` directly for tool progress updates:
-
-```go
-agent.Subscribe(func(ev agentgo.Event) {
-    if ev.Type == agentgo.EventToolExecUpdate && ev.Progress != nil {
-        fmt.Printf("[%s] %s\n", ev.Progress.Kind, ev.Progress.Summary)
-    }
-})
-```
-
-### Swappable Models
-
-When a model needs to change at runtime, wrap it with `SwappableModel`. The swap takes effect on the next call. `subagent.Config.Model` is resolved at the start of each sub-agent run, so the same wrapper also works for sub-agents.
-
-```go
-defaultModel, _ := llm.NewModel("openai", "gpt-5-mini", llm.WithAPIKey(apiKey))
-sw := agentgo.NewSwappableModel(defaultModel)
-
-agent := agentgo.NewAgent(agentgo.WithModel(sw))
-
-nextModel, _ := llm.NewModel("openai", "gpt-5", llm.WithAPIKey(apiKey))
-sw.Swap(nextModel) // next turn uses the new model
-```
-
-### Custom LLM Adapter
-
-To swap the LLM call with a proxy, mock, or custom implementation, implement
-the `ChatModel` interface and pass it via `WithModel`. `SwappableModel` and
-the `agentgo/proxy` subpackage are built on this same interface and can
-serve as references.
-
-### Context Compaction
-
-Auto-summarize conversation history when approaching the context window limit. Use the built-in context manager:
-
-```go
-import (
-    "github.com/compforge/agentgo"
-    agentctx "github.com/compforge/agentgo/context"
-)
-
-engine := agentctx.NewDefaultEngine(model, 128000)
-
-agent := agentgo.NewAgent(
-    agentgo.WithModel(model),
-    agentgo.WithContextManager(engine),
-)
-```
-
-`NewAgent` auto-wires token estimation and the context window from the context manager when available. `AgentMessage.ToMessage` is the single model-protocol boundary. Domain messages retain their original value through `Raw` and implement `Compact(expect)` to choose the highest-fidelity representation that can approach the requested ratio; `expect == 0` asks for that message's smallest representation.
-
-When usage exceeds `ContextWindow - ReserveTokens`, the engine converts the remaining token budget to one aggregate ratio and calls its single replaceable `Compactor`. The default compactor:
-
-1. Allocates that ratio by message priority and lets each `AgentMessage` choose its domain-native representation
-2. Applies generic tool-result and long-text trimming when message-owned compaction is insufficient
-3. Summarizes older raw messages via LLM into a structured checkpoint (Goal / Progress / Key Decisions / Next Steps)
-4. Tracks file operations (read/write/edit paths) and supports incremental summary updates
-
-Each completed rewrite emits one `EventContextCompacted`. Its `Compaction` payload reports the reason, whether the runtime baseline was replaced, before/after token and message counts, and whether the resulting view contains a summary checkpoint. Individual compactor stages remain internal.
-
-## Built-in Tools
-
-| Tool | Description |
-|------|-------------|
-| `read` | Read file contents with head truncation (2000 lines / 50KB) |
-| `write` | Write file with auto-mkdir |
-| `edit` | Exact text replacement with fuzzy match, BOM/line-ending normalization, unified diff output |
-| `bash` | Execute shell commands with tail truncation (2000 lines / 50KB) |
-
-The `bash` tool requires a POSIX shell (`bash` or `sh`) on PATH — on Windows that means Git Bash. There is no cmd.exe/PowerShell fallback: LLM-generated commands assume POSIX syntax.
-
-## API Reference
-
-### Agent
-
-| Method | Description |
-|--------|-------------|
-| `NewAgent(opts...)` | Create agent with options |
-| `Prompt(input)` | Start new conversation turn |
-| `PromptMessages(msgs...)` | Start turn with arbitrary AgentMessages |
-| `Continue()` | Resume from current context |
-| `Inject(ctx, msg)` | Deliver message via steer / idle resume / queue, depending on current state |
-| `Steer(msg)` | Inject steering message mid-run |
-| `FollowUp(msg)` | Queue message for after completion |
-| `Abort()` | Cancel current execution |
-| `AbortSilent()` | Cancel without emitting abort marker |
-| `HoldRuns()` | Silently drain the current run and reject new starts (`ErrRunsHeld`) until released — for atomic state surgery |
-| `Reset()` | Drain via HoldRuns, then clear all state and queues |
-| `WaitForIdle()` | Block until agent finishes |
-| `Subscribe(fn)` | Register event listener |
-| `State()` | Snapshot of current state |
-| `ExportMessages()` | Export messages for serialization |
-| `ImportMessages(msgs)` | Import deserialized messages |
-| `BuildLLMMessages()` | Materialize the next-call prompt (system → projected history) |
+`Agent`, `AgentLoop`, `Event`, `Tool`, `AgentMessage`, and `Message` are the primary stable surface. Examples and internal implementation details may evolve faster.
 
 ## License
 

@@ -38,8 +38,8 @@ type ContextProjection struct {
 }
 
 // ContextSnapshot describes both the runtime baseline and the current active
-// context view, plus the most recent rewrite details remembered by the
-// manager.
+// context view, including its identifiable Items, plus the most recent rewrite
+// details remembered by the manager.
 //
 // Snapshot is meant for debugging, observability, and UI surfaces such as
 // /context. BaselineUsage always reflects the caller's current runtime message
@@ -47,6 +47,7 @@ type ContextProjection struct {
 // which may be the baseline runtime messages, a projected prompt view, or a
 // recovered/committed view depending on the most recent operation.
 type ContextSnapshot struct {
+	Items              []ContextItem
 	BaselineUsage      *ContextUsage
 	Usage              *ContextUsage
 	Scope              string

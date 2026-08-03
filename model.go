@@ -85,7 +85,7 @@ type LoopConfig struct {
 
 	// ToolGate, when non-nil, is called once per tool call after argument
 	// validation and the optional Previewer pass. Allowed=false rejects the
-	// call (Reason becomes the tool result). The agent core does no permission
+	// call (Reason becomes the tool result). The kernel does no permission
 	// reasoning of its own.
 	ToolGate ToolGate
 
