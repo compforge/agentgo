@@ -200,6 +200,34 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 		}
 		return true
 	}
+	runBeforeModelCall := func(turnIndex int) ([]CallOption, bool) {
+		if config.BeforeModelCall == nil {
+			return nil, true
+		}
+		options, err := config.BeforeModelCall(ctx, BeforeModelCallContext{
+			TurnIndex: turnIndex,
+			Context:   snapshotAgentContext(currentCtx),
+		})
+		if err != nil {
+			sink.emitError(fmt.Errorf("before model call %d: %w", turnIndex, err), buildSummary(turnCount, EndReasonError))
+			return nil, false
+		}
+		return options, true
+	}
+	runAfterModelCall := func(turnIndex int, message Message) bool {
+		if config.AfterModelCall == nil {
+			return true
+		}
+		if err := config.AfterModelCall(ctx, AfterModelCallContext{
+			TurnIndex: turnIndex,
+			Message:   message,
+			Context:   snapshotAgentContext(currentCtx),
+		}); err != nil {
+			sink.emitError(fmt.Errorf("after model call %d: %w", turnIndex, err), buildSummary(turnCount, EndReasonError))
+			return false
+		}
+		return true
+	}
 	runAfterTurn := func(turnIndex int, message AgentMessage, results []ToolResult) bool {
 		if config.AfterTurn == nil {
 			return true
@@ -285,9 +313,13 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 			if !runBeforeTurn(turnCount + 1) {
 				return
 			}
+			callOptions, ok := runBeforeModelCall(turnCount + 1)
+			if !ok {
+				return
+			}
 
 			// Call LLM with retry (streaming: events emitted inside callLLM)
-			assistantMsg, callInfo, err := callLLMWithRetry(ctx, currentCtx, config, sink)
+			assistantMsg, callInfo, err := callLLMWithRetry(ctx, currentCtx, config, callOptions, sink)
 			if err != nil {
 				if ctx.Err() != nil {
 					if config.ShouldEmitAbortMarker != nil && config.ShouldEmitAbortMarker() {
@@ -306,6 +338,9 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 					return
 				}
 				sink.emitError(err, buildSummary(turnCount, EndReasonError))
+				return
+			}
+			if !runAfterModelCall(turnCount+1, assistantMsg) {
 				return
 			}
 
@@ -509,13 +544,14 @@ type llmCallInfo struct {
 //
 // Tool execution is deliberately outside this function and starts only after
 // a complete response has been committed, so retrying a failed stream cannot
-// replay tool side effects.
-func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopConfig, sink eventSink) (Message, llmCallInfo, error) {
+// replay tool side effects. callOptions are selected once per logical model
+// call and reused by every retry attempt.
+func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopConfig, callOptions []CallOption, sink eventSink) (Message, llmCallInfo, error) {
 	maxRetries := config.MaxRetries
 	if maxRetries <= 0 {
-		msg, info, err := callLLM(ctx, agentCtx, config, sink)
+		msg, info, err := callLLM(ctx, agentCtx, config, callOptions, sink)
 		if err != nil && IsContextOverflow(err) {
-			return recoverOverflow(ctx, agentCtx, config, sink, err)
+			return recoverOverflow(ctx, agentCtx, config, callOptions, sink, err)
 		}
 		return msg, info, err
 	}
@@ -523,7 +559,7 @@ func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopCo
 	var lastErr error
 	var lastInfo llmCallInfo
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		msg, info, err := callLLM(ctx, agentCtx, config, sink)
+		msg, info, err := callLLM(ctx, agentCtx, config, callOptions, sink)
 		if err == nil {
 			return msg, info, nil
 		}
@@ -532,7 +568,7 @@ func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopCo
 
 		// Context overflow: compact and retry once (not a normal retry)
 		if IsContextOverflow(err) {
-			return recoverOverflow(ctx, agentCtx, config, sink, err)
+			return recoverOverflow(ctx, agentCtx, config, callOptions, sink, err)
 		}
 
 		// User cancellation is never retryable: the next attempt would just
@@ -578,7 +614,7 @@ func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopCo
 // recoverOverflow attempts to compact the context via the ContextManager and
 // retry the LLM call. If no ContextManager is configured, the original error
 // is returned.
-func recoverOverflow(ctx context.Context, agentCtx *AgentContext, config LoopConfig, sink eventSink, originalErr error) (Message, llmCallInfo, error) {
+func recoverOverflow(ctx context.Context, agentCtx *AgentContext, config LoopConfig, callOptions []CallOption, sink eventSink, originalErr error) (Message, llmCallInfo, error) {
 	if config.ContextManager == nil {
 		return Message{}, llmCallInfo{}, &ContextOverflowError{Cause: fmt.Errorf("no compaction configured: %w", originalErr)}
 	}
@@ -609,7 +645,7 @@ func recoverOverflow(ctx context.Context, agentCtx *AgentContext, config LoopCon
 	if recovery.Compaction != nil {
 		sink.emit(Event{Type: EventContextCompacted, Compaction: recovery.Compaction})
 	}
-	return callLLM(ctx, agentCtx, config, sink)
+	return callLLM(ctx, agentCtx, config, callOptions, sink)
 }
 
 // retryDelay calculates the wait duration using exponential backoff.
@@ -632,7 +668,7 @@ func retryDelay(err error, attempt int) time.Duration {
 }
 
 // callLLM applies the two-stage pipeline and calls the model.
-func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, sink eventSink) (Message, llmCallInfo, error) {
+func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, callOptions []CallOption, sink eventSink) (Message, llmCallInfo, error) {
 	messages := agentCtx.Messages
 
 	// Stage 1: ContextManager / TransformContext
@@ -725,6 +761,11 @@ func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, sin
 	if config.PromptCacheKey != "" {
 		callOpts = append(callOpts, WithCallPromptCacheKey(config.PromptCacheKey))
 	}
+
+	// Dynamic options run last so a BeforeModelCall hook can override static
+	// loop settings for this logical call. The same options are reused by every
+	// internal retry.
+	callOpts = append(callOpts, callOptions...)
 
 	// Use streaming for real-time token deltas
 	return callLLMStream(ctx, config.Model, llmMessages, toolSpecs, callOpts, sink)

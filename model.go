@@ -57,10 +57,15 @@ type LoopConfig struct {
 	ThinkingLevel ThinkingLevel // reasoning depth
 
 	// BeforeTurn runs before each model call. Messages it returns are committed
-	// before the request. AfterTurn runs after a normal assistant/tool turn has
-	// been committed and before the loop decides whether to continue or stop.
-	BeforeTurn BeforeTurnHook
-	AfterTurn  AfterTurnHook
+	// before the request. BeforeModelCall then supplies options for that logical
+	// model call and all of its internal retries. AfterModelCall runs after the
+	// call returns a Message but before it is committed or tools are executed.
+	// AfterTurn runs after a normal assistant/tool turn has been committed and
+	// before the loop decides whether to continue or stop.
+	BeforeTurn      BeforeTurnHook
+	BeforeModelCall BeforeModelCallHook
+	AfterModelCall  AfterModelCallHook
+	AfterTurn       AfterTurnHook
 
 	// Context lifecycle. ContextManager drives prompt projection, overflow
 	// recovery, and usage reporting. AgentMessage values lower themselves to

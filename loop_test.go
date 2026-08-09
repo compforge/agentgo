@@ -92,6 +92,69 @@ func TestAgentLoop_TurnHooksPrepareNextModelCall(t *testing.T) {
 	}
 }
 
+func TestAgentLoop_ModelCallHooks(t *testing.T) {
+	var order []string
+	model := callOptionFuncModel(func(_ context.Context, req *LLMRequest, call CallConfig) (*LLMResponse, error) {
+		order = append(order, "model")
+		if got := req.Messages[len(req.Messages)-1].TextContent(); got != "prepared model context" {
+			t.Fatalf("last model message = %q, want prepared model context", got)
+		}
+		if call.ThinkingLevel != ThinkingHigh {
+			t.Fatalf("thinking level = %q, want %q", call.ThinkingLevel, ThinkingHigh)
+		}
+		if call.ToolChoice != "required" {
+			t.Fatalf("tool choice = %#v, want required", call.ToolChoice)
+		}
+		return &LLMResponse{Message: assistantMsg("answer", StopReasonStop)}, nil
+	})
+
+	events := runTestLoop(t,
+		[]AgentMessage{UserMsg("question")},
+		AgentContext{},
+		LoopConfig{
+			Model:         model,
+			ThinkingLevel: ThinkingLow,
+			BeforeTurn: func(context.Context, BeforeTurnContext) ([]AgentMessage, error) {
+				order = append(order, "before_turn")
+				return []AgentMessage{UserMsg("prepared model context")}, nil
+			},
+			BeforeModelCall: func(_ context.Context, call BeforeModelCallContext) ([]CallOption, error) {
+				order = append(order, "before_model_call")
+				if call.TurnIndex != 1 {
+					t.Fatalf("before model call turn = %d, want 1", call.TurnIndex)
+				}
+				if got := call.Context.Messages[len(call.Context.Messages)-1].TextContent(); got != "prepared model context" {
+					t.Fatalf("before model call context tail = %q, want prepared model context", got)
+				}
+				return []CallOption{WithThinking(ThinkingHigh), WithToolChoice("required")}, nil
+			},
+			AfterModelCall: func(_ context.Context, call AfterModelCallContext) error {
+				order = append(order, "after_model_call")
+				if call.TurnIndex != 1 || call.Message.TextContent() != "answer" {
+					t.Fatalf("unexpected after model call context: %#v", call)
+				}
+				if got := call.Context.Messages[len(call.Context.Messages)-1].TextContent(); got != "prepared model context" {
+					t.Fatalf("after model call context tail = %q, want uncommitted response", got)
+				}
+				return nil
+			},
+			AfterTurn: func(_ context.Context, turn AfterTurnContext) error {
+				order = append(order, "after_turn")
+				if got := turn.Context.Messages[len(turn.Context.Messages)-1].TextContent(); got != "answer" {
+					t.Fatalf("after turn context tail = %q, want committed response", got)
+				}
+				return nil
+			},
+		},
+	)
+
+	wantOrder := []string{"before_turn", "before_model_call", "model", "after_model_call", "after_turn"}
+	if !slices.Equal(order, wantOrder) {
+		t.Fatalf("hook order = %v, want %v", order, wantOrder)
+	}
+	requireEvent(t, events, EventTurnEnd)
+}
+
 func TestAgentLoop_TurnHookErrorStopsRun(t *testing.T) {
 	t.Run("before turn", func(t *testing.T) {
 		modelCalls := 0
@@ -132,6 +195,64 @@ func TestAgentLoop_TurnHookErrorStopsRun(t *testing.T) {
 		)
 
 		requireEvent(t, events, EventTurnEnd)
+		requireEvent(t, events, EventError)
+		end, _ := findEvent(events, EventAgentEnd)
+		if end.Summary == nil || end.Summary.EndReason != EndReasonError {
+			t.Fatalf("unexpected summary: %#v", end.Summary)
+		}
+	})
+}
+
+func TestAgentLoop_ModelCallHookErrorStopsRun(t *testing.T) {
+	t.Run("before model call", func(t *testing.T) {
+		modelCalls := 0
+		events := runTestLoop(t,
+			[]AgentMessage{UserMsg("question")},
+			AgentContext{},
+			LoopConfig{
+				Model: funcModel(func(context.Context, *LLMRequest) (*LLMResponse, error) {
+					modelCalls++
+					return &LLMResponse{Message: assistantMsg("unexpected", StopReasonStop)}, nil
+				}),
+				BeforeModelCall: func(context.Context, BeforeModelCallContext) ([]CallOption, error) {
+					return nil, errors.New("prepare call failed")
+				},
+			},
+		)
+
+		if modelCalls != 0 {
+			t.Fatalf("model calls = %d, want 0", modelCalls)
+		}
+		requireEvent(t, events, EventError)
+		end, _ := findEvent(events, EventAgentEnd)
+		if end.Summary == nil || end.Summary.EndReason != EndReasonError {
+			t.Fatalf("unexpected summary: %#v", end.Summary)
+		}
+	})
+
+	t.Run("after model call", func(t *testing.T) {
+		var committed []AgentMessage
+		events := runTestLoop(t,
+			[]AgentMessage{UserMsg("question")},
+			AgentContext{},
+			LoopConfig{
+				Model: mockModel(assistantMsg("answer", StopReasonStop)),
+				CommitMessage: func(message AgentMessage) error {
+					committed = append(committed, message)
+					return nil
+				},
+				AfterModelCall: func(context.Context, AfterModelCallContext) error {
+					return errors.New("validate response failed")
+				},
+			},
+		)
+
+		if len(committed) != 1 || committed[0].GetRole() != RoleUser {
+			t.Fatalf("committed messages = %#v, want only the prompt", committed)
+		}
+		if _, ok := findEvent(events, EventTurnEnd); ok {
+			t.Fatal("turn_end emitted for rejected model response")
+		}
 		requireEvent(t, events, EventError)
 		end, _ := findEvent(events, EventAgentEnd)
 		if end.Summary == nil || end.Summary.EndReason != EndReasonError {
@@ -188,7 +309,7 @@ func TestCallLLM_CommitsProjectedContextWhenRequested(t *testing.T) {
 	}
 
 	events := make(chan Event, 16)
-	if _, _, err := callLLM(context.Background(), agentCtx, cfg, eventSink{ctx: context.Background(), ch: events}); err != nil {
+	if _, _, err := callLLM(context.Background(), agentCtx, cfg, nil, eventSink{ctx: context.Background(), ch: events}); err != nil {
 		t.Fatalf("callLLM failed: %v", err)
 	}
 
@@ -237,6 +358,7 @@ func TestCallLLMWithRetry_EmitsOverflowCompaction(t *testing.T) {
 		context.Background(),
 		&AgentContext{Messages: []AgentMessage{UserMsg("large"), UserMsg("tail")}},
 		LoopConfig{Model: model, ContextManager: manager},
+		nil,
 		eventSink{ctx: context.Background(), ch: events},
 	)
 	if err != nil {
@@ -1557,6 +1679,31 @@ func (m *funcMockModel) GenerateStream(ctx context.Context, msgs []Message, tool
 
 func (m *funcMockModel) SupportsTools() bool { return true }
 
+type callOptionFuncMockModel struct {
+	fn func(ctx context.Context, req *LLMRequest, call CallConfig) (*LLMResponse, error)
+}
+
+func callOptionFuncModel(fn func(context.Context, *LLMRequest, CallConfig) (*LLMResponse, error)) *callOptionFuncMockModel {
+	return &callOptionFuncMockModel{fn: fn}
+}
+
+func (m *callOptionFuncMockModel) Generate(ctx context.Context, msgs []Message, tools []ToolSpec, opts ...CallOption) (*LLMResponse, error) {
+	return m.fn(ctx, &LLMRequest{Messages: msgs, Tools: tools}, ResolveCallConfig(opts))
+}
+
+func (m *callOptionFuncMockModel) GenerateStream(ctx context.Context, msgs []Message, tools []ToolSpec, opts ...CallOption) (<-chan StreamEvent, error) {
+	resp, err := m.Generate(ctx, msgs, tools, opts...)
+	if err != nil {
+		return nil, err
+	}
+	ch := make(chan StreamEvent, 1)
+	ch <- StreamEvent{Type: StreamEventDone, Message: resp.Message, StopReason: resp.Message.StopReason}
+	close(ch)
+	return ch, nil
+}
+
+func (m *callOptionFuncMockModel) SupportsTools() bool { return true }
+
 func collectEvents(ch <-chan Event) []Event {
 	var events []Event
 	for ev := range ch {
@@ -1979,15 +2126,17 @@ func TestCallLLMStream_PartialStreamErrorOnTruncation(t *testing.T) {
 // callLLMWithRetry recognises *PartialStreamError as retryable — otherwise
 // transient provider stream-format glitches would surface as hard failures.
 type flakyStreamModel struct {
-	calls int
-	reply string
+	calls       int
+	reply       string
+	toolChoices []any
 }
 
 func (m *flakyStreamModel) Generate(context.Context, []Message, []ToolSpec, ...CallOption) (*LLMResponse, error) {
 	return nil, fmt.Errorf("Generate not used")
 }
-func (m *flakyStreamModel) GenerateStream(_ context.Context, _ []Message, _ []ToolSpec, _ ...CallOption) (<-chan StreamEvent, error) {
+func (m *flakyStreamModel) GenerateStream(_ context.Context, _ []Message, _ []ToolSpec, opts ...CallOption) (<-chan StreamEvent, error) {
 	m.calls++
+	m.toolChoices = append(m.toolChoices, ResolveCallConfig(opts).ToolChoice)
 	ch := make(chan StreamEvent, 4)
 	if m.calls == 1 {
 		// Truncate after a complete tool call then close without
@@ -2016,24 +2165,40 @@ func (m *flakyStreamModel) GenerateStream(_ context.Context, _ []Message, _ []To
 }
 func (m *flakyStreamModel) SupportsTools() bool { return true }
 
-func TestCallLLMWithRetry_RetriesPartialStream(t *testing.T) {
+func TestAgentLoop_ModelCallHooksWrapInternalRetries(t *testing.T) {
 	m := &flakyStreamModel{reply: "recovered"}
-	events := make(chan Event, 32)
-	defer close(events)
+	beforeCalls := 0
+	afterCalls := 0
+	events := runTestLoop(t,
+		[]AgentMessage{UserMsg("hi")},
+		AgentContext{},
+		LoopConfig{
+			Model:      m,
+			MaxRetries: 2,
+			BeforeModelCall: func(context.Context, BeforeModelCallContext) ([]CallOption, error) {
+				beforeCalls++
+				return []CallOption{WithToolChoice("required")}, nil
+			},
+			AfterModelCall: func(_ context.Context, call AfterModelCallContext) error {
+				afterCalls++
+				if call.Message.TextContent() != "recovered" {
+					t.Fatalf("after model call message = %q, want recovered", call.Message.TextContent())
+				}
+				return nil
+			},
+		},
+	)
 
-	cfg := LoopConfig{Model: m, MaxRetries: 2}
-	agentCtx := &AgentContext{Messages: []AgentMessage{UserMsg("hi")}}
-
-	msg, _, err := callLLMWithRetry(context.Background(), agentCtx, cfg, eventSink{ctx: context.Background(), ch: events})
-	if err != nil {
-		t.Fatalf("expected retry to succeed, got %v", err)
-	}
-	if msg.TextContent() != "recovered" {
-		t.Fatalf("expected recovered message, got %q", msg.TextContent())
-	}
 	if m.calls != 2 {
 		t.Fatalf("expected exactly 2 stream calls (1 partial + 1 success), got %d", m.calls)
 	}
+	if beforeCalls != 1 || afterCalls != 1 {
+		t.Fatalf("model call hook calls = before:%d after:%d, want 1 each", beforeCalls, afterCalls)
+	}
+	if !slices.Equal(m.toolChoices, []any{"required", "required"}) {
+		t.Fatalf("retry tool choices = %#v, want required on both attempts", m.toolChoices)
+	}
+	requireEvent(t, events, EventRetry)
 }
 
 func TestAgentLoop_PanicEmitsAgentEnd(t *testing.T) {

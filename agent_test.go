@@ -10,6 +10,30 @@ import (
 	"time"
 )
 
+func TestAgent_ModelCallHookOptions(t *testing.T) {
+	beforeCalls := 0
+	afterCalls := 0
+	agent := NewAgent(
+		WithModel(mockModel(assistantMsg("done", StopReasonStop))),
+		WithBeforeModelCall(func(context.Context, BeforeModelCallContext) ([]CallOption, error) {
+			beforeCalls++
+			return nil, nil
+		}),
+		WithAfterModelCall(func(context.Context, AfterModelCallContext) error {
+			afterCalls++
+			return nil
+		}),
+	)
+
+	if err := agent.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	agent.WaitForIdle()
+	if beforeCalls != 1 || afterCalls != 1 {
+		t.Fatalf("model call hook calls = before:%d after:%d, want 1 each", beforeCalls, afterCalls)
+	}
+}
+
 func TestAgentInject_WhenRunning_ReturnsSteeredCurrentRun(t *testing.T) {
 	release := make(chan struct{})
 	agent := NewAgent(

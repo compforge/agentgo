@@ -167,6 +167,19 @@ func WithBeforeTurn(hook BeforeTurnHook) AgentOption {
 	return func(a *Agent) { a.beforeTurn = hook }
 }
 
+// WithBeforeModelCall installs a hook that runs after BeforeTurn messages are
+// committed and before each logical model call. Its CallOptions also apply to
+// internal retries of that call.
+func WithBeforeModelCall(hook BeforeModelCallHook) AgentOption {
+	return func(a *Agent) { a.beforeModelCall = hook }
+}
+
+// WithAfterModelCall installs a hook that runs after each logical model call
+// returns a Message and before it is committed or tools are executed.
+func WithAfterModelCall(hook AfterModelCallHook) AgentOption {
+	return func(a *Agent) { a.afterModelCall = hook }
+}
+
 // WithAfterTurn installs a hook that runs after every normally completed
 // assistant/tool turn and before the loop continues or stops.
 func WithAfterTurn(hook AfterTurnHook) AgentOption {

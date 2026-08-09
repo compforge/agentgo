@@ -47,6 +47,8 @@ type Agent struct {
 	messageCommitter     func(AgentMessage) error
 	onMessage            func(AgentMessage)
 	beforeTurn           BeforeTurnHook
+	beforeModelCall      BeforeModelCallHook
+	afterModelCall       AfterModelCallHook
 	afterTurn            AfterTurnHook
 	stopGuard            StopGuard
 	cacheLastMessage     string
@@ -778,6 +780,8 @@ func (a *Agent) buildConfig() LoopConfig {
 		ShouldEmitAbortMarker: a.wantAbortMarker.Load,
 		OnMessage:             a.onMessage,
 		BeforeTurn:            a.beforeTurn,
+		BeforeModelCall:       a.beforeModelCall,
+		AfterModelCall:        a.afterModelCall,
 		AfterTurn:             a.afterTurn,
 		StopGuard:             a.stopGuard,
 		LengthRecoveryPrompt:  a.lengthRecoveryPrompt,

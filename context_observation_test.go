@@ -114,7 +114,7 @@ func TestContextProjectedEventUsesActualCompactedRepresentation(t *testing.T) {
 		},
 		Model: mockModel(assistantMsg("done", StopReasonStop)),
 	}
-	if _, _, err := callLLM(context.Background(), agentCtx, config, eventSink{ctx: context.Background(), ch: events}); err != nil {
+	if _, _, err := callLLM(context.Background(), agentCtx, config, nil, eventSink{ctx: context.Background(), ch: events}); err != nil {
 		t.Fatal(err)
 	}
 	close(events)
