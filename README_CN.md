@@ -86,6 +86,7 @@ AgentMessage
 | Context 投影与恢复 | `ContextManager` |
 | 压缩策略 | `context.Compactor` |
 | Turn 准备与观察 | `WithBeforeTurn` / `WithAfterTurn` |
+| 模型调用选项与校验 | `WithBeforeModelCall` / `WithAfterModelCall` |
 | 终止策略 | `StopGuard` |
 | UI、日志与轨迹采集 | `<-chan Event` / `Agent.Subscribe` |
 

@@ -86,6 +86,7 @@ AgentMessage
 | Context projection and recovery | `ContextManager` |
 | Compaction policy | `context.Compactor` |
 | Turn preparation and observation | `WithBeforeTurn` / `WithAfterTurn` |
+| Model-call options and validation | `WithBeforeModelCall` / `WithAfterModelCall` |
 | Stop policy | `StopGuard` |
 | UI, logging, and trajectory capture | `<-chan Event` / `Agent.Subscribe` |
 
