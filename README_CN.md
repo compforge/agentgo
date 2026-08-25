@@ -12,6 +12,7 @@ AgentGo 从 [AgentCore](https://github.com/voocel/agentcore) 发展而来，现�
 - 单一 Event stream：统一承载模型输出、工具、Context 投影与压缩、重试和结束状态。
 - Model、Tool、ContextManager、Compactor、StopGuard、Turn Hook 和权限 Gate 均可替换。
 - 同一执行内核同时提供有状态 `Agent` 与无状态 `AgentLoop` 两种入口。
+- Message-native 恢复：重建 `Agent`，通过 `SetMessages` 装载 transcript，再调用 `Continue`；Ledger 与 checkpoint 策略由上层 Harness 持有。
 - 支持 steering、follow-up、后台任务、SubAgent 与多 Agent Team。
 - 面向轨迹的 Context 协议：`ContextItem` 记录投影后的 Context 拥有什么，`ContextDemand` 提供与之配对且不带业务解释的需求形状。
 

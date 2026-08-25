@@ -12,6 +12,7 @@ AgentGo evolved from [AgentCore](https://github.com/voocel/agentcore) and now de
 - A single event stream for model output, tools, context projection and compaction, retries, and completion.
 - Replaceable models, tools, context management, compaction, stop guards, turn hooks, and permission gates.
 - Stateful `Agent` and standalone `AgentLoop` entry points over the same execution kernel.
+- Message-native recovery: rebuild an `Agent`, restore its transcript with `SetMessages`, then `Continue`; ledger and checkpoint policy stay in the hosting harness.
 - Steering, follow-up, background tasks, sub-agents, and multi-agent team primitives.
 - Trajectory-ready context contracts: `ContextItem` records what the projected context contains, while `ContextDemand` provides the matching application-neutral demand shape.
 

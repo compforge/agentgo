@@ -37,6 +37,10 @@ agentgo/
    commit/recovery 契约可以替换历史，并报告可观察的 compaction 事实。
 5. **公开 API 保持克制**：新增接口前先确认是否能作为现有 AgentMessage、Event、Tool 或 Context
    可选能力表达；Go 改动提交前运行 `go test ./...` 与 `go build ./...`。
+6. **恢复协议不强制统一状态类型**：当前 AgentGo 的原生恢复状态是 AgentMessage transcript；Adapter
+   先把 checkpoint 之后的已知结果吸收到消息，再用 `Agent.SetMessages` 重建 ContextManager baseline，
+   最后由原有 `Agent.Continue` 继续执行。若未来出现无法从消息和配置重建、且会影响下一步动作的状态，
+   再提升为显式恢复模型。
 
 ## References
 

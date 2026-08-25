@@ -157,9 +157,11 @@ func (a *Agent) PromptMessages(ctx context.Context, msgs ...AgentMessage) error 
 	return nil
 }
 
-// Continue resumes from the current context without adding new messages.
-// If the last message is from assistant, it dequeues steering/follow-up
-// messages (steering first) and replays them as the new prompt.
+// Continue continues unfinished work from the restored or current context
+// without adding new messages.
+// A committed assistant tool-call batch executes only calls that do not yet
+// have results. An otherwise complete assistant tail dequeues
+// steering/follow-up messages (steering first) as the new prompt.
 //
 // Queue retention caveat: messages queued via Steer/FollowUp survive an
 // aborted run — Abort cancels execution but never consumes or clears the
@@ -189,6 +191,13 @@ func (a *Agent) Continue(ctx context.Context) error {
 	// If last message is assistant, try to dequeue pending messages as new prompt
 	lastMsg := a.messages[len(a.messages)-1]
 	if lastMsg.GetRole() == RoleAssistant {
+		// A committed assistant tool-call batch is unfinished work. Continue it
+		// before considering queued input; the loop preserves already committed
+		// results and executes only calls that remain unanswered.
+		if continuationToolTurn(a.messages) != nil {
+			a.startContinueRunLocked(ctx)
+			return nil
+		}
 		if a.resumeQueuedLocked(ctx) {
 			return nil
 		}
@@ -378,10 +387,13 @@ func (a *Agent) SetMessageCommitter(fn func(AgentMessage) error) {
 }
 
 // SetMessages replaces the message history — restore a previous conversation,
-// or clear it with nil. Refused while a run is in flight (ErrAlreadyRunning):
-// the loop's context commit would resurrect the replaced history as silent
-// corruption. Hold the lifecycle first (HoldRuns) when mutating around live
-// runs.
+// or clear it with nil — without starting model or tool effects. The current
+// AgentGo native recovery state is the transcript: model, tools, and system
+// prompt are reconstructed through Agent options, while ContextManager.Sync
+// rebuilds its baseline from these messages. Refused while a run is in flight
+// (ErrAlreadyRunning): the loop's context commit would resurrect the replaced
+// history as silent corruption. Hold the lifecycle first (HoldRuns) when
+// mutating around live runs.
 func (a *Agent) SetMessages(msgs []AgentMessage) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -429,7 +441,7 @@ func (a *Agent) startPromptRunLocked(ctx context.Context, msgs []AgentMessage) {
 	go a.consumeLoop(AgentLoop(runCtx, msgs, agentCtx, config))
 }
 
-// startContinueRunLocked starts a continue run from the current context. Caller must hold a.mu.
+// startContinueRunLocked continues a run from the current context. Caller must hold a.mu.
 // See startPromptRunLocked for run-ctx semantics.
 func (a *Agent) startContinueRunLocked(ctx context.Context) {
 	a.isRunning = true

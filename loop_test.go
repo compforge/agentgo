@@ -1475,6 +1475,51 @@ func TestLoopPublicAPIs(t *testing.T) {
 		}
 	})
 
+	t.Run("continue executes only unanswered durable tool calls", func(t *testing.T) {
+		var calls []string
+		first := ToolCall{ID: "call-1", Name: "echo", Args: json.RawMessage(`{"value":"one"}`)}
+		second := ToolCall{ID: "call-2", Name: "echo", Args: json.RawMessage(`{"value":"two"}`)}
+		model := sequentialModel(func(i int, request *LLMRequest) (*LLMResponse, error) {
+			if i != 0 {
+				t.Fatalf("model call = %d, want one continuation call", i)
+			}
+			last := request.Messages[len(request.Messages)-1]
+			if last.Role != RoleTool || last.Metadata["tool_call_id"] != second.ID {
+				t.Fatalf("model request tail = %#v", last)
+			}
+			return &LLMResponse{Message: assistantMsg("done", StopReasonStop)}, nil
+		})
+		var committed []AgentMessage
+		events := collectEvents(AgentLoopContinue(
+			context.Background(),
+			AgentContext{
+				Messages: []AgentMessage{
+					UserMsg("resume"),
+					toolCallMsg(first, second),
+					ToolResultMsg(first.ID, json.RawMessage(`"already done"`), false),
+				},
+				Tools: []Tool{echoTool(&calls)},
+			},
+			LoopConfig{
+				Model: model,
+				CommitMessage: func(message AgentMessage) error {
+					committed = append(committed, message)
+					return nil
+				},
+			},
+		))
+		if !slices.Equal(calls, []string{"two"}) {
+			t.Fatalf("tool calls = %v, want only unanswered call", calls)
+		}
+		if len(committed) != 2 || committed[0].GetRole() != RoleTool || committed[1].TextContent() != "done" {
+			t.Fatalf("committed messages = %#v", committed)
+		}
+		end, _ := findEvent(events, EventAgentEnd)
+		if end.Summary == nil || end.Summary.ToolCalls != 1 || end.Summary.TurnCount != 2 {
+			t.Fatalf("summary = %#v", end.Summary)
+		}
+	})
+
 }
 
 // ---------------------------------------------------------------------------

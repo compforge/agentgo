@@ -2,6 +2,7 @@ package agentgo
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -9,6 +10,41 @@ import (
 	"testing"
 	"time"
 )
+
+func TestAgentContinueRestoredAssistantToolCalls(t *testing.T) {
+	var calls []string
+	call := ToolCall{ID: "call-1", Name: "echo", Args: json.RawMessage(`{"value":"restored"}`)}
+	model := sequentialModel(func(i int, request *LLMRequest) (*LLMResponse, error) {
+		if i != 0 {
+			t.Fatalf("model call = %d, want one continuation call", i)
+		}
+		last := request.Messages[len(request.Messages)-1]
+		if last.Role != RoleTool || last.Metadata["tool_call_id"] != call.ID {
+			t.Fatalf("model request tail = %#v, want restored tool result", last)
+		}
+		return &LLMResponse{Message: assistantMsg("done", StopReasonStop)}, nil
+	})
+	agent := NewAgent(WithModel(model), WithTools(echoTool(&calls)))
+	if err := agent.SetMessages([]AgentMessage{UserMsg("resume"), toolCallMsg(call)}); err != nil {
+		t.Fatalf("restore messages: %v", err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("SetMessages executed tools: %v", calls)
+	}
+
+	if err := agent.Continue(context.Background()); err != nil {
+		t.Fatalf("continue restored tool turn: %v", err)
+	}
+	agent.WaitForIdle()
+
+	if len(calls) != 1 || calls[0] != "restored" {
+		t.Fatalf("tool calls = %v, want restored call once", calls)
+	}
+	messages := agent.Messages()
+	if len(messages) != 4 || messages[2].GetRole() != RoleTool || messages[3].TextContent() != "done" {
+		t.Fatalf("restored messages = %#v", messages)
+	}
+}
 
 func TestAgent_ModelCallHookOptions(t *testing.T) {
 	beforeCalls := 0

@@ -64,7 +64,7 @@ func AgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentContex
 			sink.emit(Event{Type: EventMessageEnd, Message: p})
 		}
 
-		runLoop(ctx, &currentCtx, &newMessages, config, sink)
+		runLoop(ctx, &currentCtx, &newMessages, config, sink, nil)
 	}()
 
 	return ch
@@ -82,7 +82,8 @@ func recoverToEnd(sink eventSink) {
 }
 
 // AgentLoopContinue continues from existing context without adding new messages.
-// The last message in context must convert to user or tool role via ToMessage.
+// Besides user/tool tails, it resumes unanswered tool calls from a committed
+// assistant message before making another model call.
 //
 // The returned channel follows the same consumption contract as AgentLoop:
 // drain until close, or cancel ctx and keep draining to stop early.
@@ -115,7 +116,7 @@ func AgentLoopContinue(ctx context.Context, agentCtx AgentContext, config LoopCo
 		sink.emit(Event{Type: EventAgentStart})
 		sink.emit(Event{Type: EventTurnStart})
 
-		runLoop(ctx, &currentCtx, &newMessages, config, sink)
+		runLoop(ctx, &currentCtx, &newMessages, config, sink, continuationToolTurn(currentCtx.Messages))
 	}()
 
 	return ch
@@ -138,6 +139,49 @@ func commitMessage(currentCtx *AgentContext, newMessages *[]AgentMessage, config
 	return nil
 }
 
+type pendingToolTurn struct {
+	assistant Message
+	calls     []ToolCall
+}
+
+func continuationToolTurn(messages []AgentMessage) *pendingToolTurn {
+	concrete := ToMessages(messages)
+	if len(concrete) == 0 {
+		return nil
+	}
+	assistantIndex := len(concrete) - 1
+	for assistantIndex >= 0 && concrete[assistantIndex].Role == RoleTool {
+		assistantIndex--
+	}
+	if assistantIndex < 0 || concrete[assistantIndex].Role != RoleAssistant {
+		return nil
+	}
+	assistant := concrete[assistantIndex]
+	calls := assistant.ToolCalls()
+	if len(calls) == 0 {
+		return nil
+	}
+	answered := make(map[string]bool, len(calls))
+	for _, message := range concrete[assistantIndex+1:] {
+		if message.Role != RoleTool {
+			return nil
+		}
+		if id, ok := message.Metadata["tool_call_id"].(string); ok {
+			answered[id] = true
+		}
+	}
+	pending := make([]ToolCall, 0, len(calls))
+	for _, call := range calls {
+		if !answered[call.ID] {
+			pending = append(pending, call)
+		}
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	return &pendingToolTurn{assistant: assistant, calls: pending}
+}
+
 // runLoop is the main double-loop logic shared by AgentLoop and AgentLoopContinue.
 //
 // Core loop contracts:
@@ -149,7 +193,14 @@ func commitMessage(currentCtx *AgentContext, newMessages *[]AgentMessage, config
 //   - Tool results are appended after the assistant message that requested them.
 //   - Steering stops not-yet-started tools. Started tools follow their
 //     InterruptBehavior and may continue or be cancelled.
-func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]AgentMessage, config LoopConfig, sink eventSink) {
+func runLoop(
+	ctx context.Context,
+	currentCtx *AgentContext,
+	newMessages *[]AgentMessage,
+	config LoopConfig,
+	sink eventSink,
+	continuation *pendingToolTurn,
+) {
 	type runSummaryState struct {
 		toolCalls  int
 		toolErrors int
@@ -300,7 +351,7 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 			}
 
 			// Process pending messages (inject before next LLM call)
-			if len(pendingMessages) > 0 {
+			if continuation == nil && len(pendingMessages) > 0 {
 				for _, msg := range pendingMessages {
 					sink.emit(Event{Type: EventMessageStart, Message: msg})
 					if !commit(msg) {
@@ -309,6 +360,56 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 					sink.emit(Event{Type: EventMessageEnd, Message: msg})
 				}
 				pendingMessages = nil
+			}
+			if continuation != nil {
+				assistantMsg := continuation.assistant
+				toolCalls := continuation.calls
+				continuation = nil
+				lastAssistantMsg = assistantMsg
+				summaryState.toolCalls += len(toolCalls)
+
+				turnToolResults, steering := executeToolCalls(
+					ctx, currentCtx.Tools, toolCalls, config, toolErrors, sink,
+				)
+				afterToolExec = true
+				for _, result := range turnToolResults {
+					resultMsg := toolResultMessage(config, findToolCall(toolCalls, result.ToolCallID), result)
+					sink.emit(Event{Type: EventMessageStart, Message: resultMsg})
+					if !commit(resultMsg) {
+						return
+					}
+					sink.emit(Event{Type: EventMessageEnd, Message: resultMsg})
+					if result.IsError {
+						summaryState.toolErrors++
+					}
+				}
+				turnCount++
+				sink.emit(Event{Type: EventTurnEnd, Message: assistantMsg, ToolResults: turnToolResults})
+				if !runAfterTurn(turnCount, assistantMsg, turnToolResults) {
+					return
+				}
+
+				if stopAfterToolHit(config, turnToolResults) {
+					inject, escalate := consultStopGuard(ctx, config, StopInfo{
+						TurnIndex: turnCount,
+						Message:   lastAssistantMsg,
+						Trigger:   StopTriggerAfterTool,
+					})
+					if escalate {
+						sink.emit(Event{Type: EventError, Err: ErrStopGuard})
+						sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonError)})
+						return
+					}
+					if inject == "" {
+						sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonStop)})
+						return
+					}
+					pendingMessages = append([]AgentMessage{UserMsg(inject)}, pendingMessages...)
+					pendingMessages = append(pendingMessages, steering...)
+					continue
+				}
+				pendingMessages = append(pendingMessages, steering...)
+				continue
 			}
 			if !runBeforeTurn(turnCount + 1) {
 				return
