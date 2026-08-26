@@ -75,7 +75,18 @@ AgentMessage
 
 应用消息可通过 `ContextItemProvider` 暴露有稳定身份的信息，而不改变模型渲染。每次模型调用前，`EventContextProjected` 会报告实际投影后的 Context 清单。`ContextItem` 与 `ContextDemand` 共享 `ContextKey`；标签含义及 Demand 提取规则由应用和 Evaluator 负责。
 
-`AgentState.Marshal` / `Unmarshal` 暴露完整 turn 边界上的可持久状态。宿主可以通过 `WithBeforeRun` 加载状态、通过 `WithAfterTurn` 保存状态，并用 model/tool middleware 返回外部 Ledger 已知的执行结果。AgentGo 只提供机制，不决定存储、checkpoint 频率或副作用恢复策略。
+`AgentState` 感知 codec，但不绑定存储或传输方式。`agentgo.NewCodec` 会注册 AgentGo 内置状态类型；应用只需用一个稳定 TypeID 注册自己的具体 `AgentMessage` 类型。字段通过 `codec` tag 主动参与编码，特殊 wire 表示则使用自定义 Handler。同一份编码状态可用于持久化、进程交接或未来的 RPC 协议。
+
+```go
+stateCodec, _ := agentgo.NewCodec(
+    codec.Type[*ProgressMessage]("example.progress-message.v1"),
+)
+
+data, _ := stateCodec.Marshal(agent.State())
+
+var state agentgo.AgentState
+_ = stateCodec.Unmarshal(data, &state)
+```
 
 ## 扩展点
 
@@ -87,14 +98,14 @@ AgentMessage
 | 工具授权 | `ToolGate` |
 | Context 投影与恢复 | `ContextManager` |
 | 压缩策略 | `context.Compactor` |
-| Run 恢复与收尾 | `WithBeforeRun` / `WithAfterRun` |
-| Turn 准备与 checkpoint 观察 | `WithBeforeTurn` / `WithAfterTurn` |
+| Run 状态注入与收尾 | `WithBeforeRun` / `WithAfterRun` |
+| Turn 准备与状态观察 | `WithBeforeTurn` / `WithAfterTurn` |
 | 模型调用拦截 | `WithModelMiddlewares` |
 | 工具调用拦截 | `WithToolMiddlewares` |
 | 终止策略 | `StopGuard` |
 | UI、日志与轨迹采集 | `<-chan Event` / `Agent.Subscribe` |
 
-内置包包括 `llm/` 模型适配、`context/` 上下文策略、`tools/` 编程工具，以及可选的 `subagent/`、`team/`、`task/`、`proxy/` 和 `permission/` 能力。
+内置包包括 `codec/` 类型化状态编码、`llm/` 模型适配、`context/` 上下文策略、`tools/` 编程工具，以及可选的 `subagent/`、`team/`、`task/`、`proxy/` 和 `permission/` 能力。
 
 ## 设计与 API
 

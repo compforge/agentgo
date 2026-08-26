@@ -39,12 +39,12 @@ const (
 // ContentBlock is a tagged union for message content.
 // Exactly one payload field is populated, matching the Type value.
 type ContentBlock struct {
-	Type     ContentType `json:"type"`
-	Text     string      `json:"text,omitempty"`
-	Thinking string      `json:"thinking,omitempty"`
-	ToolCall *ToolCall   `json:"tool_call,omitempty"`
-	Image    *ImageData  `json:"image,omitempty"`
-	ToolName string      `json:"tool_name,omitempty"` // tool_reference: referenced tool name
+	Type     ContentType `json:"type" codec:"type"`
+	Text     string      `json:"text,omitempty" codec:"text,omitempty"`
+	Thinking string      `json:"thinking,omitempty" codec:"thinking,omitempty"`
+	ToolCall *ToolCall   `json:"tool_call,omitempty" codec:"tool_call,omitempty"`
+	Image    *ImageData  `json:"image,omitempty" codec:"image,omitempty"`
+	ToolName string      `json:"tool_name,omitempty" codec:"tool_name,omitempty"` // tool_reference: referenced tool name
 }
 
 // ImageData holds image content as base64 data or a URL.
@@ -52,9 +52,9 @@ type ContentBlock struct {
 // When Data is set, it is sent as a base64 data URL with MimeType.
 // MimeType is required for base64 mode, optional for URL mode (provider infers it).
 type ImageData struct {
-	Data     string `json:"data,omitempty"`
-	URL      string `json:"url,omitempty"`
-	MimeType string `json:"mime_type,omitempty"`
+	Data     string `json:"data,omitempty" codec:"data,omitempty"`
+	URL      string `json:"url,omitempty" codec:"url,omitempty"`
+	MimeType string `json:"mime_type,omitempty" codec:"mime_type,omitempty"`
 }
 
 // Block constructors
@@ -105,11 +105,11 @@ const (
 
 // Cost tracks monetary cost for a single LLM call in USD.
 type Cost struct {
-	Input      float64 `json:"input"`
-	Output     float64 `json:"output"`
-	CacheRead  float64 `json:"cache_read"`
-	CacheWrite float64 `json:"cache_write"`
-	Total      float64 `json:"total"`
+	Input      float64 `json:"input" codec:"input"`
+	Output     float64 `json:"output" codec:"output"`
+	CacheRead  float64 `json:"cache_read" codec:"cache_read"`
+	CacheWrite float64 `json:"cache_write" codec:"cache_write"`
+	Total      float64 `json:"total" codec:"total"`
 }
 
 // Add accumulates another Cost into this one (nil-safe).
@@ -135,15 +135,15 @@ func (c *Cost) Add(other *Cost) {
 //   - Provider/Model: actual provider/model that produced this call, if reported
 //   - Cost: monetary cost computed from model pricing (nil if pricing unavailable)
 type Usage struct {
-	Provider string `json:"provider,omitempty"`
-	Model    string `json:"model,omitempty"`
+	Provider string `json:"provider,omitempty" codec:"provider,omitempty"`
+	Model    string `json:"model,omitempty" codec:"model,omitempty"`
 
-	Input       int   `json:"input"`
-	Output      int   `json:"output"`
-	CacheRead   int   `json:"cache_read"`
-	CacheWrite  int   `json:"cache_write"`
-	TotalTokens int   `json:"total_tokens"`
-	Cost        *Cost `json:"cost,omitempty"`
+	Input       int   `json:"input" codec:"input"`
+	Output      int   `json:"output" codec:"output"`
+	CacheRead   int   `json:"cache_read" codec:"cache_read"`
+	CacheWrite  int   `json:"cache_write" codec:"cache_write"`
+	TotalTokens int   `json:"total_tokens" codec:"total_tokens"`
+	Cost        *Cost `json:"cost,omitempty" codec:"cost,omitempty"`
 }
 
 // Add accumulates another Usage into this one (nil-safe).
@@ -225,12 +225,12 @@ type AgentMessage interface {
 
 // Message is an LLM-level message with structured content blocks.
 type Message struct {
-	Role       Role           `json:"role"`
-	Content    []ContentBlock `json:"content"`
-	StopReason StopReason     `json:"stop_reason,omitempty"`
-	Usage      *Usage         `json:"usage,omitempty"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
-	Timestamp  time.Time      `json:"timestamp"`
+	Role       Role           `json:"role" codec:"role"`
+	Content    []ContentBlock `json:"content" codec:"content"`
+	StopReason StopReason     `json:"stop_reason,omitempty" codec:"stop_reason,omitempty"`
+	Usage      *Usage         `json:"usage,omitempty" codec:"usage,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty" codec:"metadata,omitempty"`
+	Timestamp  time.Time      `json:"timestamp" codec:"timestamp"`
 }
 
 func (m Message) GetRole() Role           { return m.Role }

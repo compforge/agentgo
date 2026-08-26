@@ -27,8 +27,8 @@ type AfterTurnContext struct {
 type BeforeTurnHook func(context.Context, BeforeTurnContext) ([]AgentMessage, error)
 
 // AfterTurnHook runs after a turn has been committed and the loop has decided
-// whether and how to advance. State is therefore a complete turn-boundary
-// checkpoint. Returning an error stops the run.
+// whether and how to advance. State therefore reflects a complete turn
+// boundary. Returning an error stops the run.
 type AfterTurnHook func(context.Context, AfterTurnContext) error
 
 func snapshotAgentContext(current *AgentContext) AgentContext {

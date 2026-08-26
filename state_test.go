@@ -6,13 +6,24 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
+	"time"
+
+	agentcodec "github.com/compforge/agentgo/codec"
 )
 
-func TestAgentStateMarshalRoundTripDurableProjection(t *testing.T) {
+func TestAgentStateCodecRoundTripPortableProjection(t *testing.T) {
+	userMessage := UserMsg("hello")
+	assistantMessage := assistantMsg("world", StopReasonToolUse)
+	assistantMessage.Content = append(assistantMessage.Content, ToolCallBlock(ToolCall{
+		ID:   "read-1",
+		Name: "read",
+		Args: json.RawMessage(`{"path":"README.md"}`),
+	}))
 	original := AgentState{
 		SystemPrompt:     "runtime config",
-		Messages:         []AgentMessage{UserMsg("hello"), assistantMsg("world", StopReasonStop)},
+		Messages:         []AgentMessage{&userMessage, assistantMessage},
 		Tools:            []Tool{NewFuncTool("noop", "noop", nil, nil)},
 		IsRunning:        true,
 		StreamMessage:    assistantMsg("partial", ""),
@@ -31,17 +42,29 @@ func TestAgentStateMarshalRoundTripDurableProjection(t *testing.T) {
 		Error: "runtime error",
 	}
 
-	data, err := original.Marshal()
+	c, err := NewCodec()
 	if err != nil {
 		t.Fatal(err)
 	}
+	data, err := c.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"$type":"agentgo.agent-state.v1"`) || !strings.Contains(string(data), `"$type":"agentgo.message.v1"`) {
+		t.Fatalf("encoded state does not carry stable AgentGo type IDs: %s", data)
+	}
 	var restored AgentState
-	if err := restored.Unmarshal(data); err != nil {
+	if err := c.Unmarshal(data, &restored); err != nil {
 		t.Fatal(err)
 	}
 
 	if len(restored.Messages) != 2 || restored.Messages[0].TextContent() != "hello" || restored.Messages[1].TextContent() != "world" {
 		t.Fatalf("restored messages = %#v", restored.Messages)
+	}
+	restoredAssistant := restored.Messages[1].(Message)
+	toolCalls := restoredAssistant.ToolCalls()
+	if len(toolCalls) != 1 || toolCalls[0].ID != "read-1" || string(toolCalls[0].Args) != `{"path":"README.md"}` {
+		t.Fatalf("restored tool calls = %#v", toolCalls)
 	}
 	if !reflect.DeepEqual(restored.TotalUsage, original.TotalUsage) {
 		t.Fatalf("restored usage = %#v, want %#v", restored.TotalUsage, original.TotalUsage)
@@ -53,20 +76,76 @@ func TestAgentStateMarshalRoundTripDurableProjection(t *testing.T) {
 		t.Fatalf("pending message = %q", got)
 	}
 	if restored.SystemPrompt != "" || restored.Tools != nil || restored.IsRunning || restored.StreamMessage != nil || restored.PendingToolCalls != nil || restored.Error != "" {
-		t.Fatalf("runtime fields leaked into durable state: %#v", restored)
+		t.Fatalf("runtime fields leaked into portable state: %#v", restored)
 	}
 }
 
-func TestAgentStateMarshalRejectsUnknownAgentMessage(t *testing.T) {
+func TestAgentStateCodecRejectsUnregisteredAgentMessage(t *testing.T) {
+	c, err := NewCodec()
+	if err != nil {
+		t.Fatal(err)
+	}
 	state := AgentState{Messages: []AgentMessage{applicationMessage{text: "domain message", include: true}}}
-	if _, err := state.Marshal(); err == nil {
-		t.Fatal("expected unsupported AgentMessage error")
+	if _, err := c.Marshal(state); err == nil || !strings.Contains(err.Error(), "is not registered") {
+		t.Fatalf("error = %v, want unregistered AgentMessage", err)
+	}
+}
+
+type codecApplicationMessage struct {
+	Text      string    `codec:"text"`
+	Include   bool      `codec:"include"`
+	Timestamp time.Time `codec:"timestamp"`
+	cache     string
+}
+
+func (m *codecApplicationMessage) GetRole() Role           { return RoleUser }
+func (m *codecApplicationMessage) GetTimestamp() time.Time { return m.Timestamp }
+func (m *codecApplicationMessage) Raw() AgentMessage       { return m }
+func (m *codecApplicationMessage) Priority() int           { return 0 }
+func (m *codecApplicationMessage) Compact(float64) (AgentMessage, float64) {
+	return m, 1
+}
+func (m *codecApplicationMessage) TextContent() string     { return m.Text }
+func (m *codecApplicationMessage) ThinkingContent() string { return "" }
+func (m *codecApplicationMessage) HasToolCalls() bool      { return false }
+func (m *codecApplicationMessage) ToMessage() (Message, bool) {
+	return UserMsg(m.Text), m.Include
+}
+
+func TestAgentStateCodecRoundTripsRegisteredApplicationMessage(t *testing.T) {
+	c, err := NewCodec(
+		agentcodec.Type[*codecApplicationMessage]("test.application-message.v1"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &codecApplicationMessage{
+		Text:      "domain message",
+		Include:   true,
+		Timestamp: time.Date(2026, time.August, 26, 12, 0, 0, 0, time.UTC),
+		cache:     "runtime only",
+	}
+
+	data, err := c.Marshal(AgentState{Messages: []AgentMessage{want}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored AgentState
+	if err := c.Unmarshal(data, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if len(restored.Messages) != 1 {
+		t.Fatalf("restored messages = %#v", restored.Messages)
+	}
+	got, ok := restored.Messages[0].(*codecApplicationMessage)
+	if !ok || got.Text != want.Text || !got.Include || !got.Timestamp.Equal(want.Timestamp) || got.cache != "" {
+		t.Fatalf("restored message = %#v", restored.Messages[0])
 	}
 }
 
 func TestAgentLoopRunHooksExecuteOnce(t *testing.T) {
 	var order []string
-	var checkpoints []AgentState
+	var turnStates []AgentState
 	events := runTestLoop(t,
 		[]AgentMessage{UserMsg("question")},
 		AgentContext{},
@@ -84,9 +163,9 @@ func TestAgentLoopRunHooksExecuteOnce(t *testing.T) {
 			},
 			AfterTurn: func(_ context.Context, turn AfterTurnContext) error {
 				order = append(order, "after_turn")
-				checkpoints = append(checkpoints, turn.State)
+				turnStates = append(turnStates, turn.State)
 				if turn.State.Progress.CompletedTurns != turn.TurnIndex {
-					t.Fatalf("checkpoint turn = %d, want %d", turn.State.Progress.CompletedTurns, turn.TurnIndex)
+					t.Fatalf("state turn = %d, want %d", turn.State.Progress.CompletedTurns, turn.TurnIndex)
 				}
 				return nil
 			},
@@ -103,11 +182,11 @@ func TestAgentLoopRunHooksExecuteOnce(t *testing.T) {
 	if !slices.Equal(order, []string{"before_run", "after_turn", "after_turn", "after_run"}) {
 		t.Fatalf("lifecycle order = %v", order)
 	}
-	if len(checkpoints) != 2 || !checkpoints[0].Progress.NextTurn || len(checkpoints[0].Progress.PendingMessages) != 1 {
-		t.Fatalf("first checkpoint does not carry length continuation: %#v", checkpoints)
+	if len(turnStates) != 2 || !turnStates[0].Progress.NextTurn || len(turnStates[0].Progress.PendingMessages) != 1 {
+		t.Fatalf("first turn state does not carry length continuation: %#v", turnStates)
 	}
-	if checkpoints[1].Progress.NextTurn || len(checkpoints[1].Progress.PendingMessages) != 0 {
-		t.Fatalf("final checkpoint unexpectedly continues: %#v", checkpoints[1].Progress)
+	if turnStates[1].Progress.NextTurn || len(turnStates[1].Progress.PendingMessages) != 0 {
+		t.Fatalf("final turn state unexpectedly continues: %#v", turnStates[1].Progress)
 	}
 	end, ok := findEvent(events, EventAgentEnd)
 	if !ok || end.State == nil || end.State.Progress.Active {
@@ -127,7 +206,7 @@ func TestAgentLoopTerminalModelMessageProducesCheckpoint(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var checkpoint AgentState
+			var turnState AgentState
 			var final AfterRunContext
 			events := runTestLoop(t,
 				[]AgentMessage{UserMsg("question")},
@@ -135,7 +214,7 @@ func TestAgentLoopTerminalModelMessageProducesCheckpoint(t *testing.T) {
 				LoopConfig{
 					Model: mockModel(assistantMsg("terminal", tt.stopReason)),
 					AfterTurn: func(_ context.Context, turn AfterTurnContext) error {
-						checkpoint = turn.State
+						turnState = turn.State
 						return nil
 					},
 					AfterRun: func(_ context.Context, run AfterRunContext) error {
@@ -145,8 +224,8 @@ func TestAgentLoopTerminalModelMessageProducesCheckpoint(t *testing.T) {
 				},
 			)
 
-			if checkpoint.Progress.CompletedTurns != 1 || checkpoint.Progress.NextTurn {
-				t.Fatalf("terminal checkpoint progress = %#v", checkpoint.Progress)
+			if turnState.Progress.CompletedTurns != 1 || turnState.Progress.NextTurn {
+				t.Fatalf("terminal turn progress = %#v", turnState.Progress)
 			}
 			if final.State.Progress.CompletedTurns != 1 || final.Summary.TurnCount != 1 || final.Summary.EndReason != tt.endReason {
 				t.Fatalf("terminal final state/summary = %#v / %#v", final.State.Progress, final.Summary)
@@ -227,7 +306,7 @@ func TestAgentRunHooksRepeatPerRunNotPerTurn(t *testing.T) {
 
 func TestAgentLoopAfterRunObservesBeforeRunFailure(t *testing.T) {
 	afterCalls := 0
-	loadErr := errors.New("load checkpoint")
+	loadErr := errors.New("load state")
 	events := runTestLoop(t,
 		nil,
 		AgentContext{},

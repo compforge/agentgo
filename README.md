@@ -75,7 +75,18 @@ AgentMessage
 
 `ContextItemProvider` lets an application message expose identifiable information without changing its model rendering. Before each model call, `EventContextProjected` reports the inventory from the actual projected context. `ContextItem` and `ContextDemand` share `ContextKey`; applications and evaluators own all label meanings and demand-extraction rules.
 
-`AgentState.Marshal` / `Unmarshal` expose the durable state at a completed-turn boundary. A host can load it in `WithBeforeRun`, save it in `WithAfterTurn`, and use model/tool middleware to return outcomes already known by an external ledger. AgentGo supplies these mechanisms but does not choose storage, checkpoint frequency, or side-effect recovery policy.
+`AgentState` is codec-aware without being tied to storage or transport. `agentgo.NewCodec` registers AgentGo's built-in state types; applications register their own concrete `AgentMessage` types with one stable type ID. Fields opt in through `codec` tags, while custom handlers cover special wire representations. Hosts can use the same encoded state for persistence, process handoff, or future RPC protocols.
+
+```go
+stateCodec, _ := agentgo.NewCodec(
+    codec.Type[*ProgressMessage]("example.progress-message.v1"),
+)
+
+data, _ := stateCodec.Marshal(agent.State())
+
+var state agentgo.AgentState
+_ = stateCodec.Unmarshal(data, &state)
+```
 
 ## Extension points
 
@@ -87,14 +98,14 @@ AgentMessage
 | Tool authorization | `ToolGate` |
 | Context projection and recovery | `ContextManager` |
 | Compaction policy | `context.Compactor` |
-| Run restore and finalization | `WithBeforeRun` / `WithAfterRun` |
-| Turn preparation and checkpoint observation | `WithBeforeTurn` / `WithAfterTurn` |
+| Run state injection and finalization | `WithBeforeRun` / `WithAfterRun` |
+| Turn preparation and state observation | `WithBeforeTurn` / `WithAfterTurn` |
 | Model-call interception | `WithModelMiddlewares` |
 | Tool-call interception | `WithToolMiddlewares` |
 | Stop policy | `StopGuard` |
 | UI, logging, and trajectory capture | `<-chan Event` / `Agent.Subscribe` |
 
-Built-in packages include model adapters under `llm/`, context strategies under `context/`, coding tools under `tools/`, and optional `subagent/`, `team/`, `task/`, `proxy/`, and `permission/` capabilities.
+Built-in packages include typed state encoding under `codec/`, model adapters under `llm/`, context strategies under `context/`, coding tools under `tools/`, and optional `subagent/`, `team/`, `task/`, `proxy/`, and `permission/` capabilities.
 
 ## Design and API
 
