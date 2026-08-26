@@ -50,9 +50,9 @@ type Config struct {
 	// a harness with a permission system should thread its gate here.
 	ToolGate agentgo.ToolGate
 
-	// Middlewares wrap each tool execution in this sub-agent's runs
-	// (outermost first). Mirrors agentgo.WithMiddlewares.
-	Middlewares []agentgo.ToolMiddleware
+	// ToolMiddlewares wrap each tool execution in this sub-agent's runs
+	// (outermost first). Mirrors agentgo.WithToolMiddlewares.
+	ToolMiddlewares []agentgo.ToolMiddleware
 
 	// ThinkingLevel sets the reasoning depth for this sub-agent's runs.
 	// Empty ("") leaves it unspecified (model/provider default). Mirrors
@@ -910,7 +910,7 @@ func (r *Runner) run(ctx context.Context, agentName, taskStr string, modelOverri
 		MaxTurns:                 cfg.MaxTurns,
 		MaxRetries:               cfg.MaxRetries,
 		ToolGate:                 cfg.ToolGate,
-		Middlewares:              cfg.Middlewares,
+		ToolMiddlewares:          cfg.ToolMiddlewares,
 		ContextManager:           contextManager,
 		ToolResultMessageFactory: cfg.ToolResultMessageFactory,
 		ThinkingLevel:            r.resolveThinking(agentName, cfg.ThinkingLevel),

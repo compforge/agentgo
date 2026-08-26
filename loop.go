@@ -36,49 +36,7 @@ const (
 // degrades to best-effort and the loop is guaranteed to exit and close the
 // channel even if no one is reading.
 func AgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentContext, config LoopConfig) <-chan Event {
-	ch := make(chan Event, 128)
-	sink := eventSink{ctx: ctx, ch: ch}
-
-	go func() {
-		defer close(ch)
-		defer recoverToEnd(sink) // runs before close(ch): a panic still emits EventAgentEnd
-
-		var newMessages []AgentMessage
-
-		currentCtx := AgentContext{
-			SystemPrompt: agentCtx.SystemPrompt,
-			SystemBlocks: agentCtx.SystemBlocks,
-			Messages:     copyMessages(agentCtx.Messages),
-			Tools:        agentCtx.Tools,
-		}
-
-		sink.emit(Event{Type: EventAgentStart})
-		sink.emit(Event{Type: EventTurnStart})
-
-		for _, p := range prompts {
-			sink.emit(Event{Type: EventMessageStart, Message: p})
-			if err := commitMessage(&currentCtx, &newMessages, config, p); err != nil {
-				sink.emitError(fmt.Errorf("commit prompt message: %w", err), &RunSummary{EndReason: EndReasonError})
-				return
-			}
-			sink.emit(Event{Type: EventMessageEnd, Message: p})
-		}
-
-		runLoop(ctx, &currentCtx, &newMessages, config, sink)
-	}()
-
-	return ch
-}
-
-// recoverToEnd turns a panic in the loop goroutine into a clean terminal event
-// instead of silently closing the channel. The loop contract promises the
-// channel always closes; this extends it so EventAgentEnd is emitted on every
-// termination path including panic, which observers/subscribers rely on (e.g.
-// to mark an agent stopped). Deferred BEFORE close(ch) so the emit lands first.
-func recoverToEnd(sink eventSink) {
-	if r := recover(); r != nil {
-		sink.emitError(fmt.Errorf("agent loop panicked: %v", r), &RunSummary{EndReason: EndReasonError})
-	}
+	return startAgentLoop(ctx, prompts, agentCtx, config, false)
 }
 
 // AgentLoopContinue continues from existing context without adding new messages.
@@ -87,38 +45,127 @@ func recoverToEnd(sink eventSink) {
 // The returned channel follows the same consumption contract as AgentLoop:
 // drain until close, or cancel ctx and keep draining to stop early.
 func AgentLoopContinue(ctx context.Context, agentCtx AgentContext, config LoopConfig) <-chan Event {
-	ch := make(chan Event, 128)
-	sink := eventSink{ctx: ctx, ch: ch}
+	return startAgentLoop(ctx, nil, agentCtx, config, true)
+}
 
-	if len(agentCtx.Messages) == 0 {
-		go func() {
-			defer close(ch)
-			sink.emitError(ErrNoMessages, &RunSummary{
-				EndReason: EndReasonError,
-			})
-		}()
-		return ch
-	}
+func startAgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentContext, config LoopConfig, continuing bool) <-chan Event {
+	ch := make(chan Event, 128)
+	terminal := &terminalEvent{}
+	sink := eventSink{ctx: ctx, ch: ch, terminal: terminal}
 
 	go func() {
-		defer close(ch)
-		defer recoverToEnd(sink) // runs before close(ch): a panic still emits EventAgentEnd
-
 		var newMessages []AgentMessage
 		currentCtx := AgentContext{
 			SystemPrompt: agentCtx.SystemPrompt,
-			SystemBlocks: agentCtx.SystemBlocks,
+			SystemBlocks: append([]SystemBlock(nil), agentCtx.SystemBlocks...),
 			Messages:     copyMessages(agentCtx.Messages),
-			Tools:        agentCtx.Tools,
+			Tools:        append([]Tool(nil), agentCtx.Tools...),
+		}
+		state := config.InitialState
+		if state.Messages == nil {
+			state.Messages = copyMessages(agentCtx.Messages)
+		}
+		state = bindRunState(state, &currentCtx)
+		if !state.Progress.Active {
+			state.Progress = RunProgress{Active: true}
 		}
 
-		sink.emit(Event{Type: EventAgentStart})
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				sink.emitError(fmt.Errorf("agent loop panicked: %v", recovered), &RunSummary{EndReason: EndReasonError})
+			}
+			finishAgentRun(ctx, &currentCtx, &state, config, sink)
+			sink.flushTerminal()
+			close(ch)
+		}()
+
+		if config.BeforeRun != nil {
+			restored, err := config.BeforeRun(ctx, BeforeRunContext{State: snapshotRunState(state, &currentCtx)})
+			if err != nil {
+				sink.emitError(fmt.Errorf("before run: %w", err), &RunSummary{EndReason: EndReasonError})
+				return
+			}
+			state = bindRunState(restored, &currentCtx)
+		}
+		if !state.Progress.Active {
+			state.Progress = RunProgress{Active: true}
+		}
+		currentCtx.Messages = copyMessages(state.Messages)
+
+		if continuing && len(currentCtx.Messages) == 0 {
+			sink.emitError(ErrNoMessages, &RunSummary{EndReason: EndReasonError})
+			return
+		}
+
+		startState := snapshotRunState(state, &currentCtx)
+		sink.emit(Event{Type: EventAgentStart, State: &startState})
 		sink.emit(Event{Type: EventTurnStart})
 
-		runLoop(ctx, &currentCtx, &newMessages, config, sink)
+		for _, prompt := range prompts {
+			sink.emit(Event{Type: EventMessageStart, Message: prompt})
+			if err := commitMessage(&currentCtx, &newMessages, config, prompt); err != nil {
+				sink.emitError(fmt.Errorf("commit prompt message: %w", err), &RunSummary{EndReason: EndReasonError})
+				return
+			}
+			sink.emit(Event{Type: EventMessageEnd, Message: prompt})
+		}
+
+		runLoop(ctx, &currentCtx, &newMessages, config, sink, &state)
 	}()
 
 	return ch
+}
+
+func bindRunState(state AgentState, current *AgentContext) AgentState {
+	state.SystemPrompt = current.SystemPrompt
+	state.Tools = append([]Tool(nil), current.Tools...)
+	state.IsRunning = true
+	state.StreamMessage = nil
+	state.PendingToolCalls = nil
+	state.Error = ""
+	state.Progress = cloneRunProgress(state.Progress)
+	return state
+}
+
+func snapshotRunState(state AgentState, current *AgentContext) AgentState {
+	state.Messages = copyMessages(current.Messages)
+	state.Progress = cloneRunProgress(state.Progress)
+	state.Tools = append([]Tool(nil), current.Tools...)
+	return state
+}
+
+func finishAgentRun(ctx context.Context, current *AgentContext, state *AgentState, config LoopConfig, sink eventSink) {
+	if sink.terminal.event == nil {
+		sink.emitError(errors.New("agent loop ended without terminal event"), &RunSummary{EndReason: EndReasonError})
+	}
+	state.Progress.Active = false
+	state.IsRunning = false
+	finalState := snapshotRunState(*state, current)
+	terminal := sink.terminal.event
+	summary := RunSummary{EndReason: EndReasonError}
+	if terminal.Summary != nil {
+		summary = *terminal.Summary
+	}
+	if config.AfterRun != nil {
+		hookCtx := context.WithoutCancel(ctx)
+		if err := callAfterRun(hookCtx, config.AfterRun, AfterRunContext{State: finalState, Summary: summary, Err: terminal.Err}); err != nil {
+			hookErr := fmt.Errorf("after run: %w", err)
+			sink.emitNow(Event{Type: EventError, Err: hookErr})
+			terminal.Err = errors.Join(terminal.Err, hookErr)
+			summary.EndReason = EndReasonError
+			terminal.Summary = &summary
+		}
+	}
+	terminal.State = &finalState
+}
+
+func callAfterRun(ctx context.Context, hook AfterRunHook, run AfterRunContext) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("panic: %v", recovered)
+		}
+	}()
+	return hook(ctx, run)
 }
 
 // commitMessage is the single entry point for "message enters agent context".
@@ -138,7 +185,7 @@ func commitMessage(currentCtx *AgentContext, newMessages *[]AgentMessage, config
 	return nil
 }
 
-// runLoop is the main double-loop logic shared by AgentLoop and AgentLoopContinue.
+// runLoop is the turn loop shared by AgentLoop and AgentLoopContinue.
 //
 // Core loop contracts:
 //   - Streamed tool-call lifecycle signals are authoritative; stop reasons are
@@ -149,12 +196,15 @@ func commitMessage(currentCtx *AgentContext, newMessages *[]AgentMessage, config
 //   - Tool results are appended after the assistant message that requested them.
 //   - Steering stops not-yet-started tools. Started tools follow their
 //     InterruptBehavior and may continue or be cancelled.
-func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]AgentMessage, config LoopConfig, sink eventSink) {
+func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]AgentMessage, config LoopConfig, sink eventSink, state *AgentState) {
 	type runSummaryState struct {
 		toolCalls  int
 		toolErrors int
 	}
-	summaryState := runSummaryState{}
+	summaryState := runSummaryState{
+		toolCalls:  state.Progress.ToolCalls,
+		toolErrors: state.Progress.ToolErrors,
+	}
 	buildSummary := func(turnCount int, reason EndReason) *RunSummary {
 		return &RunSummary{
 			TurnCount:  turnCount,
@@ -169,13 +219,20 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 	}
 
 	firstTurn := true
-	turnCount := 0
-	lengthRecoveryCount := 0
-	toolErrors := make(map[string]int) // consecutive failure count per tool
+	turnCount := state.Progress.CompletedTurns
+	lengthRecoveryCount := state.Progress.LengthRecoveries
+	toolErrors := cloneStringIntMap(state.Progress.ConsecutiveToolErrors)
+	if toolErrors == nil {
+		toolErrors = make(map[string]int)
+	}
 	commit := func(msg AgentMessage) bool {
 		if err := commitMessage(currentCtx, newMessages, config, msg); err != nil {
 			sink.emitError(fmt.Errorf("commit message: %w", err), buildSummary(turnCount, EndReasonError))
 			return false
+		}
+		state.Messages = copyMessages(currentCtx.Messages)
+		if message, ok := msg.(Message); ok {
+			state.TotalUsage.Add(message.Usage)
 		}
 		return true
 	}
@@ -200,35 +257,14 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 		}
 		return true
 	}
-	runBeforeModelCall := func(turnIndex int) ([]CallOption, bool) {
-		if config.BeforeModelCall == nil {
-			return nil, true
-		}
-		options, err := config.BeforeModelCall(ctx, BeforeModelCallContext{
-			TurnIndex: turnIndex,
-			Context:   snapshotAgentContext(currentCtx),
-		})
-		if err != nil {
-			sink.emitError(fmt.Errorf("before model call %d: %w", turnIndex, err), buildSummary(turnCount, EndReasonError))
-			return nil, false
-		}
-		return options, true
-	}
-	runAfterModelCall := func(turnIndex int, message Message) bool {
-		if config.AfterModelCall == nil {
-			return true
-		}
-		if err := config.AfterModelCall(ctx, AfterModelCallContext{
-			TurnIndex: turnIndex,
-			Message:   message,
-			Context:   snapshotAgentContext(currentCtx),
-		}); err != nil {
-			sink.emitError(fmt.Errorf("after model call %d: %w", turnIndex, err), buildSummary(turnCount, EndReasonError))
-			return false
-		}
-		return true
-	}
 	runAfterTurn := func(turnIndex int, message AgentMessage, results []ToolResult) bool {
+		state.Progress.CompletedTurns = turnIndex
+		state.Progress.LengthRecoveries = lengthRecoveryCount
+		state.Progress.ToolCalls = summaryState.toolCalls
+		state.Progress.ToolErrors = summaryState.toolErrors
+		state.Progress.ConsecutiveToolErrors = cloneStringIntMap(toolErrors)
+		turnState := snapshotRunState(*state, currentCtx)
+		sink.emit(Event{Type: EventTurnEnd, Message: message, ToolResults: append([]ToolResult(nil), results...), State: &turnState})
 		if config.AfterTurn == nil {
 			return true
 		}
@@ -237,6 +273,7 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 			Message:     message,
 			ToolResults: append([]ToolResult(nil), results...),
 			Context:     snapshotAgentContext(currentCtx),
+			State:       turnState,
 		}); err != nil {
 			sink.emitError(fmt.Errorf("after turn %d: %w", turnIndex, err), buildSummary(turnCount, EndReasonError))
 			return false
@@ -245,38 +282,86 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 	}
 
 	// Check for steering messages at start
-	var pendingMessages []AgentMessage
-	if config.GetSteeringMessages != nil {
+	pendingMessages := copyMessages(state.Progress.PendingMessages)
+	state.Progress.PendingMessages = nil
+	if len(pendingMessages) == 0 && config.GetSteeringMessages != nil {
 		pendingMessages = config.GetSteeringMessages()
 	}
 
 	// Track last assistant message so StopGuard can inspect what's stopping us.
 	var lastAssistantMsg Message
 
-	// Outer loop: continues when follow-up messages arrive after agent would stop
-	for {
-		hasMoreToolCalls := true
-		var steeringAfterTools []AgentMessage
-		afterToolExec := false
+	if state.Progress.CompletedTurns > 0 && !state.Progress.NextTurn {
+		sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonStop)})
+		return
+	}
 
-		// Inner loop: process tool calls and steering messages
-		for hasMoreToolCalls || len(pendingMessages) > 0 {
-			// Check for context cancellation (Abort)
+	afterToolExec := false
+	for {
+		var steeringAfterTools []AgentMessage
+		hasMoreToolCalls := false
+		// Check for context cancellation (Abort)
+		if ctx.Err() != nil {
+			if config.ShouldEmitAbortMarker != nil && config.ShouldEmitAbortMarker() {
+				phase := "inference"
+				text := config.AbortMarkerText
+				if text == "" {
+					text = defaultAbortMarkerText
+				}
+				if afterToolExec {
+					phase = "tool_execution"
+					text = config.AbortMarkerToolText
+					if text == "" {
+						text = defaultAbortMarkerToolText
+					}
+				}
+				abortMsg := AbortMsg(text, phase)
+				if !commit(abortMsg) {
+					return
+				}
+				sink.emit(Event{Type: EventMessageEnd, Message: abortMsg})
+			}
+			sink.emit(Event{Type: EventError, Err: ctx.Err()})
+			sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonAborted)})
+			return
+		}
+
+		if turnCount >= maxTurns {
+			sink.emit(Event{Type: EventError, Err: &MaxTurnsError{Limit: maxTurns}})
+			sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonMaxTurns)})
+			return
+		}
+
+		if !firstTurn {
+			sink.emit(Event{Type: EventTurnStart})
+		} else {
+			firstTurn = false
+		}
+
+		// Process pending messages (inject before next LLM call)
+		if len(pendingMessages) > 0 {
+			for _, msg := range pendingMessages {
+				sink.emit(Event{Type: EventMessageStart, Message: msg})
+				if !commit(msg) {
+					return
+				}
+				sink.emit(Event{Type: EventMessageEnd, Message: msg})
+			}
+			pendingMessages = nil
+		}
+		if !runBeforeTurn(turnCount + 1) {
+			return
+		}
+		// Call LLM with retry (streaming: events emitted inside callLLM)
+		assistantMsg, callInfo, err := callLLMWithRetry(ctx, currentCtx, config, turnCount+1, sink)
+		if err != nil {
 			if ctx.Err() != nil {
 				if config.ShouldEmitAbortMarker != nil && config.ShouldEmitAbortMarker() {
-					phase := "inference"
 					text := config.AbortMarkerText
 					if text == "" {
 						text = defaultAbortMarkerText
 					}
-					if afterToolExec {
-						phase = "tool_execution"
-						text = config.AbortMarkerToolText
-						if text == "" {
-							text = defaultAbortMarkerToolText
-						}
-					}
-					abortMsg := AbortMsg(text, phase)
+					abortMsg := AbortMsg(text, "inference")
 					if !commit(abortMsg) {
 						return
 					}
@@ -286,190 +371,164 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 				sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonAborted)})
 				return
 			}
-
-			if turnCount >= maxTurns {
-				sink.emit(Event{Type: EventError, Err: &MaxTurnsError{Limit: maxTurns}})
-				sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonMaxTurns)})
-				return
-			}
-
-			if !firstTurn {
-				sink.emit(Event{Type: EventTurnStart})
-			} else {
-				firstTurn = false
-			}
-
-			// Process pending messages (inject before next LLM call)
-			if len(pendingMessages) > 0 {
-				for _, msg := range pendingMessages {
-					sink.emit(Event{Type: EventMessageStart, Message: msg})
-					if !commit(msg) {
-						return
-					}
-					sink.emit(Event{Type: EventMessageEnd, Message: msg})
-				}
-				pendingMessages = nil
-			}
-			if !runBeforeTurn(turnCount + 1) {
-				return
-			}
-			callOptions, ok := runBeforeModelCall(turnCount + 1)
-			if !ok {
-				return
-			}
-
-			// Call LLM with retry (streaming: events emitted inside callLLM)
-			assistantMsg, callInfo, err := callLLMWithRetry(ctx, currentCtx, config, callOptions, sink)
-			if err != nil {
-				if ctx.Err() != nil {
-					if config.ShouldEmitAbortMarker != nil && config.ShouldEmitAbortMarker() {
-						text := config.AbortMarkerText
-						if text == "" {
-							text = defaultAbortMarkerText
-						}
-						abortMsg := AbortMsg(text, "inference")
-						if !commit(abortMsg) {
-							return
-						}
-						sink.emit(Event{Type: EventMessageEnd, Message: abortMsg})
-					}
-					sink.emit(Event{Type: EventError, Err: ctx.Err()})
-					sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonAborted)})
-					return
-				}
-				sink.emitError(err, buildSummary(turnCount, EndReasonError))
-				return
-			}
-			if !runAfterModelCall(turnCount+1, assistantMsg) {
-				return
-			}
-
-			// Check stop reason — terminate early on error/aborted
-			if assistantMsg.StopReason == StopReasonError || assistantMsg.StopReason == StopReasonAborted {
-				if !commit(assistantMsg) {
-					return
-				}
-				sink.emit(Event{Type: EventMessageEnd, Message: assistantMsg})
-				sink.emit(Event{Type: EventModelResponse, Message: assistantMsg})
-				turnCount++
-				sink.emit(Event{Type: EventTurnEnd, Message: assistantMsg})
-				reason := EndReasonError
-				if assistantMsg.StopReason == StopReasonAborted {
-					reason = EndReasonAborted
-				}
-				sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, reason)})
-				return
-			}
-
-			// When output was truncated (max_tokens hit), tool calls are likely
-			// incomplete with malformed JSON args. Strip them to avoid validation
-			// errors and API rejections.
-			if assistantMsg.StopReason == StopReasonLength && !callInfo.HasCompletedToolCalls {
-				assistantMsg.Content = stripToolCallBlocks(assistantMsg.Content)
-			}
-
-			lastAssistantMsg = assistantMsg
+			sink.emitError(err, buildSummary(turnCount, EndReasonError))
+			return
+		}
+		// Check stop reason — terminate early on error/aborted
+		if assistantMsg.StopReason == StopReasonError || assistantMsg.StopReason == StopReasonAborted {
 			if !commit(assistantMsg) {
 				return
 			}
 			sink.emit(Event{Type: EventMessageEnd, Message: assistantMsg})
-
-			// Check for tool calls
-			toolCalls := assistantMsg.ToolCalls()
-			summaryState.toolCalls += len(toolCalls)
-			hasMoreToolCalls = len(toolCalls) > 0
-			// Recover when output was truncated and no tool calls completed.
-			// This includes the case where tool call blocks existed but were
-			// stripped due to incomplete JSON — the tool was never executed,
-			// so recovery is safe. The recovery prompt tells the model to
-			// "break remaining work into smaller pieces."
-			shouldRecoverLength := assistantMsg.StopReason == StopReasonLength &&
-				len(toolCalls) == 0 &&
-				!callInfo.HasCompletedToolCalls &&
-				lengthRecoveryCount < defaultMaxLengthRecoveries
-
-			var turnToolResults []ToolResult
-			if hasMoreToolCalls {
-				var steering []AgentMessage
-				turnToolResults, steering = executeToolCalls(ctx, currentCtx.Tools, toolCalls, config, toolErrors, sink)
-				afterToolExec = true
-
-				for _, tr := range turnToolResults {
-					resultMsg := toolResultMessage(config, findToolCall(toolCalls, tr.ToolCallID), tr)
-					sink.emit(Event{Type: EventMessageStart, Message: resultMsg})
-					if !commit(resultMsg) {
-						return
-					}
-					sink.emit(Event{Type: EventMessageEnd, Message: resultMsg})
-				}
-
-				steeringAfterTools = steering
-			}
-			for _, tr := range turnToolResults {
-				if tr.IsError {
-					summaryState.toolErrors++
-				}
-			}
-
-			sink.emit(Event{Type: EventModelResponse, Message: assistantMsg, ToolResults: turnToolResults})
+			sink.emit(Event{Type: EventModelResponse, Message: assistantMsg})
 			turnCount++
-			sink.emit(Event{Type: EventTurnEnd, Message: assistantMsg, ToolResults: turnToolResults})
+			sink.emit(Event{Type: EventTurnEnd, Message: assistantMsg})
+			reason := EndReasonError
+			if assistantMsg.StopReason == StopReasonAborted {
+				reason = EndReasonAborted
+			}
+			sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, reason)})
+			return
+		}
+
+		// When output was truncated (max_tokens hit), tool calls are likely
+		// incomplete with malformed JSON args. Strip them to avoid validation
+		// errors and API rejections.
+		if assistantMsg.StopReason == StopReasonLength && !callInfo.HasCompletedToolCalls {
+			assistantMsg.Content = stripToolCallBlocks(assistantMsg.Content)
+		}
+
+		lastAssistantMsg = assistantMsg
+		if !commit(assistantMsg) {
+			return
+		}
+		sink.emit(Event{Type: EventMessageEnd, Message: assistantMsg})
+
+		// Check for tool calls
+		toolCalls := assistantMsg.ToolCalls()
+		summaryState.toolCalls += len(toolCalls)
+		hasMoreToolCalls = len(toolCalls) > 0
+		// Recover when output was truncated and no tool calls completed.
+		// This includes the case where tool call blocks existed but were
+		// stripped due to incomplete JSON — the tool was never executed,
+		// so recovery is safe. The recovery prompt tells the model to
+		// "break remaining work into smaller pieces."
+		shouldRecoverLength := assistantMsg.StopReason == StopReasonLength &&
+			len(toolCalls) == 0 &&
+			!callInfo.HasCompletedToolCalls &&
+			lengthRecoveryCount < defaultMaxLengthRecoveries
+
+		var turnToolResults []ToolResult
+		if hasMoreToolCalls {
+			var steering []AgentMessage
+			turnToolResults, steering = executeToolCalls(ctx, currentCtx.Tools, toolCalls, config, toolErrors, sink)
+			afterToolExec = true
+
+			for _, tr := range turnToolResults {
+				resultMsg := toolResultMessage(config, findToolCall(toolCalls, tr.ToolCallID), tr)
+				sink.emit(Event{Type: EventMessageStart, Message: resultMsg})
+				if !commit(resultMsg) {
+					return
+				}
+				sink.emit(Event{Type: EventMessageEnd, Message: resultMsg})
+			}
+
+			steeringAfterTools = steering
+		}
+		for _, tr := range turnToolResults {
+			if tr.IsError {
+				summaryState.toolErrors++
+			}
+		}
+
+		sink.emit(Event{Type: EventModelResponse, Message: assistantMsg, ToolResults: turnToolResults})
+		turnCount++
+		// Early exit: a terminal tool completed successfully. This is a
+		// normal stop, so it passes through the same StopGuard gate as
+		// end_turn — guards stay the single stop arbiter and can veto a
+		// premature terminal-tool exit (Trigger distinguishes the paths).
+		if stopAfterToolHit(config, turnToolResults) {
+			inject, escalate := consultStopGuard(ctx, config, StopInfo{
+				TurnIndex: turnCount,
+				Message:   lastAssistantMsg,
+				Trigger:   StopTriggerAfterTool,
+			})
+			if escalate {
+				state.Progress.NextTurn = false
+				state.Progress.PendingMessages = nil
+				if !runAfterTurn(turnCount, assistantMsg, turnToolResults) {
+					return
+				}
+				sink.emit(Event{Type: EventError, Err: ErrStopGuard})
+				sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonError)})
+				return
+			}
+			if inject == "" {
+				state.Progress.NextTurn = false
+				state.Progress.PendingMessages = nil
+				if !runAfterTurn(turnCount, assistantMsg, turnToolResults) {
+					return
+				}
+				sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonStop)})
+				return
+			}
+			// Guard vetoed the early exit: keep the loop alive with the
+			// injected message, carrying any steering captured during this
+			// terminal-tool turn so a follow-up tool turn can't drop the
+			// already-dequeued steering.
+			pendingMessages = append([]AgentMessage{UserMsg(inject)}, steeringAfterTools...)
+			steeringAfterTools = nil
+			state.Progress.NextTurn = true
+			state.Progress.PendingMessages = copyMessages(pendingMessages)
 			if !runAfterTurn(turnCount, assistantMsg, turnToolResults) {
 				return
 			}
+			continue
+		}
 
-			// Early exit: a terminal tool completed successfully. This is a
-			// normal stop, so it passes through the same StopGuard gate as
-			// end_turn — guards stay the single stop arbiter and can veto a
-			// premature terminal-tool exit (Trigger distinguishes the paths).
-			if stopAfterToolHit(config, turnToolResults) {
-				inject, escalate := consultStopGuard(ctx, config, StopInfo{
-					TurnIndex: turnCount,
-					Message:   lastAssistantMsg,
-					Trigger:   StopTriggerAfterTool,
-				})
-				if escalate {
-					sink.emit(Event{Type: EventError, Err: ErrStopGuard})
-					sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonError)})
-					return
-				}
-				if inject == "" {
-					sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonStop)})
-					return
-				}
-				// Guard vetoed the early exit: keep the loop alive with the
-				// injected message, carrying any steering captured during this
-				// terminal-tool turn so a follow-up tool turn can't drop the
-				// already-dequeued steering.
-				pendingMessages = append([]AgentMessage{UserMsg(inject)}, steeringAfterTools...)
-				steeringAfterTools = nil
-				continue
+		if shouldRecoverLength {
+			lengthRecoveryCount++
+			prompt := config.LengthRecoveryPrompt
+			if prompt == "" {
+				prompt = defaultLengthRecoveryPrompt
 			}
+			pendingMessages = []AgentMessage{UserMsg(prompt)}
+			state.Progress.LengthRecoveries = lengthRecoveryCount
+			state.Progress.NextTurn = true
+			state.Progress.PendingMessages = copyMessages(pendingMessages)
+			if !runAfterTurn(turnCount, assistantMsg, turnToolResults) {
+				return
+			}
+			continue
+		}
 
-			if shouldRecoverLength {
-				lengthRecoveryCount++
-				prompt := config.LengthRecoveryPrompt
-				if prompt == "" {
-					prompt = defaultLengthRecoveryPrompt
-				}
-				pendingMessages = []AgentMessage{UserMsg(prompt)}
-				continue
+		// Get steering messages after turn completes
+		if len(steeringAfterTools) > 0 {
+			pendingMessages = steeringAfterTools
+			steeringAfterTools = nil
+		} else if config.GetSteeringMessages != nil {
+			pendingMessages = config.GetSteeringMessages()
+		}
+		state.Progress.PendingMessages = copyMessages(pendingMessages)
+		if hasMoreToolCalls || len(pendingMessages) > 0 {
+			state.Progress.NextTurn = true
+			if !runAfterTurn(turnCount, assistantMsg, turnToolResults) {
+				return
 			}
-
-			// Get steering messages after turn completes
-			if len(steeringAfterTools) > 0 {
-				pendingMessages = steeringAfterTools
-				steeringAfterTools = nil
-			} else if config.GetSteeringMessages != nil {
-				pendingMessages = config.GetSteeringMessages()
-			}
+			continue
 		}
 
 		// Agent would stop here. Check for follow-up messages.
 		if config.GetFollowUpMessages != nil {
 			followUp := config.GetFollowUpMessages()
 			if len(followUp) > 0 {
+				afterToolExec = false
 				pendingMessages = followUp
+				state.Progress.NextTurn = true
+				state.Progress.PendingMessages = copyMessages(pendingMessages)
+				if !runAfterTurn(turnCount, assistantMsg, turnToolResults) {
+					return
+				}
 				continue
 			}
 		}
@@ -481,19 +540,33 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 			Trigger:   StopTriggerEndTurn,
 		})
 		if escalate {
+			state.Progress.NextTurn = false
+			if !runAfterTurn(turnCount, assistantMsg, turnToolResults) {
+				return
+			}
 			sink.emit(Event{Type: EventError, Err: ErrStopGuard})
 			sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonError)})
 			return
 		}
 		if inject != "" {
+			afterToolExec = false
 			pendingMessages = []AgentMessage{UserMsg(inject)}
+			state.Progress.NextTurn = true
+			state.Progress.PendingMessages = copyMessages(pendingMessages)
+			if !runAfterTurn(turnCount, assistantMsg, turnToolResults) {
+				return
+			}
 			continue
 		}
 
-		break
+		state.Progress.NextTurn = false
+		state.Progress.PendingMessages = nil
+		if !runAfterTurn(turnCount, assistantMsg, turnToolResults) {
+			return
+		}
+		sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonStop)})
+		return
 	}
-
-	sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonStop)})
 }
 
 // stopAfterToolHit reports whether any successful tool result in this turn
@@ -546,20 +619,16 @@ type llmCallInfo struct {
 // a complete response has been committed, so retrying a failed stream cannot
 // replay tool side effects. callOptions are selected once per logical model
 // call and reused by every retry attempt.
-func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopConfig, callOptions []CallOption, sink eventSink) (Message, llmCallInfo, error) {
+func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopConfig, turnIndex int, sink eventSink) (Message, llmCallInfo, error) {
 	maxRetries := config.MaxRetries
-	if maxRetries <= 0 {
-		msg, info, err := callLLM(ctx, agentCtx, config, callOptions, sink)
-		if err != nil && IsContextOverflow(err) {
-			return recoverOverflow(ctx, agentCtx, config, callOptions, sink, err)
-		}
-		return msg, info, err
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
 
 	var lastErr error
 	var lastInfo llmCallInfo
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		msg, info, err := callLLM(ctx, agentCtx, config, callOptions, sink)
+	for attempt := 1; attempt <= maxRetries+1; attempt++ {
+		msg, info, err := callLLM(ctx, agentCtx, config, turnIndex, attempt, sink)
 		if err == nil {
 			return msg, info, nil
 		}
@@ -568,7 +637,7 @@ func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopCo
 
 		// Context overflow: compact and retry once (not a normal retry)
 		if IsContextOverflow(err) {
-			return recoverOverflow(ctx, agentCtx, config, callOptions, sink, err)
+			return recoverOverflow(ctx, agentCtx, config, turnIndex, attempt+1, sink, err)
 		}
 
 		// User cancellation is never retryable: the next attempt would just
@@ -585,17 +654,17 @@ func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopCo
 		// that a fresh request can recover from.
 		var pse *PartialStreamError
 		retryable := isRetryable(err) || errors.As(err, &pse)
-		if !retryable || attempt == maxRetries {
+		if !retryable || attempt == maxRetries+1 {
 			return Message{}, info, err
 		}
 
-		delay := retryDelay(err, attempt)
+		delay := retryDelay(err, attempt-1)
 
 		sink.emit(Event{
 			Type: EventRetry,
 			Err:  err,
 			RetryInfo: &RetryInfo{
-				Attempt:    attempt + 1,
+				Attempt:    attempt,
 				MaxRetries: maxRetries,
 				Delay:      delay,
 				Err:        err,
@@ -614,7 +683,7 @@ func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopCo
 // recoverOverflow attempts to compact the context via the ContextManager and
 // retry the LLM call. If no ContextManager is configured, the original error
 // is returned.
-func recoverOverflow(ctx context.Context, agentCtx *AgentContext, config LoopConfig, callOptions []CallOption, sink eventSink, originalErr error) (Message, llmCallInfo, error) {
+func recoverOverflow(ctx context.Context, agentCtx *AgentContext, config LoopConfig, turnIndex, attempt int, sink eventSink, originalErr error) (Message, llmCallInfo, error) {
 	if config.ContextManager == nil {
 		return Message{}, llmCallInfo{}, &ContextOverflowError{Cause: fmt.Errorf("no compaction configured: %w", originalErr)}
 	}
@@ -645,7 +714,7 @@ func recoverOverflow(ctx context.Context, agentCtx *AgentContext, config LoopCon
 	if recovery.Compaction != nil {
 		sink.emit(Event{Type: EventContextCompacted, Compaction: recovery.Compaction})
 	}
-	return callLLM(ctx, agentCtx, config, callOptions, sink)
+	return callLLM(ctx, agentCtx, config, turnIndex, attempt, sink)
 }
 
 // retryDelay calculates the wait duration using exponential backoff.
@@ -668,7 +737,7 @@ func retryDelay(err error, attempt int) time.Duration {
 }
 
 // callLLM applies the two-stage pipeline and calls the model.
-func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, callOptions []CallOption, sink eventSink) (Message, llmCallInfo, error) {
+func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, turnIndex, attempt int, sink eventSink) (Message, llmCallInfo, error) {
 	messages := agentCtx.Messages
 
 	// Stage 1: ContextManager / TransformContext
@@ -741,10 +810,6 @@ func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, cal
 		llmMessages = markLastMessageForCache(llmMessages, config.CacheLastMessage)
 	}
 
-	if config.Model == nil {
-		return Message{}, llmCallInfo{}, ErrNoModel
-	}
-
 	// Build per-call options
 	var callOpts []CallOption
 
@@ -762,13 +827,33 @@ func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, cal
 		callOpts = append(callOpts, WithCallPromptCacheKey(config.PromptCacheKey))
 	}
 
-	// Dynamic options run last so a BeforeModelCall hook can override static
-	// loop settings for this logical call. The same options are reused by every
-	// internal retry.
-	callOpts = append(callOpts, callOptions...)
+	call := ModelCall{
+		ID:        modelCallID(turnIndex),
+		TurnIndex: turnIndex,
+		Attempt:   attempt,
+		Request:   LLMRequest{Messages: llmMessages, Tools: toolSpecs},
+		Options:   callOpts,
+	}
+	execute := func(ctx context.Context, call ModelCall) (ModelResult, error) {
+		if config.Model == nil {
+			return ModelResult{}, ErrNoModel
+		}
+		message, info, err := callLLMStream(ctx, config.Model, call.Request.Messages, call.Request.Tools, call.Options, sink)
+		return ModelResult{Message: message, HasCompletedToolCalls: info.HasCompletedToolCalls}, err
+	}
+	if len(config.ModelMiddlewares) > 0 {
+		execute = buildModelMiddlewareChain(execute, config.ModelMiddlewares)
+	}
+	result, err := execute(ctx, call)
+	return result.Message, llmCallInfo{HasCompletedToolCalls: result.HasCompletedToolCalls}, err
+}
 
-	// Use streaming for real-time token deltas
-	return callLLMStream(ctx, config.Model, llmMessages, toolSpecs, callOpts, sink)
+// modelCallID is derived from the turn rather than the physical attempt so a
+// retry—or a run restored from the preceding turn checkpoint—addresses the
+// same logical call. Hosts that persist calls must scope this opaque ID with
+// their own run identity.
+func modelCallID(turnIndex int) string {
+	return fmt.Sprintf("model-%d", turnIndex)
 }
 
 // markLastMessageForCache returns a copy of messages with cache_control attached
@@ -877,39 +962,12 @@ func executeToolCalls(ctx context.Context, tools []Tool, calls []ToolCall, confi
 	return exec.Wait()
 }
 
-// executeSingleToolCall executes one tool call: emit events, validate, preview,
-// run approval, then execute the tool. result.ToolName is set when the caller
-// should update toolErrors; empty means skip (circuit-breaker hit, denial, or
-// context cancellation).
+// executeSingleToolCall wraps the complete validation, authorization and
+// execution pipeline. A middleware can return a known ToolResult without
+// invoking next, so replay never reaches gates or external side effects.
 func executeSingleToolCall(ctx context.Context, tools []Tool, call ToolCall, config LoopConfig, failCount int, sink eventSink) ToolResult {
 	tool := findTool(tools, call.Name)
 	label := toolLabel(tool)
-
-	// Fast exit: context already cancelled — don't start any tool work.
-	if ctx.Err() != nil {
-		sink.emit(Event{
-			Type:      EventToolExecStart,
-			ToolID:    call.ID,
-			Tool:      call.Name,
-			ToolLabel: label,
-			Args:      call.Args,
-		})
-		return failToolCall(sink, call, label, "Tool execution cancelled.", false)
-	}
-
-	// Circuit breaker: skip if tool has exceeded consecutive failure threshold
-	if config.MaxToolErrors > 0 && failCount >= config.MaxToolErrors {
-		sink.emit(Event{
-			Type:      EventToolExecStart,
-			ToolID:    call.ID,
-			Tool:      call.Name,
-			ToolLabel: label,
-			Args:      call.Args,
-		})
-		return failToolCall(sink, call, label,
-			fmt.Sprintf("tool %q disabled after %d consecutive errors", call.Name, config.MaxToolErrors), false)
-	}
-
 	sink.emit(Event{
 		Type:      EventToolExecStart,
 		ToolID:    call.ID,
@@ -918,23 +976,49 @@ func executeSingleToolCall(ctx context.Context, tools []Tool, call ToolCall, con
 		Args:      call.Args,
 	})
 
-	var result ToolResult
+	execute := func(ctx context.Context, call ToolCall) (ToolResult, error) {
+		return executeToolCallCore(ctx, tool, call, config, failCount, label, sink), nil
+	}
+	if len(config.ToolMiddlewares) > 0 {
+		execute = buildToolMiddlewareChain(execute, config.ToolMiddlewares)
+	}
+	result, err := execute(ctx, call)
+	if err != nil {
+		result = toolFailureResult(call, err.Error(), true)
+	}
+	// The assistant-issued ID is the durable pairing key. Middleware may
+	// replace the outcome, but cannot retarget it to another tool call.
+	result.ToolCallID = call.ID
+	if !result.IsError && result.ToolName == "" {
+		result.ToolName = call.Name
+	}
+
+	sink.emit(Event{
+		Type:      EventToolExecEnd,
+		ToolID:    call.ID,
+		Tool:      call.Name,
+		ToolLabel: label,
+		Result:    result.Content,
+		IsError:   result.IsError,
+	})
+	return result
+}
+
+// executeToolCallCore performs one real tool call without middleware or the
+// start/end lifecycle events owned by executeSingleToolCall.
+func executeToolCallCore(ctx context.Context, tool Tool, call ToolCall, config LoopConfig, failCount int, label string, sink eventSink) ToolResult {
+	if ctx.Err() != nil {
+		return toolFailureResult(call, "Tool execution cancelled.", false)
+	}
+	if config.MaxToolErrors > 0 && failCount >= config.MaxToolErrors {
+		return toolFailureResult(call,
+			fmt.Sprintf("tool %q disabled after %d consecutive errors", call.Name, config.MaxToolErrors), false)
+	}
 
 	if tool == nil {
-		errContent, _ := json.Marshal(fmt.Sprintf("tool %q not found", call.Name))
-		result = ToolResult{
-			ToolCallID: call.ID,
-			Content:    errContent,
-			IsError:    true,
-		}
+		return toolFailureResult(call, fmt.Sprintf("tool %q not found", call.Name), false)
 	} else if err := validateToolArgs(tool, call); err != nil {
-		errContent, _ := json.Marshal(err.Error())
-		result = ToolResult{
-			ToolCallID: call.ID,
-			ToolName:   call.Name,
-			Content:    errContent,
-			IsError:    true,
-		}
+		return toolFailureResult(call, err.Error(), true)
 	} else {
 		// Stage 1: business-level input validation. Distinct from schema
 		// validation above — Validators check semantics (write-before-read,
@@ -949,7 +1033,7 @@ func executeSingleToolCall(ctx context.Context, tools []Tool, call ToolCall, con
 				if msg == "" {
 					msg = "tool input validation failed"
 				}
-				return failToolCall(sink, call, label, msg, true)
+				return toolFailureResult(call, msg, true)
 			}
 		}
 
@@ -960,7 +1044,7 @@ func executeSingleToolCall(ctx context.Context, tools []Tool, call ToolCall, con
 		if p, ok := tool.(Previewer); ok {
 			data, err := p.Preview(ctx, call.Args)
 			if err != nil {
-				return failToolCall(sink, call, label, fmt.Sprintf("preview tool %q: %v", call.Name, err), true)
+				return toolFailureResult(call, fmt.Sprintf("preview tool %q: %v", call.Name, err), true)
 			}
 			preview = data
 			sink.emit(Event{
@@ -990,7 +1074,7 @@ func executeSingleToolCall(ctx context.Context, tools []Tool, call ToolCall, con
 				if reason == "" {
 					reason = "tool execution denied"
 				}
-				return failToolCall(sink, call, label, reason, false)
+				return toolFailureResult(call, reason, false)
 			}
 			// Adopt the gate's rewrite before execution so the tool, progress
 			// events, and middleware all see the approved arguments. The
@@ -1015,11 +1099,10 @@ func executeSingleToolCall(ctx context.Context, tools []Tool, call ToolCall, con
 			})
 		})
 
-		// ContentTool: returns rich content blocks (e.g., images).
-		// When middleware is configured, execute it through a shim so logging,
-		// auditing, and short-circuit behavior still apply.
+		var result ToolResult
+		// ContentTool returns rich content blocks such as images.
 		if ct, ok := tool.(ContentTool); ok {
-			blocks, output, execErr := executeContentTool(progressCtx, tool, ct, call, config.Middlewares)
+			blocks, output, execErr := executeContentTool(progressCtx, ct, call)
 			if execErr != nil {
 				errContent, _ := json.Marshal(execErr.Error())
 				result = ToolResult{
@@ -1054,14 +1137,7 @@ func executeSingleToolCall(ctx context.Context, tools []Tool, call ToolCall, con
 				}
 			}
 		} else {
-			var output json.RawMessage
-			var execErr error
-			if len(config.Middlewares) > 0 {
-				exec := buildMiddlewareChain(call, tool.Execute, config.Middlewares)
-				output, execErr = exec(progressCtx, call.Args)
-			} else {
-				output, execErr = tool.Execute(progressCtx, call.Args)
-			}
+			output, execErr := tool.Execute(progressCtx, call.Args)
 			if execErr != nil {
 				errContent, _ := json.Marshal(execErr.Error())
 				result = ToolResult{
@@ -1076,19 +1152,17 @@ func executeSingleToolCall(ctx context.Context, tools []Tool, call ToolCall, con
 				}
 			}
 		}
+		result.ToolName = call.Name
+		return result
 	}
+}
 
-	sink.emit(Event{
-		Type:      EventToolExecEnd,
-		ToolID:    call.ID,
-		Tool:      call.Name,
-		ToolLabel: label,
-		Result:    result.Content,
-		IsError:   result.IsError,
-	})
-
-	// Mark for toolErrors tracking by caller.
-	result.ToolName = call.Name
+func toolFailureResult(call ToolCall, msg string, countErr bool) ToolResult {
+	content, _ := json.Marshal(msg)
+	result := ToolResult{ToolCallID: call.ID, Content: content, IsError: true}
+	if countErr {
+		result.ToolName = call.Name
+	}
 	return result
 }
 
@@ -1097,17 +1171,13 @@ func executeSingleToolCall(ctx context.Context, tools []Tool, call ToolCall, con
 // on the result so the caller counts the failure toward toolErrors; denials,
 // skips, and cancellations pass false (see executeSingleToolCall).
 func failToolCall(sink eventSink, call ToolCall, label, msg string, countErr bool) ToolResult {
-	content, _ := json.Marshal(msg)
-	result := ToolResult{ToolCallID: call.ID, Content: content, IsError: true}
-	if countErr {
-		result.ToolName = call.Name
-	}
+	result := toolFailureResult(call, msg, countErr)
 	sink.emit(Event{
 		Type:      EventToolExecEnd,
 		ToolID:    call.ID,
 		Tool:      call.Name,
 		ToolLabel: label,
-		Result:    content,
+		Result:    result.Content,
 		IsError:   true,
 	})
 	return result
@@ -1237,37 +1307,22 @@ func buildToolSpecs(tools []Tool) []ToolSpec {
 	return specs
 }
 
-// buildMiddlewareChain wraps a tool execution function with the middleware stack.
+// buildToolMiddlewareChain wraps a complete tool call with the middleware stack.
 // Outermost middleware is called first; innermost calls the actual tool.
-func buildMiddlewareChain(call ToolCall, exec ToolExecuteFunc, middlewares []ToolMiddleware) ToolExecuteFunc {
+func buildToolMiddlewareChain(exec ToolExecuteFunc, middlewares []ToolMiddleware) ToolExecuteFunc {
 	for i := len(middlewares) - 1; i >= 0; i-- {
 		mw := middlewares[i]
 		next := exec
-		exec = func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+		exec = func(ctx context.Context, call ToolCall) (ToolResult, error) {
 			return mw(ctx, call, next)
 		}
 	}
 	return exec
 }
 
-func executeContentTool(ctx context.Context, tool Tool, ct ContentTool, call ToolCall, middlewares []ToolMiddleware) ([]ContentBlock, json.RawMessage, error) {
-	var blocks []ContentBlock
-	baseExec := func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
-		out, err := ct.ExecuteContent(ctx, args)
-		if err != nil {
-			return nil, err
-		}
-		blocks = out
-		return contentBlocksTextSummary(out), nil
-	}
-
-	exec := baseExec
-	if len(middlewares) > 0 {
-		exec = buildMiddlewareChain(call, exec, middlewares)
-	}
-
-	output, err := exec(ctx, call.Args)
-	return blocks, output, err
+func executeContentTool(ctx context.Context, ct ContentTool, call ToolCall) ([]ContentBlock, json.RawMessage, error) {
+	blocks, err := ct.ExecuteContent(ctx, call.Args)
+	return blocks, contentBlocksTextSummary(blocks), err
 }
 
 func pickContentSummary(output json.RawMessage, blocks []ContentBlock) json.RawMessage {

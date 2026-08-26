@@ -138,10 +138,17 @@ func WithToolGate(gate ToolGate) AgentOption {
 	return func(a *Agent) { a.toolGate = gate }
 }
 
-// WithMiddlewares sets tool execution middlewares.
-// Each middleware wraps the tool.Execute call. First middleware is outermost.
-func WithMiddlewares(mw ...ToolMiddleware) AgentOption {
-	return func(a *Agent) { a.middlewares = mw }
+// WithToolMiddlewares sets tool execution middlewares.
+// Each middleware wraps the complete validation, authorization and execution
+// pipeline. First middleware is outermost.
+func WithToolMiddlewares(mw ...ToolMiddleware) AgentOption {
+	return func(a *Agent) { a.toolMiddlewares = mw }
+}
+
+// WithModelMiddlewares sets model execution middlewares. Each middleware wraps
+// one physical provider attempt; first middleware is outermost.
+func WithModelMiddlewares(mw ...ModelMiddleware) AgentOption {
+	return func(a *Agent) { a.modelMiddlewares = mw }
 }
 
 // WithMaxToolConcurrency sets the maximum number of tools executed in parallel.
@@ -167,23 +174,20 @@ func WithBeforeTurn(hook BeforeTurnHook) AgentOption {
 	return func(a *Agent) { a.beforeTurn = hook }
 }
 
-// WithBeforeModelCall installs a hook that runs after BeforeTurn messages are
-// committed and before each logical model call. Its CallOptions also apply to
-// internal retries of that call.
-func WithBeforeModelCall(hook BeforeModelCallHook) AgentOption {
-	return func(a *Agent) { a.beforeModelCall = hook }
-}
-
-// WithAfterModelCall installs a hook that runs after each logical model call
-// returns a Message and before it is committed or tools are executed.
-func WithAfterModelCall(hook AfterModelCallHook) AgentOption {
-	return func(a *Agent) { a.afterModelCall = hook }
-}
-
 // WithAfterTurn installs a hook that runs after every normally completed
 // assistant/tool turn and before the loop continues or stops.
 func WithAfterTurn(hook AfterTurnHook) AgentOption {
 	return func(a *Agent) { a.afterTurn = hook }
+}
+
+// WithBeforeRun installs a hook called once before each accepted Agent run.
+func WithBeforeRun(hook BeforeRunHook) AgentOption {
+	return func(a *Agent) { a.beforeRun = hook }
+}
+
+// WithAfterRun installs a hook called once after each accepted Agent run.
+func WithAfterRun(hook AfterRunHook) AgentOption {
+	return func(a *Agent) { a.afterRun = hook }
 }
 
 // WithMessageCommitter installs a synchronous durable-message callback.

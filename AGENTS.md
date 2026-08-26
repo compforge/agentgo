@@ -37,6 +37,8 @@ agentgo/
    commit/recovery 契约可以替换历史，并报告可观察的 compaction 事实。
 5. **公开 API 保持克制**：新增接口前先确认是否能作为现有 AgentMessage、Event、Tool 或 Context
    可选能力表达；Go 改动提交前运行 `go test ./...` 与 `go build ./...`。
+6. **状态机制不绑定恢复策略**：`AgentState` 只表达 Loop 在完整 turn 边界可继续执行的状态；checkpoint
+   存储、调用结果对账与副作用恢复由宿主通过 Run/Turn hook 和 Model/Tool middleware 组合。
 
 ## References
 

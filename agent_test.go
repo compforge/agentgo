@@ -10,18 +10,13 @@ import (
 	"time"
 )
 
-func TestAgent_ModelCallHookOptions(t *testing.T) {
-	beforeCalls := 0
-	afterCalls := 0
+func TestAgent_ModelMiddlewareOption(t *testing.T) {
+	middlewareCalls := 0
 	agent := NewAgent(
 		WithModel(mockModel(assistantMsg("done", StopReasonStop))),
-		WithBeforeModelCall(func(context.Context, BeforeModelCallContext) ([]CallOption, error) {
-			beforeCalls++
-			return nil, nil
-		}),
-		WithAfterModelCall(func(context.Context, AfterModelCallContext) error {
-			afterCalls++
-			return nil
+		WithModelMiddlewares(func(ctx context.Context, call ModelCall, next ModelExecuteFunc) (ModelResult, error) {
+			middlewareCalls++
+			return next(ctx, call)
 		}),
 	)
 
@@ -29,8 +24,8 @@ func TestAgent_ModelCallHookOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	agent.WaitForIdle()
-	if beforeCalls != 1 || afterCalls != 1 {
-		t.Fatalf("model call hook calls = before:%d after:%d, want 1 each", beforeCalls, afterCalls)
+	if middlewareCalls != 1 {
+		t.Fatalf("model middleware calls = %d, want 1", middlewareCalls)
 	}
 }
 

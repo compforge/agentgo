@@ -10,18 +10,6 @@ import (
 	"time"
 )
 
-// AgentState is a snapshot of the agent's current state.
-type AgentState struct {
-	SystemPrompt     string
-	Messages         []AgentMessage
-	Tools            []Tool
-	IsRunning        bool
-	StreamMessage    AgentMessage        // partial message being streamed, nil when idle
-	PendingToolCalls map[string]struct{} // tool call IDs currently executing
-	TotalUsage       Usage               // cumulative token usage across all turns
-	Error            string
-}
-
 // Agent is a stateful wrapper around the agent loop.
 // It consumes loop events to update internal state, just like any external listener.
 type Agent struct {
@@ -39,7 +27,8 @@ type Agent struct {
 	contextEstimateFn    ContextEstimateFn
 	toolResultFactory    func(ToolCall, ToolResult) AgentMessage
 	toolGate             ToolGate
-	middlewares          []ToolMiddleware
+	modelMiddlewares     []ModelMiddleware
+	toolMiddlewares      []ToolMiddleware
 	maxToolConcurrency   int
 	lengthRecoveryPrompt string
 	abortMarkerText      string
@@ -47,9 +36,9 @@ type Agent struct {
 	messageCommitter     func(AgentMessage) error
 	onMessage            func(AgentMessage)
 	beforeTurn           BeforeTurnHook
-	beforeModelCall      BeforeModelCallHook
-	afterModelCall       AfterModelCallHook
 	afterTurn            AfterTurnHook
+	beforeRun            BeforeRunHook
+	afterRun             AfterRunHook
 	stopGuard            StopGuard
 	cacheLastMessage     string
 	promptCacheKey       string
@@ -61,6 +50,7 @@ type Agent struct {
 	streamMessage    AgentMessage        // partial message during streaming
 	pendingToolCalls map[string]struct{} // tool call IDs in flight
 	totalUsage       Usage               // cumulative token usage
+	runProgress      RunProgress
 
 	// Queues
 	steeringQ                   []AgentMessage
@@ -181,9 +171,13 @@ func (a *Agent) Continue(ctx context.Context) error {
 		a.mu.Unlock()
 		return ErrAlreadyRunning
 	}
-	if len(a.messages) == 0 {
+	if len(a.messages) == 0 && a.beforeRun == nil {
 		a.mu.Unlock()
 		return ErrNoMessages
+	}
+	if len(a.messages) == 0 {
+		a.startContinueRunLocked(ctx)
+		return nil
 	}
 
 	// If last message is assistant, try to dequeue pending messages as new prompt
@@ -335,6 +329,10 @@ func (a *Agent) WaitForIdle() {
 func (a *Agent) State() AgentState {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.stateLocked()
+}
+
+func (a *Agent) stateLocked() AgentState {
 	pending := make(map[string]struct{}, len(a.pendingToolCalls))
 	for k, v := range a.pendingToolCalls {
 		pending[k] = v
@@ -358,6 +356,7 @@ func (a *Agent) State() AgentState {
 		StreamMessage:    a.streamMessage,
 		PendingToolCalls: pending,
 		TotalUsage:       a.totalUsage,
+		Progress:         cloneRunProgress(a.runProgress),
 		Error:            a.lastError,
 	}
 }
@@ -734,6 +733,7 @@ func (a *Agent) Reset() {
 	a.streamMessage = nil
 	a.pendingToolCalls = make(map[string]struct{})
 	a.totalUsage = Usage{}
+	a.runProgress = RunProgress{}
 	a.done = nil
 	a.cancel = nil
 	a.syncContextManagerLocked()
@@ -743,6 +743,10 @@ func (a *Agent) Reset() {
 func (a *Agent) buildConfig() LoopConfig {
 	skipInitialSteering := a.skipNextInitialSteeringPoll
 	a.skipNextInitialSteeringPoll = false
+	initialState := a.stateLocked()
+	if !initialState.Progress.Active {
+		initialState.Progress = RunProgress{Active: true}
+	}
 
 	return LoopConfig{
 		Model:                    a.model,
@@ -750,6 +754,7 @@ func (a *Agent) buildConfig() LoopConfig {
 		MaxRetries:               a.maxRetries,
 		MaxToolErrors:            a.maxToolErrors,
 		ThinkingLevel:            a.thinkingLevel,
+		InitialState:             initialState,
 		ContextManager:           a.contextManager,
 		ToolResultMessageFactory: a.toolResultFactory,
 		CommitContext: func(msgs []AgentMessage, usage *ContextUsage) error {
@@ -775,13 +780,14 @@ func (a *Agent) buildConfig() LoopConfig {
 			defer a.mu.Unlock()
 			return dequeue(&a.followUpQ)
 		},
-		Middlewares:           a.middlewares,
+		ModelMiddlewares:      a.modelMiddlewares,
+		ToolMiddlewares:       a.toolMiddlewares,
 		MaxToolConcurrency:    a.maxToolConcurrency,
 		ShouldEmitAbortMarker: a.wantAbortMarker.Load,
 		OnMessage:             a.onMessage,
+		BeforeRun:             a.beforeRun,
+		AfterRun:              a.afterRun,
 		BeforeTurn:            a.beforeTurn,
-		BeforeModelCall:       a.beforeModelCall,
-		AfterModelCall:        a.afterModelCall,
 		AfterTurn:             a.afterTurn,
 		StopGuard:             a.stopGuard,
 		LengthRecoveryPrompt:  a.lengthRecoveryPrompt,
@@ -846,6 +852,11 @@ func (a *Agent) consumeLoop(events <-chan Event) {
 	for ev := range events {
 		a.mu.Lock()
 		switch ev.Type {
+		case EventAgentStart:
+			if ev.State != nil {
+				a.applyLoopStateLocked(*ev.State)
+			}
+
 		// Message lifecycle
 		case EventMessageStart:
 			partial = ev.Message
@@ -884,6 +895,11 @@ func (a *Agent) consumeLoop(events <-chan Event) {
 				}
 			}
 
+		case EventTurnEnd:
+			if ev.State != nil {
+				a.applyLoopStateLocked(*ev.State)
+			}
+
 		// Error — construct fallback assistant message (skip for intentional abort)
 		case EventError:
 			partial = nil // discard incomplete streaming message to prevent defer from appending it
@@ -908,6 +924,10 @@ func (a *Agent) consumeLoop(events <-chan Event) {
 			}
 
 		case EventAgentEnd:
+			if ev.State != nil {
+				a.totalUsage = ev.State.TotalUsage
+				a.runProgress = cloneRunProgress(ev.State.Progress)
+			}
 			a.isRunning = false
 			a.streamMessage = nil
 			a.pendingToolCalls = make(map[string]struct{})
@@ -924,6 +944,13 @@ func (a *Agent) consumeLoop(events <-chan Event) {
 			}
 		}
 	}
+}
+
+func (a *Agent) applyLoopStateLocked(state AgentState) {
+	a.messages = copyMessages(state.Messages)
+	a.totalUsage = state.TotalUsage
+	a.runProgress = cloneRunProgress(state.Progress)
+	a.syncContextManagerLocked()
 }
 
 func (a *Agent) syncContextManagerLocked() {

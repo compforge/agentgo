@@ -92,7 +92,7 @@ func TestAgentLoop_TurnHooksPrepareNextModelCall(t *testing.T) {
 	}
 }
 
-func TestAgentLoop_ModelCallHooks(t *testing.T) {
+func TestAgentLoop_ModelMiddleware(t *testing.T) {
 	var order []string
 	model := callOptionFuncModel(func(_ context.Context, req *LLMRequest, call CallConfig) (*LLMResponse, error) {
 		order = append(order, "model")
@@ -118,26 +118,22 @@ func TestAgentLoop_ModelCallHooks(t *testing.T) {
 				order = append(order, "before_turn")
 				return []AgentMessage{UserMsg("prepared model context")}, nil
 			},
-			BeforeModelCall: func(_ context.Context, call BeforeModelCallContext) ([]CallOption, error) {
-				order = append(order, "before_model_call")
+			ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, call ModelCall, next ModelExecuteFunc) (ModelResult, error) {
+				order = append(order, "before_model")
 				if call.TurnIndex != 1 {
-					t.Fatalf("before model call turn = %d, want 1", call.TurnIndex)
+					t.Fatalf("model call turn = %d, want 1", call.TurnIndex)
 				}
-				if got := call.Context.Messages[len(call.Context.Messages)-1].TextContent(); got != "prepared model context" {
-					t.Fatalf("before model call context tail = %q, want prepared model context", got)
+				if got := call.Request.Messages[len(call.Request.Messages)-1].TextContent(); got != "prepared model context" {
+					t.Fatalf("model request tail = %q, want prepared model context", got)
 				}
-				return []CallOption{WithThinking(ThinkingHigh), WithToolChoice("required")}, nil
-			},
-			AfterModelCall: func(_ context.Context, call AfterModelCallContext) error {
-				order = append(order, "after_model_call")
-				if call.TurnIndex != 1 || call.Message.TextContent() != "answer" {
-					t.Fatalf("unexpected after model call context: %#v", call)
+				call.Options = append(call.Options, WithThinking(ThinkingHigh), WithToolChoice("required"))
+				result, err := next(ctx, call)
+				order = append(order, "after_model")
+				if result.Message.TextContent() != "answer" {
+					t.Fatalf("unexpected model result: %#v", result)
 				}
-				if got := call.Context.Messages[len(call.Context.Messages)-1].TextContent(); got != "prepared model context" {
-					t.Fatalf("after model call context tail = %q, want uncommitted response", got)
-				}
-				return nil
-			},
+				return result, err
+			}},
 			AfterTurn: func(_ context.Context, turn AfterTurnContext) error {
 				order = append(order, "after_turn")
 				if got := turn.Context.Messages[len(turn.Context.Messages)-1].TextContent(); got != "answer" {
@@ -148,7 +144,7 @@ func TestAgentLoop_ModelCallHooks(t *testing.T) {
 		},
 	)
 
-	wantOrder := []string{"before_turn", "before_model_call", "model", "after_model_call", "after_turn"}
+	wantOrder := []string{"before_turn", "before_model", "model", "after_model", "after_turn"}
 	if !slices.Equal(order, wantOrder) {
 		t.Fatalf("hook order = %v, want %v", order, wantOrder)
 	}
@@ -203,8 +199,8 @@ func TestAgentLoop_TurnHookErrorStopsRun(t *testing.T) {
 	})
 }
 
-func TestAgentLoop_ModelCallHookErrorStopsRun(t *testing.T) {
-	t.Run("before model call", func(t *testing.T) {
+func TestAgentLoop_ModelMiddlewareErrorStopsRun(t *testing.T) {
+	t.Run("before next", func(t *testing.T) {
 		modelCalls := 0
 		events := runTestLoop(t,
 			[]AgentMessage{UserMsg("question")},
@@ -214,9 +210,9 @@ func TestAgentLoop_ModelCallHookErrorStopsRun(t *testing.T) {
 					modelCalls++
 					return &LLMResponse{Message: assistantMsg("unexpected", StopReasonStop)}, nil
 				}),
-				BeforeModelCall: func(context.Context, BeforeModelCallContext) ([]CallOption, error) {
-					return nil, errors.New("prepare call failed")
-				},
+				ModelMiddlewares: []ModelMiddleware{func(context.Context, ModelCall, ModelExecuteFunc) (ModelResult, error) {
+					return ModelResult{}, errors.New("prepare call failed")
+				}},
 			},
 		)
 
@@ -230,7 +226,7 @@ func TestAgentLoop_ModelCallHookErrorStopsRun(t *testing.T) {
 		}
 	})
 
-	t.Run("after model call", func(t *testing.T) {
+	t.Run("after next", func(t *testing.T) {
 		var committed []AgentMessage
 		events := runTestLoop(t,
 			[]AgentMessage{UserMsg("question")},
@@ -241,9 +237,13 @@ func TestAgentLoop_ModelCallHookErrorStopsRun(t *testing.T) {
 					committed = append(committed, message)
 					return nil
 				},
-				AfterModelCall: func(context.Context, AfterModelCallContext) error {
-					return errors.New("validate response failed")
-				},
+				ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, call ModelCall, next ModelExecuteFunc) (ModelResult, error) {
+					result, err := next(ctx, call)
+					if err != nil {
+						return result, err
+					}
+					return ModelResult{}, errors.New("validate response failed")
+				}},
 			},
 		)
 
@@ -309,7 +309,7 @@ func TestCallLLM_CommitsProjectedContextWhenRequested(t *testing.T) {
 	}
 
 	events := make(chan Event, 16)
-	if _, _, err := callLLM(context.Background(), agentCtx, cfg, nil, eventSink{ctx: context.Background(), ch: events}); err != nil {
+	if _, _, err := callLLM(context.Background(), agentCtx, cfg, 1, 1, eventSink{ctx: context.Background(), ch: events}); err != nil {
 		t.Fatalf("callLLM failed: %v", err)
 	}
 
@@ -358,7 +358,7 @@ func TestCallLLMWithRetry_EmitsOverflowCompaction(t *testing.T) {
 		context.Background(),
 		&AgentContext{Messages: []AgentMessage{UserMsg("large"), UserMsg("tail")}},
 		LoopConfig{Model: model, ContextManager: manager},
-		nil,
+		1,
 		eventSink{ctx: context.Background(), ch: events},
 	)
 	if err != nil {
@@ -567,10 +567,10 @@ func TestAgentLoop_Middleware(t *testing.T) {
 					secondReq = req
 					return &LLMResponse{Message: assistantMsg("done", StopReasonStop)}, nil
 				}),
-				Middlewares: []ToolMiddleware{
-					func(ctx context.Context, call ToolCall, next ToolExecuteFunc) (json.RawMessage, error) {
+				ToolMiddlewares: []ToolMiddleware{
+					func(ctx context.Context, call ToolCall, next ToolExecuteFunc) (ToolResult, error) {
 						log = append(log, "before")
-						out, err := next(ctx, call.Args)
+						out, err := next(ctx, call)
 						log = append(log, "after")
 						return out, err
 					},
@@ -2165,35 +2165,33 @@ func (m *flakyStreamModel) GenerateStream(_ context.Context, _ []Message, _ []To
 }
 func (m *flakyStreamModel) SupportsTools() bool { return true }
 
-func TestAgentLoop_ModelCallHooksWrapInternalRetries(t *testing.T) {
+func TestAgentLoop_ModelMiddlewareWrapsEachAttempt(t *testing.T) {
 	m := &flakyStreamModel{reply: "recovered"}
-	beforeCalls := 0
-	afterCalls := 0
+	var attempts []int
+	var callIDs []string
 	events := runTestLoop(t,
 		[]AgentMessage{UserMsg("hi")},
 		AgentContext{},
 		LoopConfig{
 			Model:      m,
 			MaxRetries: 2,
-			BeforeModelCall: func(context.Context, BeforeModelCallContext) ([]CallOption, error) {
-				beforeCalls++
-				return []CallOption{WithToolChoice("required")}, nil
-			},
-			AfterModelCall: func(_ context.Context, call AfterModelCallContext) error {
-				afterCalls++
-				if call.Message.TextContent() != "recovered" {
-					t.Fatalf("after model call message = %q, want recovered", call.Message.TextContent())
-				}
-				return nil
-			},
+			ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, call ModelCall, next ModelExecuteFunc) (ModelResult, error) {
+				attempts = append(attempts, call.Attempt)
+				callIDs = append(callIDs, call.ID)
+				call.Options = append(call.Options, WithToolChoice("required"))
+				return next(ctx, call)
+			}},
 		},
 	)
 
 	if m.calls != 2 {
 		t.Fatalf("expected exactly 2 stream calls (1 partial + 1 success), got %d", m.calls)
 	}
-	if beforeCalls != 1 || afterCalls != 1 {
-		t.Fatalf("model call hook calls = before:%d after:%d, want 1 each", beforeCalls, afterCalls)
+	if !slices.Equal(attempts, []int{1, 2}) {
+		t.Fatalf("model middleware attempts = %v, want [1 2]", attempts)
+	}
+	if len(callIDs) != 2 || callIDs[0] == "" || callIDs[0] != callIDs[1] {
+		t.Fatalf("model call IDs = %v, want one stable non-empty ID across retries", callIDs)
 	}
 	if !slices.Equal(m.toolChoices, []any{"required", "required"}) {
 		t.Fatalf("retry tool choices = %#v, want required on both attempts", m.toolChoices)

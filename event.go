@@ -3,6 +3,7 @@ package agentgo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -100,6 +101,7 @@ type Event struct {
 	ContextItems []ContextItem   // for context_projected
 	Compaction   *CompactionInfo // for context_compacted
 	Summary      *RunSummary     // for agent_end: factual run summary
+	State        *AgentState     // for agent_start/turn_end/agent_end: loop state at that boundary
 }
 
 // RetryInfo carries retry context for EventRetry events.
@@ -119,8 +121,14 @@ type RetryInfo struct {
 // the same lifetime regardless of narrower contexts (per-tool cancellation
 // must not affect event delivery).
 type eventSink struct {
-	ctx context.Context
-	ch  chan<- Event
+	ctx      context.Context
+	ch       chan<- Event
+	terminal *terminalEvent
+}
+
+type terminalEvent struct {
+	event *Event
+	err   error
 }
 
 // emit sends an event to the channel, blocking when it is full — backpressure,
@@ -130,6 +138,21 @@ type eventSink struct {
 // full the event is dropped so an abandoned channel cannot leak the loop
 // goroutine.
 func (s eventSink) emit(ev Event) {
+	if ev.Type == EventError && s.terminal != nil && ev.Err != nil {
+		s.terminal.err = errors.Join(s.terminal.err, ev.Err)
+	}
+	if ev.Type == EventAgentEnd && s.terminal != nil {
+		if ev.Err == nil {
+			ev.Err = s.terminal.err
+		}
+		copy := ev
+		s.terminal.event = &copy
+		return
+	}
+	s.emitNow(ev)
+}
+
+func (s eventSink) emitNow(ev Event) {
 	select {
 	case s.ch <- ev:
 	default:
@@ -138,6 +161,13 @@ func (s eventSink) emit(ev Event) {
 		case <-s.ctx.Done():
 		}
 	}
+}
+
+func (s eventSink) flushTerminal() {
+	if s.terminal == nil || s.terminal.event == nil {
+		return
+	}
+	s.emitNow(*s.terminal.event)
 }
 
 // emitError sends an error event followed by agent_end.
