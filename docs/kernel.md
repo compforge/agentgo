@@ -22,10 +22,30 @@ AgentGo 原生支持**轨迹驱动的 Loop 优化**：Event stream 记录实际�
 层级提供互不重叠的扩展点：Run 使用 `BeforeRun` / `AfterRun`，turn 使用 `BeforeTurn` / `AfterTurn`，
 具体模型和工具调用使用 middleware。
 
-`AgentState` 是 Loop 自己拥有的状态。它在完整 turn 结束后包含消息、usage、计数以及已经决定的下一步
-内部 continuation；model、tool、hook、流式 partial message 和进程内 context 不属于其可编码投影。
-`codec` 包提供通用的 tagged value、稳定类型身份与 JSON 编解码；`AgentState` 通过字段 tag 声明自己的
-portable projection，应用再注册自定义 `AgentMessage` 的具体类型。
+`AgentState` 是 AgentGo 在安全边界拥有的状态。它在完整 turn 结束后包含消息、usage、计数、已经决定的
+下一步 continuation，以及 Agent 已接纳但 Loop 尚未消费的 steering / follow-up。输入在 AgentGo 内部
+按所有权逐步移动：
+
+```text
+SteeringQueue / FollowUpQueue（Agent 已接纳）
+                │
+                ▼
+RunProgress.PendingMessages（Loop 已接管，等待下一 turn 提交）
+                │
+                ▼
+Messages（已提交到对话历史）
+```
+
+移动只改变所有者，不复制语义：输入一旦成功进入 `Messages`，就必须从 pending 中移除，避免恢复后重复
+提交。`AfterTurn` / `AfterRun` 及对应 Event 携带的 state 是完整边界；运行中的 `Agent.State()` 只是
+stateful wrapper 的即时视图，Loop 可能已持有更新的状态。
+
+外部 API 已收到请求、但尚未调用 `Steer` / `FollowUp` 的 durable inbox 仍由宿主负责。宿主和 AgentGo
+分别记录“平台已接纳”和“执行内核已接纳”，两层事实可以关联，但不能互相替代。
+
+model、tool、hook、流式 partial message 和进程内 context 不属于可编码投影。`codec` 包提供通用的
+tagged value、稳定类型身份与 JSON 编解码；`AgentState` 通过字段 tag 声明自己的 portable projection，
+应用再注册自定义 `AgentMessage` 的具体类型。
 
 编码能力本身不决定数据保存在哪里、何时传输或者如何重新执行。宿主可以把编码结果用于持久化、进程
 交接或未来 RPC，并在装载状态后重新绑定执行依赖。

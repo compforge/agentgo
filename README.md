@@ -76,7 +76,7 @@ AgentMessage
 
 `ContextItemProvider` lets an application message expose identifiable information without changing its model rendering. Before each model call, `EventContextProjected` reports the inventory from the actual projected context. `ContextItem` and `ContextDemand` share `ContextKey`; applications and evaluators own all label meanings and demand-extraction rules.
 
-`AgentState` is codec-aware without being tied to storage or transport. `agentgo.NewCodec` registers AgentGo's built-in state types; applications register their own concrete `AgentMessage` types with one stable type ID. Fields opt in through `codec` tags, while custom handlers cover special wire representations. Hosts can use the same encoded state for persistence, process handoff, or future RPC protocols.
+`AgentState` is codec-aware without being tied to storage or transport. Its portable projection includes committed messages, loop continuation, and steering/follow-up accepted by AgentGo but not yet consumed. `agentgo.NewCodec` registers AgentGo's built-in state types; applications register their own concrete `AgentMessage` types with one stable type ID. Fields opt in through `codec` tags, while custom handlers cover special wire representations. Hosts can persist state from `AfterTurn` / `AfterRun` or the corresponding events for process handoff and recovery; durable ingress before AgentGo accepts a message remains host-owned.
 
 ```go
 stateCodec, _ := agentgo.NewCodec(

@@ -13,12 +13,17 @@ type RunProgress struct {
 	PendingMessages       []AgentMessage `codec:"pending_messages,omitempty"` // loop-owned messages accepted for the next turn
 }
 
-// AgentState is a snapshot of the agent's current state. Codec tags define its
-// portable projection; model, tools, hooks, streams and in-flight calls remain
-// process-local and are rebound or recreated by the host.
+// AgentState is a snapshot of the agent's current state. SteeringQueue and
+// FollowUpQueue contain messages accepted by Agent but not yet handed to the
+// Loop; Progress.PendingMessages contains continuation already owned by the
+// Loop. Codec tags define the portable projection, while model, tools, hooks,
+// streams and in-flight calls remain process-local and are rebound or recreated
+// by the host.
 type AgentState struct {
 	SystemPrompt     string
 	Messages         []AgentMessage `codec:"messages"`
+	SteeringQueue    []AgentMessage `codec:"steering_queue,omitempty"`
+	FollowUpQueue    []AgentMessage `codec:"follow_up_queue,omitempty"`
 	Tools            []Tool
 	IsRunning        bool
 	StreamMessage    AgentMessage
@@ -26,6 +31,14 @@ type AgentState struct {
 	TotalUsage       Usage       `codec:"total_usage"`
 	Progress         RunProgress `codec:"progress"`
 	Error            string
+}
+
+func cloneAgentState(state AgentState) AgentState {
+	state.Messages = copyMessages(state.Messages)
+	state.SteeringQueue = copyMessages(state.SteeringQueue)
+	state.FollowUpQueue = copyMessages(state.FollowUpQueue)
+	state.Progress = cloneRunProgress(state.Progress)
+	return state
 }
 
 func cloneStringIntMap(source map[string]int) map[string]int {

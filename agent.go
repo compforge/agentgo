@@ -211,17 +211,17 @@ func (a *Agent) resumeQueuedLocked(ctx context.Context) bool {
 	return true
 }
 
-// Steer queues a steering message to interrupt the agent mid-run.
-// Delivered after the current tool execution; remaining tools are skipped.
+// Steer accepts a steering message into Agent-owned state. It is delivered
+// after the current tool execution; remaining tools are skipped.
 func (a *Agent) Steer(msg AgentMessage) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.steeringQ = append(a.steeringQ, msg)
 }
 
-// FollowUp queues a message for the next natural continuation point. An
-// active run consumes follow-ups when it reaches that point; an idle Agent
-// retains them until the harness calls Continue.
+// FollowUp accepts a message into Agent-owned state for the next natural
+// continuation point. An active run consumes follow-ups when it reaches that
+// point; an idle Agent retains them until the harness calls Continue.
 func (a *Agent) FollowUp(msg AgentMessage) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -324,7 +324,10 @@ func (a *Agent) WaitForIdle() {
 	}
 }
 
-// State returns a snapshot of the agent's current state.
+// State returns a snapshot of the stateful Agent view. While a run is active,
+// completed-boundary state from AfterTurn, AfterRun, or the corresponding
+// Events is the authoritative portable snapshot because the Loop may already
+// own input that is no longer present in the wrapper queues.
 func (a *Agent) State() AgentState {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -350,6 +353,8 @@ func (a *Agent) stateLocked() AgentState {
 	return AgentState{
 		SystemPrompt:     sp,
 		Messages:         copyMessages(a.messages),
+		SteeringQueue:    copyMessages(a.steeringQ),
+		FollowUpQueue:    copyMessages(a.followUpQ),
 		Tools:            a.tools,
 		IsRunning:        a.isRunning,
 		StreamMessage:    a.streamMessage,
@@ -421,10 +426,10 @@ func (a *Agent) startPromptRunLocked(ctx context.Context, msgs []AgentMessage) {
 		Messages:     copyMessages(a.messages),
 		Tools:        a.tools,
 	}
-	config := a.buildConfig()
+	config, runtime := a.buildConfig()
 	a.mu.Unlock()
 
-	go a.consumeLoop(AgentLoop(runCtx, msgs, agentCtx, config))
+	go a.consumeLoop(startAgentLoop(runCtx, msgs, agentCtx, config, false, runtime))
 }
 
 // startContinueRunLocked starts a continue run from the current context. Caller must hold a.mu.
@@ -443,10 +448,10 @@ func (a *Agent) startContinueRunLocked(ctx context.Context) {
 		Messages:     copyMessages(a.messages),
 		Tools:        a.tools,
 	}
-	config := a.buildConfig()
+	config, runtime := a.buildConfig()
 	a.mu.Unlock()
 
-	go a.consumeLoop(AgentLoopContinue(runCtx, agentCtx, config))
+	go a.consumeLoop(startAgentLoop(runCtx, nil, agentCtx, config, true, runtime))
 }
 
 // ContextUsage returns an estimate of the current context window occupancy.
@@ -739,15 +744,20 @@ func (a *Agent) Reset() {
 }
 
 // buildConfig constructs a LoopConfig from the agent's settings. Must be called with lock held.
-func (a *Agent) buildConfig() LoopConfig {
+func (a *Agent) buildConfig() (LoopConfig, loopRuntime) {
 	skipInitialSteering := a.skipNextInitialSteeringPoll
 	a.skipNextInitialSteeringPoll = false
 	initialState := a.stateLocked()
+	// The wrapper remains the owner until the Loop drains these queues through
+	// its callbacks. Keeping them out of InitialState prevents duplication and
+	// lets BeforeRun replace the baseline without dropping newer accepted input.
+	initialState.SteeringQueue = nil
+	initialState.FollowUpQueue = nil
 	if !initialState.Progress.Active {
 		initialState.Progress = RunProgress{Active: true}
 	}
 
-	return LoopConfig{
+	config := LoopConfig{
 		Model:                    a.model,
 		MaxTurns:                 a.maxTurns,
 		MaxRetries:               a.maxRetries,
@@ -795,6 +805,17 @@ func (a *Agent) buildConfig() LoopConfig {
 		CacheLastMessage:      a.cacheLastMessage,
 		PromptCacheKey:        a.promptCacheKey,
 	}
+	runtime := loopRuntime{
+		returnQueuedMessages: func(steering, followUp []AgentMessage) {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			// Inputs captured at the boundary predate any input accepted while
+			// the checkpoint was being assembled, so return them to the front.
+			a.steeringQ = append(copyMessages(steering), a.steeringQ...)
+			a.followUpQ = append(copyMessages(followUp), a.followUpQ...)
+		},
+	}
+	return config, runtime
 }
 
 // consumeLoop projects loop events into the stateful Agent view. It must not

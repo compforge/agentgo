@@ -94,10 +94,14 @@ type LoopConfig struct {
 	// reasoning of its own.
 	ToolGate ToolGate
 
-	// Steering: called after each tool execution to check for user interruptions.
+	// Steering drains messages accepted since the last poll. The Loop may poll
+	// at tool and completed-turn boundaries so a portable state snapshot owns
+	// every accepted message it has observed.
 	GetSteeringMessages func() []AgentMessage
 
-	// FollowUp: called when the agent would otherwise stop.
+	// FollowUp drains messages accepted since the last poll. The Loop may poll
+	// at completed-turn boundaries and consumes the messages only when it would
+	// otherwise stop.
 	GetFollowUpMessages func() []AgentMessage
 
 	// ModelMiddlewares wrap each AgentGo-owned physical model attempt, including

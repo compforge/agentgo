@@ -36,7 +36,7 @@ const (
 // degrades to best-effort and the loop is guaranteed to exit and close the
 // channel even if no one is reading.
 func AgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentContext, config LoopConfig) <-chan Event {
-	return startAgentLoop(ctx, prompts, agentCtx, config, false)
+	return startAgentLoop(ctx, prompts, agentCtx, config, false, loopRuntime{})
 }
 
 // AgentLoopContinue continues from existing context without adding new messages.
@@ -45,10 +45,16 @@ func AgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentContex
 // The returned channel follows the same consumption contract as AgentLoop:
 // drain until close, or cancel ctx and keep draining to stop early.
 func AgentLoopContinue(ctx context.Context, agentCtx AgentContext, config LoopConfig) <-chan Event {
-	return startAgentLoop(ctx, nil, agentCtx, config, true)
+	return startAgentLoop(ctx, nil, agentCtx, config, true, loopRuntime{})
 }
 
-func startAgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentContext, config LoopConfig, continuing bool) <-chan Event {
+// loopRuntime binds process-local stateful-wrapper behavior without expanding
+// the public LoopConfig contract used by standalone AgentLoop callers.
+type loopRuntime struct {
+	returnQueuedMessages func(steering, followUp []AgentMessage)
+}
+
+func startAgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentContext, config LoopConfig, continuing bool, runtime loopRuntime) <-chan Event {
 	ch := make(chan Event, 128)
 	terminal := &terminalEvent{}
 	sink := eventSink{ctx: ctx, ch: ch, terminal: terminal}
@@ -66,15 +72,13 @@ func startAgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentC
 			state.Messages = copyMessages(agentCtx.Messages)
 		}
 		state = bindRunState(state, &currentCtx)
-		if !state.Progress.Active {
-			state.Progress = RunProgress{Active: true}
-		}
+		state.Progress = activateRunProgress(state.Progress, continuing)
 
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				sink.emitError(fmt.Errorf("agent loop panicked: %v", recovered), &RunSummary{EndReason: EndReasonError})
 			}
-			finishAgentRun(ctx, &currentCtx, &state, config, sink)
+			finishAgentRun(ctx, &currentCtx, &state, config, runtime, sink)
 			sink.flushTerminal()
 			close(ch)
 		}()
@@ -87,9 +91,7 @@ func startAgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentC
 			}
 			state = bindRunState(restored, &currentCtx)
 		}
-		if !state.Progress.Active {
-			state.Progress = RunProgress{Active: true}
-		}
+		state.Progress = activateRunProgress(state.Progress, continuing)
 		currentCtx.Messages = copyMessages(state.Messages)
 
 		if continuing && len(currentCtx.Messages) == 0 {
@@ -110,37 +112,89 @@ func startAgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentC
 			sink.emit(Event{Type: EventMessageEnd, Message: prompt})
 		}
 
-		runLoop(ctx, &currentCtx, &newMessages, config, sink, &state)
+		runLoop(ctx, &currentCtx, &newMessages, config, runtime, sink, &state)
 	}()
 
 	return ch
 }
 
+func activateRunProgress(progress RunProgress, continuing bool) RunProgress {
+	if !progress.Active && !continuing {
+		return RunProgress{Active: true}
+	}
+	progress.Active = true
+	return progress
+}
+
 func bindRunState(state AgentState, current *AgentContext) AgentState {
+	state = cloneAgentState(state)
 	state.SystemPrompt = current.SystemPrompt
 	state.Tools = append([]Tool(nil), current.Tools...)
 	state.IsRunning = true
 	state.StreamMessage = nil
 	state.PendingToolCalls = nil
 	state.Error = ""
-	state.Progress = cloneRunProgress(state.Progress)
 	return state
 }
 
 func snapshotRunState(state AgentState, current *AgentContext) AgentState {
+	state = cloneAgentState(state)
 	state.Messages = copyMessages(current.Messages)
-	state.Progress = cloneRunProgress(state.Progress)
 	state.Tools = append([]Tool(nil), current.Tools...)
 	return state
 }
 
-func finishAgentRun(ctx context.Context, current *AgentContext, state *AgentState, config LoopConfig, sink eventSink) {
+// captureQueuedMessages transfers newly accepted semantic input from the host
+// callbacks into Loop-owned state without consuming it as conversation input.
+// The queue callbacks are drains. Standalone loops retain ownership in state;
+// the stateful Agent runtime returns snapshot-only captures to its live queues.
+func captureQueuedMessages(state *AgentState, config LoopConfig) {
+	if config.GetSteeringMessages != nil {
+		state.SteeringQueue = append(state.SteeringQueue, config.GetSteeringMessages()...)
+	}
+	if config.GetFollowUpMessages != nil {
+		state.FollowUpQueue = append(state.FollowUpQueue, config.GetFollowUpMessages()...)
+	}
+}
+
+func takeSteeringMessages(state *AgentState, config LoopConfig) []AgentMessage {
+	if config.GetSteeringMessages != nil {
+		state.SteeringQueue = append(state.SteeringQueue, config.GetSteeringMessages()...)
+	}
+	messages := copyMessages(state.SteeringQueue)
+	state.SteeringQueue = nil
+	return messages
+}
+
+func takeFollowUpMessages(state *AgentState, config LoopConfig) []AgentMessage {
+	if config.GetFollowUpMessages != nil {
+		state.FollowUpQueue = append(state.FollowUpQueue, config.GetFollowUpMessages()...)
+	}
+	messages := copyMessages(state.FollowUpQueue)
+	state.FollowUpQueue = nil
+	return messages
+}
+
+func checkpointRunState(state *AgentState, current *AgentContext, config LoopConfig, runtime loopRuntime) AgentState {
+	captureQueuedMessages(state, config)
+	checkpoint := snapshotRunState(*state, current)
+	if runtime.returnQueuedMessages != nil {
+		// A stateful Agent keeps live queue ownership so Has/Clear semantics do
+		// not change merely because a completed-boundary snapshot was emitted.
+		runtime.returnQueuedMessages(state.SteeringQueue, state.FollowUpQueue)
+		state.SteeringQueue = nil
+		state.FollowUpQueue = nil
+	}
+	return checkpoint
+}
+
+func finishAgentRun(ctx context.Context, current *AgentContext, state *AgentState, config LoopConfig, runtime loopRuntime, sink eventSink) {
 	if sink.terminal.event == nil {
 		sink.emitError(errors.New("agent loop ended without terminal event"), &RunSummary{EndReason: EndReasonError})
 	}
 	state.Progress.Active = false
 	state.IsRunning = false
-	finalState := snapshotRunState(*state, current)
+	finalState := checkpointRunState(state, current, config, runtime)
 	terminal := sink.terminal.event
 	summary := RunSummary{EndReason: EndReasonError}
 	if terminal.Summary != nil {
@@ -196,7 +250,7 @@ func commitMessage(currentCtx *AgentContext, newMessages *[]AgentMessage, config
 //   - Tool results are appended after the assistant message that requested them.
 //   - Steering stops not-yet-started tools. Started tools follow their
 //     InterruptBehavior and may continue or be cancelled.
-func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]AgentMessage, config LoopConfig, sink eventSink, state *AgentState) {
+func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]AgentMessage, config LoopConfig, runtime loopRuntime, sink eventSink, state *AgentState) {
 	type runSummaryState struct {
 		toolCalls  int
 		toolErrors int
@@ -263,7 +317,7 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 		state.Progress.ToolCalls = summaryState.toolCalls
 		state.Progress.ToolErrors = summaryState.toolErrors
 		state.Progress.ConsecutiveToolErrors = cloneStringIntMap(toolErrors)
-		turnState := snapshotRunState(*state, currentCtx)
+		turnState := checkpointRunState(state, currentCtx, config, runtime)
 		sink.emit(Event{Type: EventTurnEnd, Message: message, ToolResults: append([]ToolResult(nil), results...), State: &turnState})
 		if config.AfterTurn == nil {
 			return true
@@ -281,17 +335,25 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 		return true
 	}
 
-	// Check for steering messages at start
+	// Restore continuation already owned by the Loop before considering input
+	// that Agent accepted into its semantic queues.
 	pendingMessages := copyMessages(state.Progress.PendingMessages)
-	state.Progress.PendingMessages = nil
-	if len(pendingMessages) == 0 && config.GetSteeringMessages != nil {
-		pendingMessages = config.GetSteeringMessages()
+	resumingNaturalStop := state.Progress.CompletedTurns > 0 && !state.Progress.NextTurn
+	if len(pendingMessages) == 0 {
+		pendingMessages = takeSteeringMessages(state, config)
+	}
+	if len(pendingMessages) == 0 && resumingNaturalStop {
+		pendingMessages = takeFollowUpMessages(state, config)
+	}
+	if len(pendingMessages) > 0 {
+		state.Progress.NextTurn = true
+		state.Progress.PendingMessages = copyMessages(pendingMessages)
 	}
 
 	// Track last assistant message so StopGuard can inspect what's stopping us.
 	var lastAssistantMsg Message
 
-	if state.Progress.CompletedTurns > 0 && !state.Progress.NextTurn {
+	if resumingNaturalStop && len(pendingMessages) == 0 {
 		sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonStop)})
 		return
 	}
@@ -339,15 +401,21 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 		}
 
 		// Process pending messages (inject before next LLM call)
+		if len(pendingMessages) == 0 {
+			pendingMessages = takeSteeringMessages(state, config)
+			state.Progress.PendingMessages = copyMessages(pendingMessages)
+		}
 		if len(pendingMessages) > 0 {
-			for _, msg := range pendingMessages {
+			for len(pendingMessages) > 0 {
+				msg := pendingMessages[0]
 				sink.emit(Event{Type: EventMessageStart, Message: msg})
 				if !commit(msg) {
 					return
 				}
+				pendingMessages = pendingMessages[1:]
+				state.Progress.PendingMessages = copyMessages(pendingMessages)
 				sink.emit(Event{Type: EventMessageEnd, Message: msg})
 			}
-			pendingMessages = nil
 		}
 		if !runBeforeTurn(turnCount + 1) {
 			return
@@ -425,7 +493,11 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 		var turnToolResults []ToolResult
 		if hasMoreToolCalls {
 			var steering []AgentMessage
-			turnToolResults, steering = executeToolCalls(ctx, turnCount+1, currentCtx.Tools, toolCalls, config, toolErrors, sink)
+			toolConfig := config
+			toolConfig.GetSteeringMessages = func() []AgentMessage {
+				return takeSteeringMessages(state, config)
+			}
+			turnToolResults, steering = executeToolCalls(ctx, turnCount+1, currentCtx.Tools, toolCalls, toolConfig, toolErrors, sink)
 			afterToolExec = true
 
 			for _, tr := range turnToolResults {
@@ -512,8 +584,8 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 		if len(steeringAfterTools) > 0 {
 			pendingMessages = steeringAfterTools
 			steeringAfterTools = nil
-		} else if config.GetSteeringMessages != nil {
-			pendingMessages = config.GetSteeringMessages()
+		} else {
+			pendingMessages = takeSteeringMessages(state, config)
 		}
 		state.Progress.PendingMessages = copyMessages(pendingMessages)
 		if hasMoreToolCalls || len(pendingMessages) > 0 {
@@ -525,18 +597,15 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 		}
 
 		// Agent would stop here. Check for follow-up messages.
-		if config.GetFollowUpMessages != nil {
-			followUp := config.GetFollowUpMessages()
-			if len(followUp) > 0 {
-				afterToolExec = false
-				pendingMessages = followUp
-				state.Progress.NextTurn = true
-				state.Progress.PendingMessages = copyMessages(pendingMessages)
-				if !runAfterTurn(turnCount, assistantMsg, turnToolResults) {
-					return
-				}
-				continue
+		if followUp := takeFollowUpMessages(state, config); len(followUp) > 0 {
+			afterToolExec = false
+			pendingMessages = followUp
+			state.Progress.NextTurn = true
+			state.Progress.PendingMessages = copyMessages(pendingMessages)
+			if !runAfterTurn(turnCount, assistantMsg, turnToolResults) {
+				return
 			}
+			continue
 		}
 
 		// StopGuard veto: give the application a chance to keep the loop alive.

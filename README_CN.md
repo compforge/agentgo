@@ -76,7 +76,7 @@ AgentMessage
 
 应用消息可通过 `ContextItemProvider` 暴露有稳定身份的信息，而不改变模型渲染。每次模型调用前，`EventContextProjected` 会报告实际投影后的 Context 清单。`ContextItem` 与 `ContextDemand` 共享 `ContextKey`；标签含义及 Demand 提取规则由应用和 Evaluator 负责。
 
-`AgentState` 感知 codec，但不绑定存储或传输方式。`agentgo.NewCodec` 会注册 AgentGo 内置状态类型；应用只需用一个稳定 TypeID 注册自己的具体 `AgentMessage` 类型。字段通过 `codec` tag 主动参与编码，特殊 wire 表示则使用自定义 Handler。同一份编码状态可用于持久化、进程交接或未来的 RPC 协议。
+`AgentState` 感知 codec，但不绑定存储或传输方式。它的可编码投影包含已提交消息、Loop continuation，以及 AgentGo 已接纳但尚未消费的 steering / follow-up。`agentgo.NewCodec` 会注册 AgentGo 内置状态类型；应用只需用一个稳定 TypeID 注册自己的具体 `AgentMessage` 类型。字段通过 `codec` tag 主动参与编码，特殊 wire 表示则使用自定义 Handler。宿主可持久化 `AfterTurn` / `AfterRun` 或对应 Event 携带的 state，用于进程交接与恢复；在 AgentGo 接纳消息之前的 durable ingress 仍由宿主负责。
 
 ```go
 stateCodec, _ := agentgo.NewCodec(

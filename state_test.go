@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +25,8 @@ func TestAgentStateCodecRoundTripPortableProjection(t *testing.T) {
 	original := AgentState{
 		SystemPrompt:     "runtime config",
 		Messages:         []AgentMessage{&userMessage, assistantMessage},
+		SteeringQueue:    []AgentMessage{UserMsg("redirect")},
+		FollowUpQueue:    []AgentMessage{UserMsg("one more thing")},
 		Tools:            []Tool{NewFuncTool("noop", "noop", nil, nil)},
 		IsRunning:        true,
 		StreamMessage:    assistantMsg("partial", ""),
@@ -74,6 +77,12 @@ func TestAgentStateCodecRoundTripPortableProjection(t *testing.T) {
 	}
 	if got := restored.Progress.PendingMessages[0].TextContent(); got != "continue" {
 		t.Fatalf("pending message = %q", got)
+	}
+	if got := restored.SteeringQueue[0].TextContent(); got != "redirect" {
+		t.Fatalf("steering message = %q", got)
+	}
+	if got := restored.FollowUpQueue[0].TextContent(); got != "one more thing" {
+		t.Fatalf("follow-up message = %q", got)
 	}
 	if restored.SystemPrompt != "" || restored.Tools != nil || restored.IsRunning || restored.StreamMessage != nil || restored.PendingToolCalls != nil || restored.Error != "" {
 		t.Fatalf("runtime fields leaked into portable state: %#v", restored)
@@ -269,6 +278,270 @@ func TestAgentContinueRestoresStateInBeforeRun(t *testing.T) {
 	}
 	if got := agent.Messages()[0].TextContent(); got != "restored request" {
 		t.Fatalf("restored transcript head = %q", got)
+	}
+}
+
+func TestAgentContinueConsumesRestoredFollowUpQueue(t *testing.T) {
+	restored := AgentState{
+		Messages:      []AgentMessage{UserMsg("question"), assistantMsg("first answer", StopReasonStop)},
+		FollowUpQueue: []AgentMessage{UserMsg("restored follow-up")},
+		Progress:      RunProgress{CompletedTurns: 1},
+	}
+	model := sequentialModel(func(i int, req *LLMRequest) (*LLMResponse, error) {
+		if i != 0 {
+			t.Fatalf("model call = %d, want one resumed call", i+1)
+		}
+		if got := req.Messages[len(req.Messages)-1].TextContent(); got != "restored follow-up" {
+			t.Fatalf("last model input = %q, want restored follow-up", got)
+		}
+		return &LLMResponse{Message: assistantMsg("follow-up answer", StopReasonStop)}, nil
+	})
+	agent := NewAgent(
+		WithModel(model),
+		WithBeforeRun(func(context.Context, BeforeRunContext) (AgentState, error) {
+			return restored, nil
+		}),
+	)
+
+	if err := agent.Continue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	agent.WaitForIdle()
+	if agent.HasFollowUps() {
+		t.Fatal("restored follow-up remained queued after Continue")
+	}
+	if got := agent.Messages()[len(agent.Messages())-1].TextContent(); got != "follow-up answer" {
+		t.Fatalf("last message = %q, want follow-up answer", got)
+	}
+}
+
+func TestAgentContinueCombinesRestoredStateWithNewAcceptedFollowUp(t *testing.T) {
+	restored := AgentState{
+		Messages: []AgentMessage{UserMsg("question"), assistantMsg("first answer", StopReasonStop)},
+		Progress: RunProgress{CompletedTurns: 1},
+	}
+	model := sequentialModel(func(i int, req *LLMRequest) (*LLMResponse, error) {
+		if i != 0 {
+			t.Fatalf("model call = %d, want one resumed call", i+1)
+		}
+		if got := req.Messages[len(req.Messages)-1].TextContent(); got != "new follow-up" {
+			t.Fatalf("last model input = %q, want new follow-up", got)
+		}
+		return &LLMResponse{Message: assistantMsg("follow-up answer", StopReasonStop)}, nil
+	})
+	agent := NewAgent(
+		WithModel(model),
+		WithBeforeRun(func(context.Context, BeforeRunContext) (AgentState, error) {
+			return restored, nil
+		}),
+	)
+	agent.FollowUp(UserMsg("new follow-up"))
+
+	if err := agent.Continue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	agent.WaitForIdle()
+	if agent.HasFollowUps() {
+		t.Fatal("new follow-up remained queued after restored Continue")
+	}
+}
+
+func TestAgentStateIncludesAcceptedQueues(t *testing.T) {
+	agent := NewAgent()
+	agent.Steer(UserMsg("redirect"))
+	agent.FollowUp(UserMsg("one more thing"))
+
+	state := agent.State()
+	if len(state.SteeringQueue) != 1 || state.SteeringQueue[0].TextContent() != "redirect" {
+		t.Fatalf("steering queue = %#v", state.SteeringQueue)
+	}
+	if len(state.FollowUpQueue) != 1 || state.FollowUpQueue[0].TextContent() != "one more thing" {
+		t.Fatalf("follow-up queue = %#v", state.FollowUpQueue)
+	}
+}
+
+func TestAgentFinalStateRetainsInputAcceptedDuringFailedRun(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var checkpoint AgentState
+	agent := NewAgent(
+		WithMaxRetries(0),
+		WithModel(funcModel(func(context.Context, *LLMRequest) (*LLMResponse, error) {
+			close(started)
+			<-release
+			return nil, errors.New("model unavailable")
+		})),
+		WithAfterRun(func(_ context.Context, run AfterRunContext) error {
+			checkpoint = run.State
+			return nil
+		}),
+	)
+
+	if err := agent.Prompt(context.Background(), "start"); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	agent.FollowUp(UserMsg("accepted while running"))
+	close(release)
+	agent.WaitForIdle()
+
+	if len(checkpoint.FollowUpQueue) != 1 || checkpoint.FollowUpQueue[0].TextContent() != "accepted while running" {
+		t.Fatalf("final checkpoint follow-up queue = %#v", checkpoint.FollowUpQueue)
+	}
+	state := agent.State()
+	if len(state.FollowUpQueue) != 1 || state.FollowUpQueue[0].TextContent() != "accepted while running" {
+		t.Fatalf("idle Agent follow-up queue = %#v", state.FollowUpQueue)
+	}
+}
+
+func TestAgentCanClearFollowUpAfterCompletedBoundaryCheckpoint(t *testing.T) {
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	var calls atomic.Int32
+	agent := NewAgent(WithModel(funcModel(func(context.Context, *LLMRequest) (*LLMResponse, error) {
+		switch calls.Add(1) {
+		case 1:
+			close(firstStarted)
+			<-releaseFirst
+			return &LLMResponse{Message: assistantMsg("truncated", StopReasonLength)}, nil
+		case 2:
+			close(secondStarted)
+			<-releaseSecond
+			return &LLMResponse{Message: assistantMsg("recovered", StopReasonStop)}, nil
+		default:
+			return nil, errors.New("unexpected follow-up model call")
+		}
+	})))
+
+	if err := agent.Prompt(context.Background(), "start"); err != nil {
+		t.Fatal(err)
+	}
+	<-firstStarted
+	agent.FollowUp(UserMsg("cancel before natural stop"))
+	close(releaseFirst)
+	<-secondStarted
+	if !agent.HasFollowUps() {
+		t.Fatal("completed-boundary checkpoint removed the live follow-up queue")
+	}
+	agent.ClearFollowUpQueue()
+	close(releaseSecond)
+	agent.WaitForIdle()
+
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("model calls = %d, want 2 after clearing follow-up", got)
+	}
+	if agent.HasFollowUps() {
+		t.Fatal("cleared follow-up returned after run completion")
+	}
+}
+
+func TestAgentLoopCheckpointMovesAcceptedInputThroughQueueAndPending(t *testing.T) {
+	delivered := false
+	var checkpoints []AgentState
+	runTestLoop(t,
+		[]AgentMessage{UserMsg("question")},
+		AgentContext{},
+		LoopConfig{
+			Model: mockModel(
+				assistantMsg("truncated", StopReasonLength),
+				assistantMsg("recovered", StopReasonStop),
+				assistantMsg("follow-up answer", StopReasonStop),
+			),
+			GetFollowUpMessages: func() []AgentMessage {
+				if delivered {
+					return nil
+				}
+				delivered = true
+				return []AgentMessage{UserMsg("queued follow-up")}
+			},
+			AfterTurn: func(_ context.Context, turn AfterTurnContext) error {
+				checkpoints = append(checkpoints, turn.State)
+				return nil
+			},
+		},
+	)
+
+	if len(checkpoints) != 3 {
+		t.Fatalf("turn checkpoints = %d, want 3", len(checkpoints))
+	}
+	first := checkpoints[0]
+	if len(first.FollowUpQueue) != 1 || first.FollowUpQueue[0].TextContent() != "queued follow-up" {
+		t.Fatalf("first checkpoint follow-up queue = %#v", first.FollowUpQueue)
+	}
+	if len(first.Progress.PendingMessages) != 1 || first.Progress.PendingMessages[0].TextContent() != defaultLengthRecoveryPrompt {
+		t.Fatalf("first checkpoint loop pending = %#v", first.Progress.PendingMessages)
+	}
+	second := checkpoints[1]
+	if len(second.FollowUpQueue) != 0 {
+		t.Fatalf("second checkpoint follow-up queue = %#v, want transferred", second.FollowUpQueue)
+	}
+	if len(second.Progress.PendingMessages) != 1 || second.Progress.PendingMessages[0].TextContent() != "queued follow-up" {
+		t.Fatalf("second checkpoint loop pending = %#v", second.Progress.PendingMessages)
+	}
+}
+
+func TestAgentLoopCheckpointDoesNotReplayCommittedPendingInput(t *testing.T) {
+	state := AgentState{
+		Messages: []AgentMessage{UserMsg("base")},
+		Progress: RunProgress{
+			Active:          true,
+			NextTurn:        true,
+			CompletedTurns:  1,
+			PendingMessages: []AgentMessage{UserMsg("resume input")},
+		},
+	}
+	events := collectEvents(AgentLoopContinue(
+		context.Background(),
+		AgentContext{Messages: state.Messages},
+		LoopConfig{
+			InitialState: state,
+			MaxRetries:   0,
+			Model: funcModel(func(context.Context, *LLMRequest) (*LLMResponse, error) {
+				return nil, errors.New("model unavailable")
+			}),
+		},
+	))
+
+	end, ok := findEvent(events, EventAgentEnd)
+	if !ok || end.State == nil {
+		t.Fatalf("terminal event = %#v", end)
+	}
+	if len(end.State.Progress.PendingMessages) != 0 {
+		t.Fatalf("committed input remained pending: %#v", end.State.Progress.PendingMessages)
+	}
+	if len(end.State.Messages) != 2 || end.State.Messages[1].TextContent() != "resume input" {
+		t.Fatalf("final messages = %#v", end.State.Messages)
+	}
+}
+
+func TestAgentLoopStartsFreshProgressWhenAddingPromptToInactiveState(t *testing.T) {
+	state := AgentState{
+		Messages: []AgentMessage{UserMsg("old question"), assistantMsg("old answer", StopReasonStop)},
+		Progress: RunProgress{
+			CompletedTurns: 7,
+		},
+	}
+	events := collectEvents(AgentLoop(
+		context.Background(),
+		[]AgentMessage{UserMsg("new question")},
+		AgentContext{Messages: state.Messages},
+		LoopConfig{
+			InitialState: state,
+			Model:        mockModel(assistantMsg("new answer", StopReasonStop)),
+		},
+	))
+
+	end, ok := findEvent(events, EventAgentEnd)
+	if !ok || end.State == nil {
+		t.Fatalf("terminal event = %#v", end)
+	}
+	if end.State.Progress.CompletedTurns != 1 {
+		t.Fatalf("completed turns = %d, want fresh run count 1", end.State.Progress.CompletedTurns)
+	}
+	if got := end.State.Messages[len(end.State.Messages)-1].TextContent(); got != "new answer" {
+		t.Fatalf("last message = %q, want new answer", got)
 	}
 }
 

@@ -27,6 +27,9 @@
 // middleware and events. [ModelExecution] and [ToolExecution] keep one logical
 // ID across retries while incrementing the attempt, allowing hosts to correlate
 // durable outcomes without coupling AgentGo to a ledger or tracing backend.
+// [AgentState] also carries semantic input accepted into steering/follow-up
+// queues until the loop commits it, so completed-boundary state from run/turn
+// hooks or events can be persisted without losing accepted continuation.
 //
 // A small, stable surface carries most uses: [Agent], [AgentLoop], [Event],
 // [Tool], [AgentMessage], and [Message]. AgentMessage is the application

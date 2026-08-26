@@ -44,6 +44,9 @@ agentgo/
    在同一 PR 中按语义版本同步升级，避免代码能力与可识别版本脱节。
 8. **Execution 是运行坐标而非外部账本模型**：逻辑执行在一次 Run 内保持稳定 `ID`，物理重试递增
    `Attempt`；Middleware 与 Event 共享该坐标，Ledger、Trace 等宿主适配负责赋予跨 Run 语义。
+9. **输入接纳与 Loop continuation 分层记账**：外部请求是否已被平台持久接纳属于宿主事实；调用
+   `Steer` / `FollowUp` 后，消息进入 `AgentState` 的语义队列，交给 Loop 后再进入
+   `RunProgress.PendingMessages`，提交成功后才进入消息历史。所有权迁移不得丢失或重复消息。
 
 ## References
 
