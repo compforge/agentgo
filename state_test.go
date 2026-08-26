@@ -143,8 +143,7 @@ func TestAgentStateCodecRoundTripsRegisteredApplicationMessage(t *testing.T) {
 	}
 }
 
-func TestAgentLoopRunHooksExecuteOnce(t *testing.T) {
-	var order []string
+func TestAgentLoopTurnCheckpoints(t *testing.T) {
 	var turnStates []AgentState
 	events := runTestLoop(t,
 		[]AgentMessage{UserMsg("question")},
@@ -154,34 +153,16 @@ func TestAgentLoopRunHooksExecuteOnce(t *testing.T) {
 				assistantMsg("truncated", StopReasonLength),
 				assistantMsg("done", StopReasonStop),
 			),
-			BeforeRun: func(_ context.Context, run BeforeRunContext) (AgentState, error) {
-				order = append(order, "before_run")
-				if !run.State.Progress.Active {
-					t.Fatal("run must be active before BeforeRun")
-				}
-				return run.State, nil
-			},
 			AfterTurn: func(_ context.Context, turn AfterTurnContext) error {
-				order = append(order, "after_turn")
 				turnStates = append(turnStates, turn.State)
 				if turn.State.Progress.CompletedTurns != turn.TurnIndex {
 					t.Fatalf("state turn = %d, want %d", turn.State.Progress.CompletedTurns, turn.TurnIndex)
 				}
 				return nil
 			},
-			AfterRun: func(_ context.Context, run AfterRunContext) error {
-				order = append(order, "after_run")
-				if run.State.Progress.Active {
-					t.Fatal("final state must be inactive")
-				}
-				return nil
-			},
 		},
 	)
 
-	if !slices.Equal(order, []string{"before_run", "after_turn", "after_turn", "after_run"}) {
-		t.Fatalf("lifecycle order = %v", order)
-	}
 	if len(turnStates) != 2 || !turnStates[0].Progress.NextTurn || len(turnStates[0].Progress.PendingMessages) != 1 {
 		t.Fatalf("first turn state does not carry length continuation: %#v", turnStates)
 	}
@@ -207,7 +188,6 @@ func TestAgentLoopTerminalModelMessageProducesCheckpoint(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var turnState AgentState
-			var final AfterRunContext
 			events := runTestLoop(t,
 				[]AgentMessage{UserMsg("question")},
 				AgentContext{},
@@ -217,18 +197,15 @@ func TestAgentLoopTerminalModelMessageProducesCheckpoint(t *testing.T) {
 						turnState = turn.State
 						return nil
 					},
-					AfterRun: func(_ context.Context, run AfterRunContext) error {
-						final = run
-						return nil
-					},
 				},
 			)
 
 			if turnState.Progress.CompletedTurns != 1 || turnState.Progress.NextTurn {
 				t.Fatalf("terminal turn progress = %#v", turnState.Progress)
 			}
-			if final.State.Progress.CompletedTurns != 1 || final.Summary.TurnCount != 1 || final.Summary.EndReason != tt.endReason {
-				t.Fatalf("terminal final state/summary = %#v / %#v", final.State.Progress, final.Summary)
+			end, ok := findEvent(events, EventAgentEnd)
+			if !ok || end.State == nil || end.State.Progress.CompletedTurns != 1 || end.Summary == nil || end.Summary.TurnCount != 1 || end.Summary.EndReason != tt.endReason {
+				t.Fatalf("terminal event = %#v", end)
 			}
 			turnEnd, ok := findEvent(events, EventTurnEnd)
 			if !ok || turnEnd.State == nil || turnEnd.State.Progress.CompletedTurns != 1 {
@@ -247,8 +224,8 @@ func TestAgentContinueRestoresStateInBeforeRun(t *testing.T) {
 	var callIDs []string
 	agent := NewAgent(
 		WithModel(mockModel(assistantMsg("done", StopReasonStop))),
-		WithBeforeRun(func(context.Context, BeforeRunContext) (AgentState, error) {
-			return restored, nil
+		WithBeforeRun(func(context.Context, BeforeRunContext) (AgentSnapshot, error) {
+			return AgentSnapshot{State: restored}, nil
 		}),
 		WithModelMiddlewares(func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
 			attempts = append(attempts, call.TurnIndex)
@@ -280,9 +257,9 @@ func TestAgentRunHooksRepeatPerRunNotPerTurn(t *testing.T) {
 			assistantMsg("first", StopReasonStop),
 			assistantMsg("second", StopReasonStop),
 		)),
-		WithBeforeRun(func(_ context.Context, run BeforeRunContext) (AgentState, error) {
+		WithBeforeRun(func(_ context.Context, run BeforeRunContext) (AgentSnapshot, error) {
 			beforeRuns++
-			return run.State, nil
+			return run.Snapshot, nil
 		}),
 		WithAfterRun(func(context.Context, AfterRunContext) error {
 			afterRuns++
@@ -304,31 +281,72 @@ func TestAgentRunHooksRepeatPerRunNotPerTurn(t *testing.T) {
 	}
 }
 
-func TestAgentLoopAfterRunObservesBeforeRunFailure(t *testing.T) {
-	afterCalls := 0
-	loadErr := errors.New("load state")
-	events := runTestLoop(t,
-		nil,
-		AgentContext{},
-		LoopConfig{
-			BeforeRun: func(context.Context, BeforeRunContext) (AgentState, error) {
-				return AgentState{}, loadErr
-			},
-			AfterRun: func(_ context.Context, run AfterRunContext) error {
-				afterCalls++
-				if !errors.Is(run.Err, loadErr) {
-					t.Fatalf("after run error = %v", run.Err)
-				}
-				return nil
-			},
-		},
+func TestAgentRunHooksWrapLoopAndTerminalListeners(t *testing.T) {
+	var order []string
+	agent := NewAgent(
+		WithModel(mockModel(assistantMsg("done", StopReasonStop))),
+		WithBeforeRun(func(_ context.Context, run BeforeRunContext) (AgentSnapshot, error) {
+			order = append(order, "before_run")
+			if run.Kind != RunKindPrompt || len(run.Input) != 1 || run.Input[0].TextContent() != "question" {
+				t.Fatalf("BeforeRun context = %#v", run)
+			}
+			return run.Snapshot, nil
+		}),
+		WithAfterRun(func(_ context.Context, run AfterRunContext) error {
+			order = append(order, "after_run")
+			if run.Kind != RunKindPrompt || run.Snapshot.State.IsRunning || run.Snapshot.State.Progress.Active {
+				t.Fatalf("AfterRun context = %#v", run)
+			}
+			return nil
+		}),
 	)
+	agent.Subscribe(func(event Event) {
+		switch event.Type {
+		case EventAgentStart:
+			order = append(order, "agent_start")
+		case EventAgentEnd:
+			order = append(order, "agent_end")
+		}
+	})
 
-	if afterCalls != 1 {
-		t.Fatalf("after run calls = %d, want 1", afterCalls)
+	if err := agent.Prompt(context.Background(), "question"); err != nil {
+		t.Fatal(err)
 	}
-	if len(events) == 0 || events[len(events)-1].Type != EventAgentEnd || events[len(events)-1].Err == nil {
+	agent.WaitForIdle()
+
+	if !slices.Equal(order, []string{"before_run", "agent_start", "after_run", "agent_end"}) {
+		t.Fatalf("lifecycle order = %v", order)
+	}
+}
+
+func TestAgentAfterRunFailureChangesTerminalResult(t *testing.T) {
+	hookErr := errors.New("save snapshot")
+	var events []Event
+	agent := NewAgent(
+		WithModel(mockModel(assistantMsg("done", StopReasonStop))),
+		WithAfterRun(func(context.Context, AfterRunContext) error {
+			return hookErr
+		}),
+	)
+	agent.Subscribe(func(event Event) {
+		if event.Type == EventError || event.Type == EventAgentEnd {
+			events = append(events, event)
+		}
+	})
+
+	if err := agent.Prompt(context.Background(), "question"); err != nil {
+		t.Fatal(err)
+	}
+	agent.WaitForIdle()
+
+	if len(events) != 2 || events[0].Type != EventError || events[1].Type != EventAgentEnd {
 		t.Fatalf("terminal events = %#v", events)
+	}
+	if !errors.Is(events[1].Err, hookErr) || events[1].Summary == nil || events[1].Summary.EndReason != EndReasonError {
+		t.Fatalf("terminal result = %#v", events[1])
+	}
+	if events[1].State == nil || events[1].State.Error != agent.State().Error || !strings.Contains(events[1].State.Error, hookErr.Error()) {
+		t.Fatalf("terminal state = %#v, agent state = %#v", events[1].State, agent.State())
 	}
 }
 

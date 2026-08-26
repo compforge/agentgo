@@ -76,18 +76,41 @@ AgentMessage
 
 应用消息可通过 `ContextItemProvider` 暴露有稳定身份的信息，而不改变模型渲染。每次模型调用前，`EventContextProjected` 会报告实际投影后的 Context 清单。`ContextItem` 与 `ContextDemand` 共享 `ContextKey`；标签含义及 Demand 提取规则由应用和 Evaluator 负责。
 
-`AgentState` 感知 codec，但不绑定存储或传输方式。`agentgo.NewCodec` 会注册 AgentGo 内置状态类型；应用只需用一个稳定 TypeID 注册自己的具体 `AgentMessage` 类型。字段通过 `codec` tag 主动参与编码，特殊 wire 表示则使用自定义 Handler。同一份编码状态可用于持久化、进程交接或未来的 RPC 协议。
+`AgentState` 是 Loop 自己拥有的执行状态。对于 stateful `Agent`，`AgentSnapshot` 还会聚合已经被 Agent 接受、但尚未交给 Loop 的 steering 和 follow-up 输入。两者都感知 codec，但不绑定存储或传输方式。`agentgo.NewCodec` 会注册 AgentGo 内置状态类型；应用只需用一个稳定 TypeID 注册自己的具体 `AgentMessage` 类型。字段通过 `codec` tag 主动参与编码，特殊 wire 表示则使用自定义 Handler。同一份编码快照可用于持久化、进程交接或未来的 RPC 协议。
 
 ```go
 stateCodec, _ := agentgo.NewCodec(
     codec.Type[*ProgressMessage]("example.progress-message.v1"),
 )
 
-data, _ := stateCodec.Marshal(agent.State())
+data, _ := stateCodec.Marshal(agent.Snapshot())
+_ = snapshotStore.Save(ctx, data)
 
-var state agentgo.AgentState
-_ = stateCodec.Unmarshal(data, &state)
+restored := agentgo.NewAgent(
+    agentgo.WithModel(model),
+    agentgo.WithBeforeRun(func(ctx context.Context, run agentgo.BeforeRunContext) (agentgo.AgentSnapshot, error) {
+        data, err := snapshotStore.Load(ctx)
+        if err != nil {
+            return agentgo.AgentSnapshot{}, err
+        }
+        var snapshot agentgo.AgentSnapshot
+        if err := stateCodec.Unmarshal(data, &snapshot); err != nil {
+            return agentgo.AgentSnapshot{}, err
+        }
+        return snapshot, nil
+    }),
+    agentgo.WithAfterRun(func(ctx context.Context, run agentgo.AfterRunContext) error {
+        data, err := stateCodec.Marshal(run.Snapshot)
+        if err != nil {
+            return err
+        }
+        return snapshotStore.Save(ctx, data)
+    }),
+)
+_ = restored.Continue(ctx)
 ```
+
+`BeforeRun` 在 stateful `Agent` 启动 Loop 前同步执行，并可替换完整 Snapshot。装载失败会在 Run 被接受前直接返回，因此后续 `Continue` 可以重试。`AfterRun` 在 Loop 之外观察最终投影的 Snapshot，且先于终态 listener；adapter 通常会把这两个 hook 封装在一起，让调用方只需注册 adapter 后调用 `Continue`。
 
 `Execution` 为昂贵或对外可见的动作提供一次 Run 内稳定的身份。同一逻辑调用重试时保持 `ID` 不变并递增 `Attempt`；`ModelExecution` 与 `ToolExecution` 把该坐标贯穿 Middleware 和 Event stream。内部 summary 是 compaction 的子 Execution，宿主因此可以关联动作或复用已知结果，而 AgentGo 无需绑定 Ledger 或 Trace 的数据模型。
 
@@ -101,7 +124,7 @@ _ = stateCodec.Unmarshal(data, &state)
 | 工具授权 | `ToolGate` |
 | Context 投影与恢复 | `ContextManager` |
 | 压缩策略 | `context.Compactor` |
-| Run 状态注入与收尾 | `WithBeforeRun` / `WithAfterRun` |
+| Stateful Agent 恢复与收尾 | `AgentSnapshot` / `WithBeforeRun` / `WithAfterRun` |
 | Turn 准备与状态观察 | `WithBeforeTurn` / `WithAfterTurn` |
 | 模型执行拦截 | `WithModelMiddlewares` |
 | 工具执行拦截 | `WithToolMiddlewares` |

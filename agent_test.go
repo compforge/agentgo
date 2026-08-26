@@ -209,7 +209,7 @@ func TestAgentExecutionErrorDoesNotBecomeConversationMessage(t *testing.T) {
 		})),
 		WithMaxRetries(0),
 		WithAfterRun(func(_ context.Context, run AfterRunContext) error {
-			afterRunState = run.State
+			afterRunState = run.Snapshot.State
 			return nil
 		}),
 	)

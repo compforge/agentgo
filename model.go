@@ -56,10 +56,7 @@ type LoopConfig struct {
 	MaxToolErrors int           // consecutive tool failure threshold per tool, 0 = unlimited
 	ThinkingLevel ThinkingLevel // reasoning depth
 
-	// Run hooks execute once around one AgentLoop invocation. Turn hooks execute
-	// once around each logical model/tool turn.
-	BeforeRun  BeforeRunHook
-	AfterRun   AfterRunHook
+	// Turn hooks execute once around each logical model/tool turn.
 	BeforeTurn BeforeTurnHook
 	AfterTurn  AfterTurnHook
 

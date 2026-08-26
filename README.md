@@ -76,18 +76,41 @@ AgentMessage
 
 `ContextItemProvider` lets an application message expose identifiable information without changing its model rendering. Before each model call, `EventContextProjected` reports the inventory from the actual projected context. `ContextItem` and `ContextDemand` share `ContextKey`; applications and evaluators own all label meanings and demand-extraction rules.
 
-`AgentState` is codec-aware without being tied to storage or transport. `agentgo.NewCodec` registers AgentGo's built-in state types; applications register their own concrete `AgentMessage` types with one stable type ID. Fields opt in through `codec` tags, while custom handlers cover special wire representations. Hosts can use the same encoded state for persistence, process handoff, or future RPC protocols.
+`AgentState` is the Loop-owned execution state. A stateful `Agent` exposes `AgentSnapshot`, which adds steering and follow-up input already accepted by the Agent but not yet handed to the Loop. Both are codec-aware without being tied to storage or transport. `agentgo.NewCodec` registers AgentGo's built-in state types; applications register their own concrete `AgentMessage` types with one stable type ID. Fields opt in through `codec` tags, while custom handlers cover special wire representations. Hosts can use the same encoded snapshot for persistence, process handoff, or future RPC protocols.
 
 ```go
 stateCodec, _ := agentgo.NewCodec(
     codec.Type[*ProgressMessage]("example.progress-message.v1"),
 )
 
-data, _ := stateCodec.Marshal(agent.State())
+data, _ := stateCodec.Marshal(agent.Snapshot())
+_ = snapshotStore.Save(ctx, data)
 
-var state agentgo.AgentState
-_ = stateCodec.Unmarshal(data, &state)
+restored := agentgo.NewAgent(
+    agentgo.WithModel(model),
+    agentgo.WithBeforeRun(func(ctx context.Context, run agentgo.BeforeRunContext) (agentgo.AgentSnapshot, error) {
+        data, err := snapshotStore.Load(ctx)
+        if err != nil {
+            return agentgo.AgentSnapshot{}, err
+        }
+        var snapshot agentgo.AgentSnapshot
+        if err := stateCodec.Unmarshal(data, &snapshot); err != nil {
+            return agentgo.AgentSnapshot{}, err
+        }
+        return snapshot, nil
+    }),
+    agentgo.WithAfterRun(func(ctx context.Context, run agentgo.AfterRunContext) error {
+        data, err := stateCodec.Marshal(run.Snapshot)
+        if err != nil {
+            return err
+        }
+        return snapshotStore.Save(ctx, data)
+    }),
+)
+_ = restored.Continue(ctx)
 ```
+
+`BeforeRun` runs synchronously before a stateful `Agent` starts its Loop and may replace the complete snapshot. A load error rejects the run before it is accepted, so a later `Continue` can retry. `AfterRun` observes the final projected snapshot outside the Loop and before terminal listeners; adapters commonly package these hooks together so callers only configure the adapter and call `Continue`.
 
 `Execution` gives expensive or externally visible work one run-scoped identity. A retry keeps the same `ID` and increments `Attempt`; `ModelExecution` and `ToolExecution` carry that coordinate through middleware and the Event stream. Internal summary calls are child executions of compaction, so hosts can correlate or replay known outcomes without AgentGo depending on a ledger or tracing model.
 
@@ -101,7 +124,7 @@ _ = stateCodec.Unmarshal(data, &state)
 | Tool authorization | `ToolGate` |
 | Context projection and recovery | `ContextManager` |
 | Compaction policy | `context.Compactor` |
-| Run state injection and finalization | `WithBeforeRun` / `WithAfterRun` |
+| Stateful Agent restoration and finalization | `AgentSnapshot` / `WithBeforeRun` / `WithAfterRun` |
 | Turn preparation and state observation | `WithBeforeTurn` / `WithAfterTurn` |
 | Model execution interception | `WithModelMiddlewares` |
 | Tool execution interception | `WithToolMiddlewares` |

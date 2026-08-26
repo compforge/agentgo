@@ -30,6 +30,8 @@ func (a *Agent) Inject(ctx context.Context, msg AgentMessage) (InjectResult, err
 	if msg == nil {
 		return InjectResult{}, ErrInjectNilMessage
 	}
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
 
 	a.mu.Lock()
 	// Fail fast BEFORE any queueing: a held agent accepts no inject work.
@@ -50,14 +52,45 @@ func (a *Agent) Inject(ctx context.Context, msg AgentMessage) (InjectResult, err
 	if n := len(a.messages); n > 0 && a.messages[n-1] != nil {
 		canResume = a.messages[n-1].GetRole() == RoleAssistant
 	}
+	if !canResume {
+		a.steeringQ = append(a.steeringQ, msg)
+		a.mu.Unlock()
+		return InjectResult{Disposition: InjectQueued}, nil
+	}
+	a.mu.Unlock()
+
+	if err := a.prepareRun(ctx, RunKindInject, []AgentMessage{msg}); err != nil {
+		return InjectResult{}, err
+	}
+
+	a.mu.Lock()
+	if a.held > 0 {
+		a.mu.Unlock()
+		return InjectResult{}, ErrRunsHeld
+	}
+	if a.isRunning {
+		a.steeringQ = append(a.steeringQ, msg)
+		a.mu.Unlock()
+		return InjectResult{Disposition: InjectSteeredCurrentRun}, nil
+	}
+	canResume = false
+	if n := len(a.messages); n > 0 && a.messages[n-1] != nil {
+		canResume = a.messages[n-1].GetRole() == RoleAssistant
+	}
 	a.steeringQ = append(a.steeringQ, msg)
 	// Resume in the same critical section as the enqueue: unlocking in between
 	// opens two TOCTOU windows — a hold lands and the resume fails ErrRunsHeld
 	// with the message still queued, or a concurrent Prompt's run consumes the
 	// message via its initial steering poll while the resume reports failure.
 	// Either way the caller reroutes a message that was in fact delivered.
-	if canResume && a.resumeQueuedLocked(ctx) {
-		return InjectResult{Disposition: InjectResumedIdleRun}, nil
+	if canResume {
+		if a.runProgress.NextTurn || len(a.runProgress.PendingMessages) > 0 {
+			a.startContinueRunLocked(ctx, RunKindInject)
+			return InjectResult{Disposition: InjectResumedIdleRun}, nil
+		}
+		if a.resumeQueuedLocked(ctx, RunKindInject) {
+			return InjectResult{Disposition: InjectResumedIdleRun}, nil
+		}
 	}
 	a.mu.Unlock()
 	return InjectResult{Disposition: InjectQueued}, nil

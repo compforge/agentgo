@@ -2,25 +2,41 @@ package agentgo
 
 import "context"
 
-// BeforeRunContext describes the state before one Agent run starts. The
-// returned state's portable fields become the run baseline before prompts or
-// turns are applied. Runtime dependencies such as SystemPrompt and Tools are
-// rebound from the configured AgentContext and cannot be restored by the hook.
+// RunKind identifies the stateful Agent entry path that is preparing a run.
+type RunKind string
+
+const (
+	RunKindPrompt   RunKind = "prompt"
+	RunKindContinue RunKind = "continue"
+	RunKindInject   RunKind = "inject"
+)
+
+// BeforeRunContext describes a stateful Agent before it accepts a run. Input
+// contains the new prompt or injected messages that have not entered Snapshot.
 type BeforeRunContext struct {
-	State AgentState
+	Kind     RunKind
+	Snapshot AgentSnapshot
+	Input    []AgentMessage
 }
 
-// AfterRunContext describes the final state of one Agent run.
+// AfterRunContext describes a stateful Agent after its Loop state has been
+// projected and before terminal listeners may start another run.
 type AfterRunContext struct {
-	State   AgentState
-	Summary RunSummary
-	Err     error
+	Kind     RunKind
+	Snapshot AgentSnapshot
+	Summary  RunSummary
+	Err      error
 }
 
-// BeforeRunHook runs once per accepted run. Its returned portable state replaces
-// the run baseline; returning an error ends the run before its first turn.
-type BeforeRunHook func(context.Context, BeforeRunContext) (AgentState, error)
+// BeforeRunHook runs synchronously before a stateful Agent accepts a run. The
+// returned snapshot becomes the run baseline. Returning an error rejects the
+// run, so Prompt or Continue returns that error directly. Agent lifecycle and
+// queue mutations are serialized while the hook runs; use the supplied
+// snapshot instead of re-entering those mutating methods on the same Agent.
+type BeforeRunHook func(context.Context, BeforeRunContext) (AgentSnapshot, error)
 
-// AfterRunHook runs once for every accepted run, including failed, cancelled
-// and zero-turn runs. Returning an error changes the terminal result to error.
+// AfterRunHook runs once for every accepted stateful Agent run, including
+// failed, cancelled and zero-turn runs. Returning an error changes the
+// terminal result to error. The same non-reentrancy rule as BeforeRunHook
+// applies to lifecycle and queue mutations.
 type AfterRunHook func(context.Context, AfterRunContext) error

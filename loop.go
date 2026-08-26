@@ -66,31 +66,16 @@ func startAgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentC
 			state.Messages = copyMessages(agentCtx.Messages)
 		}
 		state = bindRunState(state, &currentCtx)
-		if !state.Progress.Active {
-			state.Progress = RunProgress{Active: true}
-		}
+		state.Progress = activateRunProgress(state.Progress, continuing)
 
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				sink.emitError(fmt.Errorf("agent loop panicked: %v", recovered), &RunSummary{EndReason: EndReasonError})
 			}
-			finishAgentRun(ctx, &currentCtx, &state, config, sink)
+			finishAgentRun(&currentCtx, &state, sink)
 			sink.flushTerminal()
 			close(ch)
 		}()
-
-		if config.BeforeRun != nil {
-			restored, err := config.BeforeRun(ctx, BeforeRunContext{State: snapshotRunState(state, &currentCtx)})
-			if err != nil {
-				sink.emitError(fmt.Errorf("before run: %w", err), &RunSummary{EndReason: EndReasonError})
-				return
-			}
-			state = bindRunState(restored, &currentCtx)
-		}
-		if !state.Progress.Active {
-			state.Progress = RunProgress{Active: true}
-		}
-		currentCtx.Messages = copyMessages(state.Messages)
 
 		if continuing && len(currentCtx.Messages) == 0 {
 			sink.emitError(ErrNoMessages, &RunSummary{EndReason: EndReasonError})
@@ -116,6 +101,23 @@ func startAgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentC
 	return ch
 }
 
+// activateRunProgress distinguishes a new run from continuation of a saved
+// turn boundary. An inactive state carries resumable progress only when the
+// Loop had already decided that another turn was required.
+func activateRunProgress(progress RunProgress, continuing bool) RunProgress {
+	if !continuing {
+		return RunProgress{Active: true}
+	}
+	if progress.Active {
+		return progress
+	}
+	if progress.NextTurn || len(progress.PendingMessages) > 0 {
+		progress.Active = true
+		return progress
+	}
+	return RunProgress{Active: true}
+}
+
 func bindRunState(state AgentState, current *AgentContext) AgentState {
 	state.SystemPrompt = current.SystemPrompt
 	state.Tools = append([]Tool(nil), current.Tools...)
@@ -134,38 +136,14 @@ func snapshotRunState(state AgentState, current *AgentContext) AgentState {
 	return state
 }
 
-func finishAgentRun(ctx context.Context, current *AgentContext, state *AgentState, config LoopConfig, sink eventSink) {
+func finishAgentRun(current *AgentContext, state *AgentState, sink eventSink) {
 	if sink.terminal.event == nil {
 		sink.emitError(errors.New("agent loop ended without terminal event"), &RunSummary{EndReason: EndReasonError})
 	}
 	state.Progress.Active = false
 	state.IsRunning = false
 	finalState := snapshotRunState(*state, current)
-	terminal := sink.terminal.event
-	summary := RunSummary{EndReason: EndReasonError}
-	if terminal.Summary != nil {
-		summary = *terminal.Summary
-	}
-	if config.AfterRun != nil {
-		hookCtx := context.WithoutCancel(ctx)
-		if err := callAfterRun(hookCtx, config.AfterRun, AfterRunContext{State: finalState, Summary: summary, Err: terminal.Err}); err != nil {
-			hookErr := fmt.Errorf("after run: %w", err)
-			sink.emitNow(Event{Type: EventError, Err: hookErr})
-			terminal.Err = errors.Join(terminal.Err, hookErr)
-			summary.EndReason = EndReasonError
-			terminal.Summary = &summary
-		}
-	}
-	terminal.State = &finalState
-}
-
-func callAfterRun(ctx context.Context, hook AfterRunHook, run AfterRunContext) (err error) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("panic: %v", recovered)
-		}
-	}()
-	return hook(ctx, run)
+	sink.terminal.event.State = &finalState
 }
 
 // commitMessage is the single entry point for "message enters agent context".
