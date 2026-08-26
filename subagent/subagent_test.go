@@ -133,6 +133,62 @@ func TestRunner_Run(t *testing.T) {
 	}
 }
 
+func TestToolErrorMessagePreservesCompleteText(t *testing.T) {
+	want := strings.Repeat("故障", 120)
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := toolErrorMessage(raw); got != want {
+		t.Fatalf("tool error message length = %d, want %d", len(got), len(want))
+	}
+}
+
+type retryWithDelayError struct{}
+
+func (retryWithDelayError) Error() string             { return "temporary network failure" }
+func (retryWithDelayError) Retryable() bool           { return true }
+func (retryWithDelayError) RetryAfter() time.Duration { return 25 * time.Millisecond }
+
+func TestRunnerRetryProgressIncludesDelay(t *testing.T) {
+	model := newSequential(func(i int, _ *agentgo.LLMRequest) (*agentgo.LLMResponse, error) {
+		if i == 0 {
+			return nil, retryWithDelayError{}
+		}
+		return &agentgo.LLMResponse{Message: agentgo.Message{
+			Role:       agentgo.RoleAssistant,
+			Content:    []agentgo.ContentBlock{agentgo.TextBlock("done")},
+			StopReason: agentgo.StopReasonStop,
+		}}, nil
+	})
+
+	var retryMeta json.RawMessage
+	ctx := agentgo.WithToolProgress(context.Background(), func(progress agentgo.ProgressPayload) {
+		if progress.Kind == agentgo.ProgressRetry {
+			retryMeta = progress.Meta
+		}
+	})
+	_, err := NewRunner(Config{
+		Name:       "writer",
+		Model:      model,
+		MaxTurns:   2,
+		MaxRetries: 1,
+	}).Run(ctx, "writer", "write")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var meta struct {
+		DelayMS int64 `json:"retry_delay_ms"`
+	}
+	if err := json.Unmarshal(retryMeta, &meta); err != nil {
+		t.Fatalf("decode retry metadata: %v", err)
+	}
+	if meta.DelayMS != 25 {
+		t.Fatalf("retry delay = %dms, want 25ms", meta.DelayMS)
+	}
+}
+
 func TestNewRunnerRejectsInvalidRegistry(t *testing.T) {
 	tests := []struct {
 		name   string
