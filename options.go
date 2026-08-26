@@ -181,12 +181,14 @@ func WithAfterTurn(hook AfterTurnHook) AgentOption {
 	return func(a *Agent) { a.afterTurn = hook }
 }
 
-// WithBeforeRun installs a hook called once before each accepted Agent run.
+// WithBeforeRun installs the synchronous stateful-Agent admission hook. It runs
+// before Prompt, Continue, or a resumable Inject starts the Loop.
 func WithBeforeRun(hook BeforeRunHook) AgentOption {
 	return func(a *Agent) { a.beforeRun = hook }
 }
 
-// WithAfterRun installs a hook called once after each accepted Agent run.
+// WithAfterRun installs a hook called after each accepted Agent run reaches a
+// terminal state and before terminal listeners may start another run.
 func WithAfterRun(hook AfterRunHook) AgentOption {
 	return func(a *Agent) { a.afterRun = hook }
 }

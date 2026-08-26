@@ -18,14 +18,24 @@ AgentGo 原生支持**轨迹驱动的 Loop 优化**：Event stream 记录实际�
 
 ## 可编码状态与执行边界
 
-一次 Agent Run 包含多个 turn，一个 turn 包含一次逻辑模型调用以及零到多个工具调用。AgentGo 在这三个
-层级提供互不重叠的扩展点：Run 使用 `BeforeRun` / `AfterRun`，turn 使用 `BeforeTurn` / `AfterTurn`，
-具体模型和工具调用使用 middleware。
+一次 stateful Agent Run 包含一次 AgentLoop 调用，Loop 包含多个 turn，一个 turn 包含一次逻辑模型调用
+以及零到多个工具调用。stateful `Agent` 在 Loop 外层通过 `BeforeRun` / `AfterRun` 提供 Run 生命周期边界；
+Loop 内只保留 `BeforeTurn` / `AfterTurn`，具体模型和工具调用使用 middleware。裸 `AgentLoop` 不拥有
+Run hook，避免同一个名字在 wrapper 与 Loop 两层表达不同语义。
 
 `AgentState` 是 Loop 自己拥有的状态。它在完整 turn 结束后包含消息、usage、计数以及已经决定的下一步
 内部 continuation；model、tool、hook、流式 partial message 和进程内 context 不属于其可编码投影。
-`codec` 包提供通用的 tagged value、稳定类型身份与 JSON 编解码；`AgentState` 通过字段 tag 声明自己的
-portable projection，应用再注册自定义 `AgentMessage` 的具体类型。
+stateful `Agent` 在 Loop 之外还持有 steering / follow-up queue：输入一旦被 Agent 接受、尚未被 Loop 消费，
+就属于 `AgentSnapshot` 的一部分。因此 `AgentSnapshot` 是 `AgentState` 与这两个 queue 在同一临界区内形成
+的时点聚合，而不是新的运行时 owner，也不改变 `AgentState` 的 Loop 边界。
+
+`codec` 包提供通用的 tagged value、稳定类型身份与 JSON 编解码；`AgentState`、`AgentSnapshot` 通过字段
+tag 声明自己的 portable projection，应用再注册自定义 `AgentMessage` 的具体类型。宿主可以在
+`EventTurnEnd` 已投影后调用 `Agent.Snapshot()` 保存 turn 边界，也可以直接使用 `AfterRunContext.Snapshot`
+保存终态。恢复 adapter 通过 `WithBeforeRun` 在 Loop 启动前返回完整 Snapshot；装载错误会拒绝本次 Run，
+后续 `Continue` 可以重试。`AfterRun` 在 Loop 完全结束、最终状态已经投影后执行，并先于终态 listener。
+`SetSnapshot` 只保留为低层状态操作，不是正常恢复流程必需的用户编排步骤。进入 AgentGo 之前的 durable
+inbox 仍由宿主负责，Snapshot 只承诺覆盖 Agent 已经接受的输入。
 
 编码能力本身不决定数据保存在哪里、何时传输或者如何重新执行。宿主可以把编码结果用于持久化、进程
 交接或未来 RPC，并在装载状态后重新绑定执行依赖。

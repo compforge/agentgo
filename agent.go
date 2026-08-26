@@ -62,6 +62,7 @@ type Agent struct {
 	done            chan struct{} // closed when loop finishes
 	held            int           // active HoldRuns count; >0 rejects new run starts
 	wantAbortMarker atomic.Bool   // set by Abort(), read by runLoop
+	runMu           sync.Mutex    // serializes run preparation and state replacement
 	mu              sync.Mutex
 }
 
@@ -101,8 +102,9 @@ func NewAgent(opts ...AgentOption) *Agent {
 // event channel; offload heavy work to your own goroutine.
 //
 // Lifecycle contract (stable API guarantee):
-//   - When EventAgentEnd listeners run, isRunning is already false — a
-//     listener may start the next run (Continue / InjectContext) directly.
+//   - When EventAgentEnd listeners run, AfterRun has completed and isRunning
+//     is already false — a listener may start the next run (Continue /
+//     InjectContext) directly.
 //   - The run's done channel — what WaitForIdle and HoldRuns wait on —
 //     closes only after all listeners for the final event have returned.
 //   - Therefore a listener must never call HoldRuns or Reset, and must never
@@ -130,6 +132,9 @@ func (a *Agent) Prompt(ctx context.Context, input string) error {
 // PromptMessages starts a new conversation turn with arbitrary AgentMessages.
 // See Prompt for ctx semantics.
 func (a *Agent) PromptMessages(ctx context.Context, msgs ...AgentMessage) error {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+
 	a.mu.Lock()
 	// Checked before isRunning: during a hold's wind-down isRunning is still
 	// true, and the caller must see the stable ErrRunsHeld, not a
@@ -142,13 +147,28 @@ func (a *Agent) PromptMessages(ctx context.Context, msgs ...AgentMessage) error 
 		a.mu.Unlock()
 		return fmt.Errorf("%w; use Steer() or FollowUp() to queue messages", ErrAlreadyRunning)
 	}
-	a.startPromptRunLocked(ctx, msgs)
+	a.mu.Unlock()
+	if err := a.prepareRun(ctx, RunKindPrompt, msgs); err != nil {
+		return err
+	}
+
+	a.mu.Lock()
+	if a.held > 0 {
+		a.mu.Unlock()
+		return ErrRunsHeld
+	}
+	if a.isRunning {
+		a.mu.Unlock()
+		return fmt.Errorf("%w; use Steer() or FollowUp() to queue messages", ErrAlreadyRunning)
+	}
+	a.startPromptRunLocked(ctx, msgs, RunKindPrompt)
 	return nil
 }
 
 // Continue resumes from the current context without adding new messages.
-// If the last message is from assistant, it dequeues steering/follow-up
-// messages (steering first) and replays them as the new prompt.
+// If the last message is from assistant, Continue first resumes any next turn
+// already recorded in state; otherwise it dequeues steering/follow-up messages
+// (steering first) and replays them as the new prompt.
 //
 // Queue retention caveat: messages queued via Steer/FollowUp survive an
 // aborted run — Abort cancels execution but never consumes or clears the
@@ -159,6 +179,9 @@ func (a *Agent) PromptMessages(ctx context.Context, msgs ...AgentMessage) error 
 // harnesses queue droppable steering text, others queue task-completion
 // notifications that must never be lost.
 func (a *Agent) Continue(ctx context.Context) error {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+
 	a.mu.Lock()
 	// Before isRunning (stable error during wind-down) and before any dequeue
 	// (a held Continue must not consume queued messages just to drop them).
@@ -170,26 +193,41 @@ func (a *Agent) Continue(ctx context.Context) error {
 		a.mu.Unlock()
 		return ErrAlreadyRunning
 	}
-	if len(a.messages) == 0 && a.beforeRun == nil {
+	a.mu.Unlock()
+	if err := a.prepareRun(ctx, RunKindContinue, nil); err != nil {
+		return err
+	}
+
+	a.mu.Lock()
+	if a.held > 0 {
+		a.mu.Unlock()
+		return ErrRunsHeld
+	}
+	if a.isRunning {
+		a.mu.Unlock()
+		return ErrAlreadyRunning
+	}
+	if len(a.messages) == 0 {
 		a.mu.Unlock()
 		return ErrNoMessages
 	}
-	if len(a.messages) == 0 {
-		a.startContinueRunLocked(ctx)
-		return nil
-	}
 
-	// If last message is assistant, try to dequeue pending messages as new prompt
+	// An assistant-tail context is valid when a saved turn already decided to
+	// continue. Otherwise, accepted queue input can start a new prompt run.
 	lastMsg := a.messages[len(a.messages)-1]
 	if lastMsg.GetRole() == RoleAssistant {
-		if a.resumeQueuedLocked(ctx) {
+		if a.runProgress.NextTurn || len(a.runProgress.PendingMessages) > 0 {
+			a.startContinueRunLocked(ctx, RunKindContinue)
+			return nil
+		}
+		if a.resumeQueuedLocked(ctx, RunKindContinue) {
 			return nil
 		}
 		a.mu.Unlock()
 		return ErrBadContinuation
 	}
 
-	a.startContinueRunLocked(ctx)
+	a.startContinueRunLocked(ctx, RunKindContinue)
 	return nil
 }
 
@@ -198,7 +236,7 @@ func (a *Agent) Continue(ctx context.Context) error {
 // assistant-tail idle agent; on true the run has started and the lock has been
 // released (by startPromptRunLocked), on false nothing was dequeued and the
 // lock is still held.
-func (a *Agent) resumeQueuedLocked(ctx context.Context) bool {
+func (a *Agent) resumeQueuedLocked(ctx context.Context, kind RunKind) bool {
 	queued := dequeue(&a.steeringQ)
 	if len(queued) == 0 {
 		queued = dequeue(&a.followUpQ)
@@ -207,13 +245,15 @@ func (a *Agent) resumeQueuedLocked(ctx context.Context) bool {
 		return false
 	}
 	a.skipNextInitialSteeringPoll = true
-	a.startPromptRunLocked(ctx, queued)
+	a.startPromptRunLocked(ctx, queued, kind)
 	return true
 }
 
 // Steer queues a steering message to interrupt the agent mid-run.
 // Delivered after the current tool execution; remaining tools are skipped.
 func (a *Agent) Steer(msg AgentMessage) {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.steeringQ = append(a.steeringQ, msg)
@@ -223,6 +263,8 @@ func (a *Agent) Steer(msg AgentMessage) {
 // active run consumes follow-ups when it reaches that point; an idle Agent
 // retains them until the harness calls Continue.
 func (a *Agent) FollowUp(msg AgentMessage) {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.followUpQ = append(a.followUpQ, msg)
@@ -381,6 +423,8 @@ func (a *Agent) SetMessageCommitter(fn func(AgentMessage) error) {
 // corruption. Hold the lifecycle first (HoldRuns) when mutating around live
 // runs.
 func (a *Agent) SetMessages(msgs []AgentMessage) error {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.isRunning {
@@ -407,7 +451,7 @@ func (a *Agent) ImportMessages(msgs []Message) error {
 // startPromptRunLocked starts a prompt-based run. Caller must hold a.mu.
 // The run ctx derives from the caller's ctx, so an external cancel and Abort
 // share standard OR semantics.
-func (a *Agent) startPromptRunLocked(ctx context.Context, msgs []AgentMessage) {
+func (a *Agent) startPromptRunLocked(ctx context.Context, msgs []AgentMessage, kind RunKind) {
 	a.isRunning = true
 	a.lastError = ""
 
@@ -421,15 +465,15 @@ func (a *Agent) startPromptRunLocked(ctx context.Context, msgs []AgentMessage) {
 		Messages:     copyMessages(a.messages),
 		Tools:        a.tools,
 	}
-	config := a.buildConfig()
+	config := a.buildConfig(false)
 	a.mu.Unlock()
 
-	go a.consumeLoop(AgentLoop(runCtx, msgs, agentCtx, config))
+	go a.consumeLoop(runCtx, kind, AgentLoop(runCtx, msgs, agentCtx, config))
 }
 
 // startContinueRunLocked starts a continue run from the current context. Caller must hold a.mu.
 // See startPromptRunLocked for run-ctx semantics.
-func (a *Agent) startContinueRunLocked(ctx context.Context) {
+func (a *Agent) startContinueRunLocked(ctx context.Context, kind RunKind) {
 	a.isRunning = true
 	a.lastError = ""
 
@@ -443,10 +487,10 @@ func (a *Agent) startContinueRunLocked(ctx context.Context) {
 		Messages:     copyMessages(a.messages),
 		Tools:        a.tools,
 	}
-	config := a.buildConfig()
+	config := a.buildConfig(true)
 	a.mu.Unlock()
 
-	go a.consumeLoop(AgentLoopContinue(runCtx, agentCtx, config))
+	go a.consumeLoop(runCtx, kind, AgentLoopContinue(runCtx, agentCtx, config))
 }
 
 // ContextUsage returns an estimate of the current context window occupancy.
@@ -680,6 +724,8 @@ func (a *Agent) SetPromptCacheKey(key string) {
 
 // ClearSteeringQueue removes all queued steering messages.
 func (a *Agent) ClearSteeringQueue() {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.steeringQ = nil
@@ -687,6 +733,8 @@ func (a *Agent) ClearSteeringQueue() {
 
 // ClearFollowUpQueue removes all queued follow-up messages.
 func (a *Agent) ClearFollowUpQueue() {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.followUpQ = nil
@@ -694,6 +742,8 @@ func (a *Agent) ClearFollowUpQueue() {
 
 // ClearAllQueues removes all queued steering and follow-up messages.
 func (a *Agent) ClearAllQueues() {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.steeringQ = nil
@@ -722,6 +772,8 @@ func (a *Agent) Reset() {
 	release := a.HoldRuns()
 	defer release()
 
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.messages = nil
@@ -739,13 +791,11 @@ func (a *Agent) Reset() {
 }
 
 // buildConfig constructs a LoopConfig from the agent's settings. Must be called with lock held.
-func (a *Agent) buildConfig() LoopConfig {
+func (a *Agent) buildConfig(continuing bool) LoopConfig {
 	skipInitialSteering := a.skipNextInitialSteeringPoll
 	a.skipNextInitialSteeringPoll = false
 	initialState := a.stateLocked()
-	if !initialState.Progress.Active {
-		initialState.Progress = RunProgress{Active: true}
-	}
+	initialState.Progress = activateRunProgress(initialState.Progress, continuing)
 
 	return LoopConfig{
 		Model:                    a.model,
@@ -784,8 +834,6 @@ func (a *Agent) buildConfig() LoopConfig {
 		MaxToolConcurrency:    a.maxToolConcurrency,
 		ShouldEmitAbortMarker: a.wantAbortMarker.Load,
 		OnMessage:             a.onMessage,
-		BeforeRun:             a.beforeRun,
-		AfterRun:              a.afterRun,
 		BeforeTurn:            a.beforeTurn,
 		AfterTurn:             a.afterTurn,
 		StopGuard:             a.stopGuard,
@@ -800,7 +848,7 @@ func (a *Agent) buildConfig() LoopConfig {
 // consumeLoop projects loop events into the stateful Agent view. It must not
 // create AgentMessages: new entries come only from committed EventMessageEnd
 // events, while Loop-owned state snapshots may replace the projected history.
-func (a *Agent) consumeLoop(events <-chan Event) {
+func (a *Agent) consumeLoop(runCtx context.Context, kind RunKind, events <-chan Event) {
 	// Capture this run's done channel and cancel up front. A new run can take
 	// over before this loop's defer runs — an auto-continue may start it from
 	// this run's EventAgentEnd listener — reassigning a.done/a.cancel to that
@@ -837,6 +885,10 @@ func (a *Agent) consumeLoop(events <-chan Event) {
 	}()
 
 	for ev := range events {
+		if ev.Type == EventAgentEnd {
+			a.consumeAgentEnd(runCtx, kind, ev)
+			continue
+		}
 		a.mu.Lock()
 		switch ev.Type {
 		case EventAgentStart:
@@ -898,13 +950,6 @@ func (a *Agent) consumeLoop(events <-chan Event) {
 				a.lastError = ev.Err.Error()
 			}
 
-		case EventAgentEnd:
-			if ev.State != nil {
-				a.applyLoopStateLocked(*ev.State)
-			}
-			a.isRunning = false
-			a.streamMessage = nil
-			a.pendingToolCalls = make(map[string]struct{})
 		}
 
 		// Copy listeners to avoid holding lock during callback
@@ -916,6 +961,77 @@ func (a *Agent) consumeLoop(events <-chan Event) {
 			if fn != nil {
 				fn(ev)
 			}
+		}
+	}
+}
+
+// consumeAgentEnd crosses from the AgentLoop terminal event back into the
+// stateful Agent boundary. AfterRun deliberately executes here, outside the
+// Loop goroutine, after final state projection and before terminal listeners
+// may start another run.
+func (a *Agent) consumeAgentEnd(runCtx context.Context, kind RunKind, ev Event) {
+	a.runMu.Lock()
+
+	a.mu.Lock()
+	if ev.State != nil {
+		a.applyLoopStateLocked(*ev.State)
+	}
+	a.isRunning = false
+	a.streamMessage = nil
+	a.pendingToolCalls = make(map[string]struct{})
+	hook := a.afterRun
+	snapshot := a.snapshotLocked()
+	a.mu.Unlock()
+
+	var hookErr error
+	if hook != nil {
+		summary := RunSummary{EndReason: EndReasonError}
+		if ev.Summary != nil {
+			summary = *ev.Summary
+		}
+		if err := callAfterRun(context.WithoutCancel(runCtx), hook, AfterRunContext{
+			Kind:     kind,
+			Snapshot: snapshot,
+			Summary:  summary,
+			Err:      ev.Err,
+		}); err != nil {
+			hookErr = fmt.Errorf("after run: %w", err)
+			ev.Err = errors.Join(ev.Err, hookErr)
+			summary.EndReason = EndReasonError
+			ev.Summary = &summary
+		}
+	}
+
+	a.mu.Lock()
+	if hookErr != nil {
+		a.lastError = ev.Err.Error()
+		finalState := a.stateLocked()
+		ev.State = &finalState
+	}
+	listeners := make([]func(Event), len(a.listeners))
+	copy(listeners, a.listeners)
+	a.mu.Unlock()
+	a.runMu.Unlock()
+
+	if hookErr != nil {
+		notifyListeners(listeners, Event{Type: EventError, Err: hookErr})
+	}
+	notifyListeners(listeners, ev)
+}
+
+func callAfterRun(ctx context.Context, hook AfterRunHook, run AfterRunContext) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("panic: %v", recovered)
+		}
+	}()
+	return hook(ctx, run)
+}
+
+func notifyListeners(listeners []func(Event), event Event) {
+	for _, listener := range listeners {
+		if listener != nil {
+			listener(event)
 		}
 	}
 }

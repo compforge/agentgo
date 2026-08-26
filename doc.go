@@ -31,7 +31,11 @@
 // A small, stable surface carries most uses: [Agent], [AgentLoop], [Event],
 // [Tool], [AgentMessage], and [Message]. AgentMessage is the application
 // transcript type; Message is the model protocol type produced only at the
-// call boundary. [NewCodec] supplies AgentGo's built-in portable state types;
+// call boundary. [AgentState] describes Loop-owned execution state, while
+// [AgentSnapshot] adds input accepted into a stateful Agent's steering and
+// follow-up queues. [WithBeforeRun] and [WithAfterRun] let an adapter restore
+// and finalize that snapshot outside the Loop without binding AgentGo to a
+// store. [NewCodec] supplies AgentGo's built-in portable state types;
 // applications may extend it with their own concrete messages. The rest is
 // opt-in — context strategies, stop guards, sub-agents, middleware — reached
 // only when a use case needs it.

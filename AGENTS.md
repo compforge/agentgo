@@ -39,7 +39,9 @@ agentgo/
 5. **公开 API 保持克制**：新增接口前先确认是否能作为现有 AgentMessage、Event、Tool 或 Context
    可选能力表达；Go 改动提交前运行 `go test ./...` 与 `go build ./...`。
 6. **编码机制不绑定存储或传输策略**：`codec` 提供通用 tagged value、类型注册和编解码机制；
-   `AgentState` 只声明自己的可编码字段，持久化、进程交接、RPC 与调用结果对账均由宿主组合。
+   `AgentState` 是 Loop state，`AgentSnapshot` 聚合 stateful Agent 已接受但未消费的 queue；stateful
+   Agent 的 `BeforeRun` / `AfterRun` 位于 Loop 外层，供宿主组合装载与保存，裸 `AgentLoop` 不提供同名
+   hook。持久化、进程交接、RPC 与进入 Agent 前的 durable inbox 均由宿主负责。
 7. **版本随公开契约演进**：`VERSION` 表达仓库当前发布版本；公开 API、可观察行为或依赖基线变化时，
    在同一 PR 中按语义版本同步升级，避免代码能力与可识别版本脱节。
 8. **Execution 是运行坐标而非外部账本模型**：逻辑执行在一次 Run 内保持稳定 `ID`，物理重试递增
