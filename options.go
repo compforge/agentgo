@@ -146,7 +146,8 @@ func WithToolMiddlewares(mw ...ToolMiddleware) AgentOption {
 }
 
 // WithModelMiddlewares sets model execution middlewares. Each middleware wraps
-// one physical provider attempt; first middleware is outermost.
+// one physical provider attempt, including internal context summarization;
+// first middleware is outermost.
 func WithModelMiddlewares(mw ...ModelMiddleware) AgentOption {
 	return func(a *Agent) { a.modelMiddlewares = mw }
 }

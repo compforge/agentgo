@@ -10,6 +10,7 @@ AgentGo 从 [AgentCore](https://github.com/voocel/agentcore) 发展而来，现�
 
 - Message-native Agent Loop：应用始终持有 `AgentMessage`，只在模型调用边界转换为 `Message`。
 - 单一 Event stream：统一承载模型输出、工具、Context 投影与压缩、重试和结束状态。
+- Middleware 与 Event 共享同一个执行坐标，统一关联模型、工具与压缩动作。
 - Model、Tool、ContextManager、Compactor、StopGuard、Turn Hook 和权限 Gate 均可替换。
 - 同一执行内核同时提供有状态 `Agent` 与无状态 `AgentLoop` 两种入口。
 - 支持 steering、follow-up、后台任务、SubAgent 与多 Agent Team。
@@ -88,6 +89,8 @@ var state agentgo.AgentState
 _ = stateCodec.Unmarshal(data, &state)
 ```
 
+`Execution` 为昂贵或对外可见的动作提供一次 Run 内稳定的身份。同一逻辑调用重试时保持 `ID` 不变并递增 `Attempt`；`ModelExecution` 与 `ToolExecution` 把该坐标贯穿 Middleware 和 Event stream。内部 summary 是 compaction 的子 Execution，宿主因此可以关联动作或复用已知结果，而 AgentGo 无需绑定 Ledger 或 Trace 的数据模型。
+
 ## 扩展点
 
 | 需求 | 契约 |
@@ -100,8 +103,8 @@ _ = stateCodec.Unmarshal(data, &state)
 | 压缩策略 | `context.Compactor` |
 | Run 状态注入与收尾 | `WithBeforeRun` / `WithAfterRun` |
 | Turn 准备与状态观察 | `WithBeforeTurn` / `WithAfterTurn` |
-| 模型调用拦截 | `WithModelMiddlewares` |
-| 工具调用拦截 | `WithToolMiddlewares` |
+| 模型执行拦截 | `WithModelMiddlewares` |
+| 工具执行拦截 | `WithToolMiddlewares` |
 | 终止策略 | `StopGuard` |
 | UI、日志与轨迹采集 | `<-chan Event` / `Agent.Subscribe` |
 

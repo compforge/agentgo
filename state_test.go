@@ -250,7 +250,7 @@ func TestAgentContinueRestoresStateInBeforeRun(t *testing.T) {
 		WithBeforeRun(func(context.Context, BeforeRunContext) (AgentState, error) {
 			return restored, nil
 		}),
-		WithModelMiddlewares(func(ctx context.Context, call ModelCall, next ModelExecuteFunc) (ModelResult, error) {
+		WithModelMiddlewares(func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
 			attempts = append(attempts, call.TurnIndex)
 			callIDs = append(callIDs, call.ID)
 			return next(ctx, call)
@@ -342,7 +342,7 @@ func TestAgentLoopModelMiddlewareCanReturnKnownOutcome(t *testing.T) {
 				modelCalled = true
 				return nil, errors.New("must not execute")
 			}),
-			ModelMiddlewares: []ModelMiddleware{func(_ context.Context, call ModelCall, _ ModelExecuteFunc) (ModelResult, error) {
+			ModelMiddlewares: []ModelMiddleware{func(_ context.Context, call ModelExecution, _ ModelExecuteFunc) (ModelResult, error) {
 				if call.TurnIndex != 1 || call.Attempt != 1 {
 					t.Fatalf("call coordinate = turn %d attempt %d", call.TurnIndex, call.Attempt)
 				}
@@ -363,6 +363,7 @@ func TestAgentLoopModelMiddlewareCanReturnKnownOutcome(t *testing.T) {
 func TestAgentLoopToolMiddlewareCanReturnKnownOutcome(t *testing.T) {
 	toolCalls := 0
 	gateCalls := 0
+	var observed ToolExecution
 	tool := NewFuncTool("write", "write", nil, func(context.Context, json.RawMessage) (json.RawMessage, error) {
 		toolCalls++
 		return json.RawMessage(`{"real":true}`), nil
@@ -379,7 +380,9 @@ func TestAgentLoopToolMiddlewareCanReturnKnownOutcome(t *testing.T) {
 				gateCalls++
 				return &GateDecision{Allowed: true}, nil
 			},
-			ToolMiddlewares: []ToolMiddleware{func(_ context.Context, call ToolCall, _ ToolExecuteFunc) (ToolResult, error) {
+			ToolMiddlewares: []ToolMiddleware{func(_ context.Context, execution ToolExecution, _ ToolExecuteFunc) (ToolResult, error) {
+				observed = execution
+				call := execution.Call
 				return ToolResult{ToolCallID: call.ID, ToolName: call.Name, Content: json.RawMessage(`{"known":true}`)}, nil
 			}},
 		},
@@ -391,5 +394,13 @@ func TestAgentLoopToolMiddlewareCanReturnKnownOutcome(t *testing.T) {
 	toolEnd, ok := findEvent(events, EventToolExecEnd)
 	if !ok || string(toolEnd.Result) != `{"known":true}` {
 		t.Fatalf("tool end = %#v", toolEnd)
+	}
+	toolStart, ok := findEvent(events, EventToolExecStart)
+	if !ok || toolStart.Execution == nil || toolEnd.Execution == nil {
+		t.Fatalf("tool execution events = start:%#v end:%#v", toolStart, toolEnd)
+	}
+	want := Execution{ID: "write-1", Kind: ExecutionKindTool, TurnIndex: 1, Attempt: 1}
+	if observed.Execution != want || *toolStart.Execution != want || *toolEnd.Execution != want {
+		t.Fatalf("tool execution coordinate = middleware:%#v start:%#v end:%#v, want %#v", observed.Execution, toolStart.Execution, toolEnd.Execution, want)
 	}
 }

@@ -379,8 +379,8 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 			if !commit(assistantMsg) {
 				return
 			}
-			sink.emit(Event{Type: EventMessageEnd, Message: assistantMsg})
-			sink.emit(Event{Type: EventModelResponse, Message: assistantMsg})
+			sink.emit(Event{Type: EventMessageEnd, Execution: executionRef(callInfo.Execution), Message: assistantMsg})
+			sink.emit(Event{Type: EventModelResponse, Execution: executionRef(callInfo.Execution), Message: assistantMsg})
 			turnCount++
 			state.Progress.NextTurn = false
 			state.Progress.PendingMessages = nil
@@ -406,7 +406,7 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 		if !commit(assistantMsg) {
 			return
 		}
-		sink.emit(Event{Type: EventMessageEnd, Message: assistantMsg})
+		sink.emit(Event{Type: EventMessageEnd, Execution: executionRef(callInfo.Execution), Message: assistantMsg})
 
 		// Check for tool calls
 		toolCalls := assistantMsg.ToolCalls()
@@ -425,16 +425,18 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 		var turnToolResults []ToolResult
 		if hasMoreToolCalls {
 			var steering []AgentMessage
-			turnToolResults, steering = executeToolCalls(ctx, currentCtx.Tools, toolCalls, config, toolErrors, sink)
+			turnToolResults, steering = executeToolCalls(ctx, turnCount+1, currentCtx.Tools, toolCalls, config, toolErrors, sink)
 			afterToolExec = true
 
 			for _, tr := range turnToolResults {
-				resultMsg := toolResultMessage(config, findToolCall(toolCalls, tr.ToolCallID), tr)
-				sink.emit(Event{Type: EventMessageStart, Message: resultMsg})
+				call := findToolCall(toolCalls, tr.ToolCallID)
+				execution := newToolExecution(turnCount+1, call)
+				resultMsg := toolResultMessage(config, call, tr)
+				sink.emit(Event{Type: EventMessageStart, Execution: executionRef(execution.Execution), Message: resultMsg})
 				if !commit(resultMsg) {
 					return
 				}
-				sink.emit(Event{Type: EventMessageEnd, Message: resultMsg})
+				sink.emit(Event{Type: EventMessageEnd, Execution: executionRef(execution.Execution), Message: resultMsg})
 			}
 
 			steeringAfterTools = steering
@@ -445,7 +447,7 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 			}
 		}
 
-		sink.emit(Event{Type: EventModelResponse, Message: assistantMsg, ToolResults: turnToolResults})
+		sink.emit(Event{Type: EventModelResponse, Execution: executionRef(callInfo.Execution), Message: assistantMsg, ToolResults: turnToolResults})
 		turnCount++
 		// Early exit: a terminal tool completed successfully. This is a
 		// normal stop, so it passes through the same StopGuard gate as
@@ -613,6 +615,7 @@ func consultStopGuard(ctx context.Context, config LoopConfig, info StopInfo) (in
 }
 
 type llmCallInfo struct {
+	Execution             Execution
 	HasCompletedToolCalls bool
 }
 
@@ -624,6 +627,7 @@ type llmCallInfo struct {
 // replay tool side effects. callOptions are selected once per logical model
 // call and reused by every retry attempt.
 func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopConfig, turnIndex int, sink eventSink) (Message, llmCallInfo, error) {
+	ctx = withModelExecutionRuntime(ctx, config.ModelMiddlewares, sink.emit)
 	maxRetries := config.MaxRetries
 	if maxRetries < 0 {
 		maxRetries = 0
@@ -665,10 +669,10 @@ func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopCo
 		delay := retryDelay(err, attempt-1)
 
 		sink.emit(Event{
-			Type: EventRetry,
-			Err:  err,
+			Type:      EventRetry,
+			Execution: executionRef(info.Execution),
+			Err:       err,
 			RetryInfo: &RetryInfo{
-				Attempt:    attempt,
 				MaxRetries: maxRetries,
 				Delay:      delay,
 				Err:        err,
@@ -688,26 +692,29 @@ func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopCo
 // retry the LLM call. If no ContextManager is configured, the original error
 // is returned.
 func recoverOverflow(ctx context.Context, agentCtx *AgentContext, config LoopConfig, turnIndex, attempt int, sink eventSink, originalErr error) (Message, llmCallInfo, error) {
+	failedExecution := newModelExecution(turnIndex, attempt-1).Execution
 	if config.ContextManager == nil {
-		return Message{}, llmCallInfo{}, &ContextOverflowError{Cause: fmt.Errorf("no compaction configured: %w", originalErr)}
+		return Message{}, llmCallInfo{Execution: failedExecution}, &ContextOverflowError{Cause: fmt.Errorf("no compaction configured: %w", originalErr)}
 	}
 
 	sink.emit(Event{
-		Type: EventRetry,
-		Err:  originalErr,
+		Type:      EventRetry,
+		Execution: executionRef(failedExecution),
+		Err:       originalErr,
 		RetryInfo: &RetryInfo{
-			Attempt:    1,
 			MaxRetries: 1,
 			Err:        fmt.Errorf("context overflow detected, compacting and retrying"),
 		},
 	})
 
-	recovery, err := config.ContextManager.RecoverOverflow(ctx, agentCtx.Messages, originalErr)
+	compactExecution := newCompactExecution(turnIndex, CompactReasonOverflow, 1)
+	recoveryCtx := ContextWithExecution(ctx, compactExecution)
+	recovery, err := config.ContextManager.RecoverOverflow(recoveryCtx, agentCtx.Messages, originalErr)
 	if err != nil {
-		return Message{}, llmCallInfo{}, &ContextOverflowError{Cause: fmt.Errorf("compaction failed: %w", err)}
+		return Message{}, llmCallInfo{Execution: failedExecution}, &ContextOverflowError{Cause: fmt.Errorf("compaction failed: %w", err)}
 	}
 	if len(recovery.View) == 0 {
-		return Message{}, llmCallInfo{}, &ContextOverflowError{Cause: errors.New("compaction returned empty prompt view")}
+		return Message{}, llmCallInfo{Execution: failedExecution}, &ContextOverflowError{Cause: errors.New("compaction returned empty prompt view")}
 	}
 	agentCtx.Messages = recovery.View
 	if recovery.ShouldCommit && len(recovery.CommitMessages) > 0 && config.CommitContext != nil {
@@ -716,7 +723,7 @@ func recoverOverflow(ctx context.Context, agentCtx *AgentContext, config LoopCon
 		}
 	}
 	if recovery.Compaction != nil {
-		sink.emit(Event{Type: EventContextCompacted, Compaction: recovery.Compaction})
+		sink.emit(Event{Type: EventContextCompacted, Execution: executionRef(compactExecution), Compaction: recovery.Compaction})
 	}
 	return callLLM(ctx, agentCtx, config, turnIndex, attempt, sink)
 }
@@ -742,18 +749,22 @@ func retryDelay(err error, attempt int) time.Duration {
 
 // callLLM applies the two-stage pipeline and calls the model.
 func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, turnIndex, attempt int, sink eventSink) (Message, llmCallInfo, error) {
+	execution := newModelExecution(turnIndex, attempt)
+	info := llmCallInfo{Execution: execution.Execution}
 	messages := agentCtx.Messages
 
 	// Stage 1: ContextManager / TransformContext
 	if config.ContextManager != nil {
-		projection, err := config.ContextManager.Project(ctx, messages)
+		compactExecution := newCompactExecution(turnIndex, CompactReasonThreshold, attempt)
+		projectionCtx := ContextWithExecution(ctx, compactExecution)
+		projection, err := config.ContextManager.Project(projectionCtx, messages)
 		if err != nil {
-			return Message{}, llmCallInfo{}, fmt.Errorf("project context: %w", err)
+			return Message{}, info, fmt.Errorf("project context: %w", err)
 		}
 		if projection.ShouldCommit && len(projection.CommitMessages) > 0 {
 			if config.CommitContext != nil {
 				if err := config.CommitContext(projection.CommitMessages, projection.Usage); err != nil {
-					return Message{}, llmCallInfo{}, fmt.Errorf("project context commit failed: %w", err)
+					return Message{}, info, fmt.Errorf("project context commit failed: %w", err)
 				}
 			}
 			agentCtx.Messages = copyMessages(projection.CommitMessages)
@@ -763,10 +774,10 @@ func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, tur
 			messages = projection.Messages
 		}
 		if projection.Compaction != nil {
-			sink.emit(Event{Type: EventContextCompacted, Compaction: projection.Compaction})
+			sink.emit(Event{Type: EventContextCompacted, Execution: executionRef(compactExecution), Compaction: projection.Compaction})
 		}
 	}
-	sink.emit(Event{Type: EventContextProjected, ContextItems: CollectContextItems(messages)})
+	sink.emit(Event{Type: EventContextProjected, Execution: executionRef(execution.Execution), ContextItems: CollectContextItems(messages)})
 
 	// Stage 2: AgentMessage[] → Message[] + repair tool-call / tool-result
 	// pairing for provider compatibility.
@@ -831,33 +842,44 @@ func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, tur
 		callOpts = append(callOpts, WithCallPromptCacheKey(config.PromptCacheKey))
 	}
 
-	call := ModelCall{
-		ID:        modelCallID(turnIndex),
-		TurnIndex: turnIndex,
-		Attempt:   attempt,
-		Request:   LLMRequest{Messages: llmMessages, Tools: toolSpecs},
-		Options:   callOpts,
-	}
-	execute := func(ctx context.Context, call ModelCall) (ModelResult, error) {
+	execution.Request = LLMRequest{Messages: llmMessages, Tools: toolSpecs}
+	execution.Options = callOpts
+	execute := func(ctx context.Context, call ModelExecution) (ModelResult, error) {
 		if config.Model == nil {
 			return ModelResult{}, ErrNoModel
 		}
-		message, info, err := callLLMStream(ctx, config.Model, call.Request.Messages, call.Request.Tools, call.Options, sink)
-		return ModelResult{Message: message, HasCompletedToolCalls: info.HasCompletedToolCalls}, err
+		message, callInfo, err := callLLMStream(ctx, config.Model, call, sink)
+		return ModelResult{Message: message, HasCompletedToolCalls: callInfo.HasCompletedToolCalls}, err
 	}
-	if len(config.ModelMiddlewares) > 0 {
-		execute = buildModelMiddlewareChain(execute, config.ModelMiddlewares)
-	}
-	result, err := execute(ctx, call)
-	return result.Message, llmCallInfo{HasCompletedToolCalls: result.HasCompletedToolCalls}, err
+	result, err := ExecuteModel(ctx, execution, execute)
+	info.HasCompletedToolCalls = result.HasCompletedToolCalls
+	return result.Message, info, err
 }
 
-// modelCallID is derived from the turn rather than the physical attempt so a
+// modelExecutionID is derived from the turn rather than the physical attempt so a
 // retry—or a run reloaded from the preceding turn boundary—addresses the
 // same logical call. Hosts that persist calls must scope this opaque ID with
 // their own run identity.
-func modelCallID(turnIndex int) string {
+func modelExecutionID(turnIndex int) string {
 	return fmt.Sprintf("model-%d", turnIndex)
+}
+
+func newModelExecution(turnIndex, attempt int) ModelExecution {
+	return ModelExecution{Execution: Execution{
+		ID:        modelExecutionID(turnIndex),
+		Kind:      ExecutionKindModel,
+		TurnIndex: turnIndex,
+		Attempt:   attempt,
+	}}
+}
+
+func newCompactExecution(turnIndex int, reason CompactReason, attempt int) Execution {
+	return Execution{
+		ID:        fmt.Sprintf("compact-%d-%s", turnIndex, reason),
+		Kind:      ExecutionKindCompact,
+		TurnIndex: turnIndex,
+		Attempt:   attempt,
+	}
 }
 
 // markLastMessageForCache returns a copy of messages with cache_control attached
@@ -893,16 +915,16 @@ func markLastMessageForCache(messages []Message, cacheControl string) []Message 
 // non-streaming Generate, because callers (TUIs, event subscribers) typically
 // depend on stream events for live rendering, tool-call deltas, and cancellation
 // semantics. Switching execution model without notice changes the contract.
-func callLLMStream(ctx context.Context, model ChatModel, messages []Message, tools []ToolSpec, opts []CallOption, sink eventSink) (Message, llmCallInfo, error) {
-	streamCh, err := model.GenerateStream(ctx, messages, tools, opts...)
+func callLLMStream(ctx context.Context, model ChatModel, execution ModelExecution, sink eventSink) (Message, llmCallInfo, error) {
+	info := llmCallInfo{Execution: execution.Execution}
+	streamCh, err := model.GenerateStream(ctx, execution.Request.Messages, execution.Request.Tools, execution.Options...)
 	if err != nil {
-		return Message{}, llmCallInfo{}, err
+		return Message{}, info, err
 	}
 
 	var (
 		started bool
 		partial Message
-		info    llmCallInfo
 	)
 
 	for ev := range streamCh {
@@ -911,14 +933,14 @@ func callLLMStream(ctx context.Context, model ChatModel, messages []Message, too
 			partial = ev.Message
 			if !started {
 				started = true
-				sink.emit(Event{Type: EventMessageStart, Message: partial})
+				sink.emit(Event{Type: EventMessageStart, Execution: executionRef(execution.Execution), Message: partial})
 			}
 
 		case StreamEventTextDelta, StreamEventThinkingDelta, StreamEventToolCallDelta:
 			partial = ev.Message
 			if !started {
 				started = true
-				sink.emit(Event{Type: EventMessageStart, Message: partial})
+				sink.emit(Event{Type: EventMessageStart, Execution: executionRef(execution.Execution), Message: partial})
 			}
 			var dk DeltaKind
 			switch ev.Type {
@@ -927,7 +949,7 @@ func callLLMStream(ctx context.Context, model ChatModel, messages []Message, too
 			case StreamEventToolCallDelta:
 				dk = DeltaToolCall
 			}
-			sink.emit(Event{Type: EventMessageUpdate, Message: partial, Delta: ev.Delta, DeltaKind: dk})
+			sink.emit(Event{Type: EventMessageUpdate, Execution: executionRef(execution.Execution), Message: partial, Delta: ev.Delta, DeltaKind: dk})
 
 		case StreamEventTextEnd, StreamEventThinkingEnd, StreamEventToolCallEnd:
 			partial = ev.Message
@@ -939,7 +961,7 @@ func callLLMStream(ctx context.Context, model ChatModel, messages []Message, too
 			finalMsg := ev.Message
 			finalMsg.Timestamp = time.Now()
 			if !started {
-				sink.emit(Event{Type: EventMessageStart, Message: finalMsg})
+				sink.emit(Event{Type: EventMessageStart, Execution: executionRef(execution.Execution), Message: finalMsg})
 			}
 			return finalMsg, info, nil
 
@@ -958,8 +980,8 @@ func callLLMStream(ctx context.Context, model ChatModel, messages []Message, too
 
 // executeToolCalls runs tool calls for one committed assistant turn using the
 // shared concurrency and steering scheduler.
-func executeToolCalls(ctx context.Context, tools []Tool, calls []ToolCall, config LoopConfig, toolErrors map[string]int, sink eventSink) ([]ToolResult, []AgentMessage) {
-	exec := newTurnToolExecutor(ctx, tools, config, toolErrors, sink)
+func executeToolCalls(ctx context.Context, turnIndex int, tools []Tool, calls []ToolCall, config LoopConfig, toolErrors map[string]int, sink eventSink) ([]ToolResult, []AgentMessage) {
+	exec := newTurnToolExecutor(ctx, turnIndex, tools, config, toolErrors, sink)
 	for _, call := range calls {
 		exec.Add(call)
 	}
@@ -969,24 +991,26 @@ func executeToolCalls(ctx context.Context, tools []Tool, calls []ToolCall, confi
 // executeSingleToolCall wraps the complete validation, authorization and
 // execution pipeline. A middleware can return a known ToolResult without
 // invoking next, so replay never reaches gates or external side effects.
-func executeSingleToolCall(ctx context.Context, tools []Tool, call ToolCall, config LoopConfig, failCount int, sink eventSink) ToolResult {
+func executeSingleToolCall(ctx context.Context, tools []Tool, execution ToolExecution, config LoopConfig, failCount int, sink eventSink) ToolResult {
+	call := execution.Call
 	tool := findTool(tools, call.Name)
 	label := toolLabel(tool)
 	sink.emit(Event{
 		Type:      EventToolExecStart,
+		Execution: executionRef(execution.Execution),
 		ToolID:    call.ID,
 		Tool:      call.Name,
 		ToolLabel: label,
 		Args:      call.Args,
 	})
 
-	execute := func(ctx context.Context, call ToolCall) (ToolResult, error) {
-		return executeToolCallCore(ctx, tool, call, config, failCount, label, sink), nil
+	execute := func(ctx context.Context, execution ToolExecution) (ToolResult, error) {
+		return executeToolCallCore(ctx, tool, execution, config, failCount, label, sink), nil
 	}
 	if len(config.ToolMiddlewares) > 0 {
 		execute = buildToolMiddlewareChain(execute, config.ToolMiddlewares)
 	}
-	result, err := execute(ctx, call)
+	result, err := execute(ctx, execution)
 	if err != nil {
 		result = toolFailureResult(call, err.Error(), true)
 	}
@@ -999,6 +1023,7 @@ func executeSingleToolCall(ctx context.Context, tools []Tool, call ToolCall, con
 
 	sink.emit(Event{
 		Type:      EventToolExecEnd,
+		Execution: executionRef(execution.Execution),
 		ToolID:    call.ID,
 		Tool:      call.Name,
 		ToolLabel: label,
@@ -1010,7 +1035,8 @@ func executeSingleToolCall(ctx context.Context, tools []Tool, call ToolCall, con
 
 // executeToolCallCore performs one real tool call without middleware or the
 // start/end lifecycle events owned by executeSingleToolCall.
-func executeToolCallCore(ctx context.Context, tool Tool, call ToolCall, config LoopConfig, failCount int, label string, sink eventSink) ToolResult {
+func executeToolCallCore(ctx context.Context, tool Tool, execution ToolExecution, config LoopConfig, failCount int, label string, sink eventSink) ToolResult {
+	call := execution.Call
 	if ctx.Err() != nil {
 		return toolFailureResult(call, "Tool execution cancelled.", false)
 	}
@@ -1053,6 +1079,7 @@ func executeToolCallCore(ctx context.Context, tool Tool, call ToolCall, config L
 			preview = data
 			sink.emit(Event{
 				Type:       EventToolExecUpdate,
+				Execution:  executionRef(execution.Execution),
 				ToolID:     call.ID,
 				Tool:       call.Name,
 				ToolLabel:  label,
@@ -1094,6 +1121,7 @@ func executeToolCallCore(ctx context.Context, tool Tool, call ToolCall, config L
 			p := progress
 			sink.emit(Event{
 				Type:       EventToolExecUpdate,
+				Execution:  executionRef(execution.Execution),
 				ToolID:     call.ID,
 				Tool:       call.Name,
 				ToolLabel:  label,
@@ -1174,10 +1202,12 @@ func toolFailureResult(call ToolCall, msg string, countErr bool) ToolResult {
 // result for a call that failed before the tool ran. countErr sets ToolName
 // on the result so the caller counts the failure toward toolErrors; denials,
 // skips, and cancellations pass false (see executeSingleToolCall).
-func failToolCall(sink eventSink, call ToolCall, label, msg string, countErr bool) ToolResult {
+func failToolCall(sink eventSink, execution ToolExecution, label, msg string, countErr bool) ToolResult {
+	call := execution.Call
 	result := toolFailureResult(call, msg, countErr)
 	sink.emit(Event{
 		Type:      EventToolExecEnd,
+		Execution: executionRef(execution.Execution),
 		ToolID:    call.ID,
 		Tool:      call.Name,
 		ToolLabel: label,
@@ -1188,22 +1218,36 @@ func failToolCall(sink eventSink, call ToolCall, label, msg string, countErr boo
 }
 
 // skipToolCall creates a skipped result for an interrupted tool call.
-func skipToolCall(call ToolCall, tools []Tool, sink eventSink) ToolResult {
-	return skipToolCallWithMessage(call, tools, sink, "Skipped due to queued user message.")
+func skipToolCall(execution ToolExecution, tools []Tool, sink eventSink) ToolResult {
+	return skipToolCallWithMessage(execution, tools, sink, "Skipped due to queued user message.")
 }
 
-func skipToolCallWithMessage(call ToolCall, tools []Tool, sink eventSink, message string) ToolResult {
+func skipToolCallWithMessage(execution ToolExecution, tools []Tool, sink eventSink, message string) ToolResult {
+	call := execution.Call
 	label := toolLabel(findTool(tools, call.Name))
 
 	sink.emit(Event{
 		Type:      EventToolExecStart,
+		Execution: executionRef(execution.Execution),
 		ToolID:    call.ID,
 		Tool:      call.Name,
 		ToolLabel: label,
 		Args:      call.Args,
 	})
 
-	return failToolCall(sink, call, label, message, false)
+	return failToolCall(sink, execution, label, message, false)
+}
+
+func newToolExecution(turnIndex int, call ToolCall) ToolExecution {
+	return ToolExecution{
+		Execution: Execution{
+			ID:        call.ID,
+			Kind:      ExecutionKindTool,
+			TurnIndex: turnIndex,
+			Attempt:   1,
+		},
+		Call: call,
+	}
 }
 
 func findToolCall(calls []ToolCall, id string) ToolCall {
@@ -1317,8 +1361,8 @@ func buildToolMiddlewareChain(exec ToolExecuteFunc, middlewares []ToolMiddleware
 	for i := len(middlewares) - 1; i >= 0; i-- {
 		mw := middlewares[i]
 		next := exec
-		exec = func(ctx context.Context, call ToolCall) (ToolResult, error) {
-			return mw(ctx, call, next)
+		exec = func(ctx context.Context, execution ToolExecution) (ToolResult, error) {
+			return mw(ctx, execution, next)
 		}
 	}
 	return exec

@@ -137,7 +137,7 @@ func (p summaryPrompts) turnPrefix() string {
 }
 
 // generateTurnPrefixSummary generates a summary for the prefix portion of a split turn.
-func generateTurnPrefixSummary(ctx context.Context, model agentgo.ChatModel, prompts summaryPrompts, msgs []agentgo.AgentMessage, opts ...agentgo.CallOption) (string, error) {
+func generateTurnPrefixSummary(ctx context.Context, model agentgo.ChatModel, execution agentgo.Execution, prompts summaryPrompts, msgs []agentgo.AgentMessage, opts ...agentgo.CallOption) (string, error) {
 	conversation := serializeConversation(msgs)
 	if conversation == "" {
 		return "", nil
@@ -145,24 +145,24 @@ func generateTurnPrefixSummary(ctx context.Context, model agentgo.ChatModel, pro
 
 	userPrompt := "<conversation>\n" + conversation + "\n</conversation>\n\n" + prompts.turnPrefix()
 
-	resp, err := model.Generate(ctx, []agentgo.Message{
+	message, err := executeSummaryModel(ctx, model, execution, []agentgo.Message{
 		agentgo.SystemMsg(prompts.system()),
 		agentgo.UserMsg(userPrompt),
-	}, nil, opts...)
+	}, opts...)
 	if err != nil {
 		return "", fmt.Errorf("turn prefix summarization failed: %w", err)
 	}
-	return extractStoredSummary(resp.Message.TextContent()), nil
+	return extractStoredSummary(message.TextContent()), nil
 }
 
 // generateSummary calls the ChatModel to produce a conversation summary.
 // If previousSummary is non-empty, uses incremental update prompt.
-func generateSummary(ctx context.Context, model agentgo.ChatModel, prompts summaryPrompts, msgs []agentgo.AgentMessage, previousSummary string, opts ...agentgo.CallOption) (string, error) {
+func generateSummary(ctx context.Context, model agentgo.ChatModel, execution agentgo.Execution, prompts summaryPrompts, msgs []agentgo.AgentMessage, previousSummary string, opts ...agentgo.CallOption) (string, error) {
 	const maxRetries = 3
 	current := append([]agentgo.AgentMessage(nil), msgs...)
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		summary, err := generateSummaryOnce(ctx, model, prompts, current, previousSummary, opts...)
+		summary, err := generateSummaryOnce(ctx, model, execution.WithAttempt(attempt+1), prompts, current, previousSummary, opts...)
 		if err == nil {
 			return summary, nil
 		}
@@ -182,7 +182,7 @@ func generateSummary(ctx context.Context, model agentgo.ChatModel, prompts summa
 	return "", fmt.Errorf("summarization failed")
 }
 
-func generateSummaryOnce(ctx context.Context, model agentgo.ChatModel, prompts summaryPrompts, msgs []agentgo.AgentMessage, previousSummary string, opts ...agentgo.CallOption) (string, error) {
+func generateSummaryOnce(ctx context.Context, model agentgo.ChatModel, execution agentgo.Execution, prompts summaryPrompts, msgs []agentgo.AgentMessage, previousSummary string, opts ...agentgo.CallOption) (string, error) {
 	conversation := serializeConversation(msgs)
 	if conversation == "" {
 		return "", fmt.Errorf("no conversation content to summarize")
@@ -198,19 +198,37 @@ func generateSummaryOnce(ctx context.Context, model agentgo.ChatModel, prompts s
 			prompts.summary()
 	}
 
-	resp, err := model.Generate(ctx, []agentgo.Message{
+	message, err := executeSummaryModel(ctx, model, execution, []agentgo.Message{
 		agentgo.SystemMsg(prompts.system()),
 		agentgo.UserMsg(userPrompt),
-	}, nil, opts...)
+	}, opts...)
 	if err != nil {
 		return "", fmt.Errorf("summarization failed: %w", err)
 	}
 
-	summary := extractStoredSummary(resp.Message.TextContent())
+	summary := extractStoredSummary(message.TextContent())
 	if summary == "" {
 		return "", fmt.Errorf("summarization returned empty content")
 	}
 	return summary, nil
+}
+
+// executeSummaryModel keeps summary calls on AgentGo's model execution path so
+// they inherit the enclosing Loop's middleware and observable coordinates.
+func executeSummaryModel(ctx context.Context, model agentgo.ChatModel, execution agentgo.Execution, messages []agentgo.Message, opts ...agentgo.CallOption) (agentgo.Message, error) {
+	call := agentgo.ModelExecution{
+		Execution: execution,
+		Request:   agentgo.LLMRequest{Messages: messages},
+		Options:   opts,
+	}
+	result, err := agentgo.ExecuteModel(ctx, call, func(ctx context.Context, execution agentgo.ModelExecution) (agentgo.ModelResult, error) {
+		response, err := model.Generate(ctx, execution.Request.Messages, execution.Request.Tools, execution.Options...)
+		if err != nil {
+			return agentgo.ModelResult{}, err
+		}
+		return agentgo.ModelResult{Message: response.Message}, nil
+	})
+	return result.Message, err
 }
 
 func extractStoredSummary(text string) string {

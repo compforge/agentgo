@@ -6,7 +6,7 @@ import (
 )
 
 type turnToolEntry struct {
-	call              ToolCall
+	execution         ToolExecution
 	safe              bool
 	failCount         int
 	interruptBehavior InterruptBehavior
@@ -23,6 +23,7 @@ type turnToolEntry struct {
 type turnToolExecutor struct {
 	ctx    context.Context
 	cancel context.CancelFunc
+	turn   int
 	tools  []Tool
 	config LoopConfig
 	sink   eventSink
@@ -38,7 +39,7 @@ type turnToolExecutor struct {
 	maxConcurrency int
 }
 
-func newTurnToolExecutor(ctx context.Context, tools []Tool, config LoopConfig, toolErrors map[string]int, sink eventSink) *turnToolExecutor {
+func newTurnToolExecutor(ctx context.Context, turnIndex int, tools []Tool, config LoopConfig, toolErrors map[string]int, sink eventSink) *turnToolExecutor {
 	execCtx, cancel := context.WithCancel(ctx)
 	maxConc := config.MaxToolConcurrency
 	if maxConc <= 1 {
@@ -47,6 +48,7 @@ func newTurnToolExecutor(ctx context.Context, tools []Tool, config LoopConfig, t
 	exec := &turnToolExecutor{
 		ctx:            execCtx,
 		cancel:         cancel,
+		turn:           turnIndex,
 		tools:          tools,
 		config:         config,
 		sink:           sink,
@@ -60,7 +62,7 @@ func newTurnToolExecutor(ctx context.Context, tools []Tool, config LoopConfig, t
 func (e *turnToolExecutor) Add(call ToolCall) {
 	tool := findTool(e.tools, call.Name)
 	entry := &turnToolEntry{
-		call:              call,
+		execution:         newToolExecution(e.turn, call),
 		safe:              tool != nil && isToolConcurrencySafe(tool, call.Args),
 		interruptBehavior: toolInterruptBehavior(tool, call.Args),
 	}
@@ -97,9 +99,9 @@ func (e *turnToolExecutor) Wait() ([]ToolResult, []AgentMessage) {
 			continue
 		}
 		if skipMessage != "" {
-			results = append(results, skipToolCallWithMessage(entry.call, e.tools, e.sink, skipMessage))
+			results = append(results, skipToolCallWithMessage(entry.execution, e.tools, e.sink, skipMessage))
 		} else {
-			results = append(results, skipToolCall(entry.call, e.tools, e.sink))
+			results = append(results, skipToolCall(entry.execution, e.tools, e.sink))
 		}
 	}
 
@@ -162,7 +164,7 @@ func (e *turnToolExecutor) startLocked(entry *turnToolEntry) {
 	go func(ent *turnToolEntry) {
 		defer cancel()
 
-		result := executeSingleToolCall(runCtx, e.tools, ent.call, e.config, ent.failCount, e.sink)
+		result := executeSingleToolCall(runCtx, e.tools, ent.execution, e.config, ent.failCount, e.sink)
 
 		e.mu.Lock()
 		defer e.mu.Unlock()

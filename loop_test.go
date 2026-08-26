@@ -118,7 +118,7 @@ func TestAgentLoop_ModelMiddleware(t *testing.T) {
 				order = append(order, "before_turn")
 				return []AgentMessage{UserMsg("prepared model context")}, nil
 			},
-			ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, call ModelCall, next ModelExecuteFunc) (ModelResult, error) {
+			ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
 				order = append(order, "before_model")
 				if call.TurnIndex != 1 {
 					t.Fatalf("model call turn = %d, want 1", call.TurnIndex)
@@ -210,7 +210,7 @@ func TestAgentLoop_ModelMiddlewareErrorStopsRun(t *testing.T) {
 					modelCalls++
 					return &LLMResponse{Message: assistantMsg("unexpected", StopReasonStop)}, nil
 				}),
-				ModelMiddlewares: []ModelMiddleware{func(context.Context, ModelCall, ModelExecuteFunc) (ModelResult, error) {
+				ModelMiddlewares: []ModelMiddleware{func(context.Context, ModelExecution, ModelExecuteFunc) (ModelResult, error) {
 					return ModelResult{}, errors.New("prepare call failed")
 				}},
 			},
@@ -237,7 +237,7 @@ func TestAgentLoop_ModelMiddlewareErrorStopsRun(t *testing.T) {
 					committed = append(committed, message)
 					return nil
 				},
-				ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, call ModelCall, next ModelExecuteFunc) (ModelResult, error) {
+				ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
 					result, err := next(ctx, call)
 					if err != nil {
 						return result, err
@@ -331,6 +331,10 @@ func TestCallLLM_CommitsProjectedContextWhenRequested(t *testing.T) {
 	if compacted.Compaction == nil || compacted.Compaction.Reason != CompactReasonThreshold {
 		t.Fatalf("unexpected context compaction event: %+v", compacted)
 	}
+	wantExecution := Execution{ID: "compact-1-threshold", Kind: ExecutionKindCompact, TurnIndex: 1, Attempt: 1}
+	if compacted.Execution == nil || *compacted.Execution != wantExecution {
+		t.Fatalf("context compaction execution = %#v, want %#v", compacted.Execution, wantExecution)
+	}
 }
 
 func TestCallLLMWithRetry_EmitsOverflowCompaction(t *testing.T) {
@@ -375,6 +379,10 @@ func TestCallLLMWithRetry_EmitsOverflowCompaction(t *testing.T) {
 	compacted, _ := findEvent(gotEvents, EventContextCompacted)
 	if compacted.Compaction == nil || compacted.Compaction.Reason != CompactReasonOverflow || !compacted.Compaction.Summarized {
 		t.Fatalf("unexpected overflow compaction event: %+v", compacted)
+	}
+	wantExecution := Execution{ID: "compact-1-overflow", Kind: ExecutionKindCompact, TurnIndex: 1, Attempt: 1}
+	if compacted.Execution == nil || *compacted.Execution != wantExecution {
+		t.Fatalf("overflow compaction execution = %#v, want %#v", compacted.Execution, wantExecution)
 	}
 }
 
@@ -568,9 +576,9 @@ func TestAgentLoop_Middleware(t *testing.T) {
 					return &LLMResponse{Message: assistantMsg("done", StopReasonStop)}, nil
 				}),
 				ToolMiddlewares: []ToolMiddleware{
-					func(ctx context.Context, call ToolCall, next ToolExecuteFunc) (ToolResult, error) {
+					func(ctx context.Context, execution ToolExecution, next ToolExecuteFunc) (ToolResult, error) {
 						log = append(log, "before")
-						out, err := next(ctx, call)
+						out, err := next(ctx, execution)
 						log = append(log, "after")
 						return out, err
 					},
@@ -2061,7 +2069,7 @@ func TestCallLLMStream_StreamInitErrorBubbles(t *testing.T) {
 	m := &streamErrModel{err: fmt.Errorf("provider unavailable")}
 	events := make(chan Event, 4)
 
-	_, _, err := callLLMStream(context.Background(), m, nil, nil, nil, eventSink{ctx: context.Background(), ch: events})
+	_, _, err := callLLMStream(context.Background(), m, newModelExecution(1, 1), eventSink{ctx: context.Background(), ch: events})
 	close(events)
 
 	if err == nil {
@@ -2099,7 +2107,7 @@ func TestCallLLMStream_PartialStreamErrorOnTruncation(t *testing.T) {
 	m := &partialStreamModel{text: "half a sente"}
 	events := make(chan Event, 16)
 
-	_, _, err := callLLMStream(context.Background(), m, nil, nil, nil, eventSink{ctx: context.Background(), ch: events})
+	_, _, err := callLLMStream(context.Background(), m, newModelExecution(1, 1), eventSink{ctx: context.Background(), ch: events})
 	close(events)
 
 	var partialErr *PartialStreamError
@@ -2175,7 +2183,7 @@ func TestAgentLoop_ModelMiddlewareWrapsEachAttempt(t *testing.T) {
 		LoopConfig{
 			Model:      m,
 			MaxRetries: 2,
-			ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, call ModelCall, next ModelExecuteFunc) (ModelResult, error) {
+			ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
 				attempts = append(attempts, call.Attempt)
 				callIDs = append(callIDs, call.ID)
 				call.Options = append(call.Options, WithToolChoice("required"))
@@ -2196,7 +2204,31 @@ func TestAgentLoop_ModelMiddlewareWrapsEachAttempt(t *testing.T) {
 	if !slices.Equal(m.toolChoices, []any{"required", "required"}) {
 		t.Fatalf("retry tool choices = %#v, want required on both attempts", m.toolChoices)
 	}
-	requireEvent(t, events, EventRetry)
+	var starts, ends []Execution
+	var retryExecution *Execution
+	for _, event := range events {
+		if event.Execution == nil {
+			continue
+		}
+		switch event.Type {
+		case EventModelExecStart:
+			starts = append(starts, *event.Execution)
+		case EventModelExecEnd:
+			ends = append(ends, *event.Execution)
+		case EventRetry:
+			retryExecution = event.Execution
+		}
+	}
+	wantExecutions := []Execution{
+		{ID: "model-1", Kind: ExecutionKindModel, TurnIndex: 1, Attempt: 1},
+		{ID: "model-1", Kind: ExecutionKindModel, TurnIndex: 1, Attempt: 2},
+	}
+	if !slices.Equal(starts, wantExecutions) || !slices.Equal(ends, wantExecutions) {
+		t.Fatalf("model execution events = starts:%#v ends:%#v, want %#v", starts, ends, wantExecutions)
+	}
+	if retryExecution == nil || *retryExecution != wantExecutions[0] {
+		t.Fatalf("retry execution = %#v, want failed attempt %#v", retryExecution, wantExecutions[0])
+	}
 }
 
 func TestAgentLoop_PanicEmitsAgentEnd(t *testing.T) {

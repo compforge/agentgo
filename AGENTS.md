@@ -42,6 +42,8 @@ agentgo/
    `AgentState` 只声明自己的可编码字段，持久化、进程交接、RPC 与调用结果对账均由宿主组合。
 7. **版本随公开契约演进**：`VERSION` 表达仓库当前发布版本；公开 API、可观察行为或依赖基线变化时，
    在同一 PR 中按语义版本同步升级，避免代码能力与可识别版本脱节。
+8. **Execution 是运行坐标而非外部账本模型**：逻辑执行在一次 Run 内保持稳定 `ID`，物理重试递增
+   `Attempt`；Middleware 与 Event 共享该坐标，Ledger、Trace 等宿主适配负责赋予跨 Run 语义。
 
 ## References
 
