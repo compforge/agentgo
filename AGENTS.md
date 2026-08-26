@@ -14,6 +14,7 @@ Event、调度与多 Agent 的通用执行能力，但不内建具体业务流�
 ```text
 agentgo/
 ├── *.go          Agent / AgentLoop、AgentMessage / Message、Tool、Event、Context 契约及调度入口
+├── codec/        通用 tagged value、类型注册与 JSON 编解码
 ├── context/      默认 ContextEngine、可替换 Compactor、投影、压缩、summary 与 overflow recovery
 ├── llm/          模型 Provider 适配；核心包不依赖具体 LLM SDK
 ├── proxy/        远端模型代理适配
@@ -37,8 +38,8 @@ agentgo/
    commit/recovery 契约可以替换历史，并报告可观察的 compaction 事实。
 5. **公开 API 保持克制**：新增接口前先确认是否能作为现有 AgentMessage、Event、Tool 或 Context
    可选能力表达；Go 改动提交前运行 `go test ./...` 与 `go build ./...`。
-6. **状态机制不绑定恢复策略**：`AgentState` 只表达 Loop 在完整 turn 边界可继续执行的状态；checkpoint
-   存储、调用结果对账与副作用恢复由宿主通过 Run/Turn hook 和 Model/Tool middleware 组合。
+6. **编码机制不绑定存储或传输策略**：`codec` 提供通用 tagged value、类型注册和编解码机制；
+   `AgentState` 只声明自己的可编码字段，持久化、进程交接、RPC 与调用结果对账均由宿主组合。
 7. **版本随公开契约演进**：`VERSION` 表达仓库当前发布版本；公开 API、可观察行为或依赖基线变化时，
    在同一 PR 中按语义版本同步升级，避免代码能力与可识别版本脱节。
 

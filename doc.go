@@ -26,8 +26,10 @@
 // A small, stable surface carries most uses: [Agent], [AgentLoop], [Event],
 // [Tool], [AgentMessage], and [Message]. AgentMessage is the application
 // transcript type; Message is the model protocol type produced only at the
-// call boundary. The rest is opt-in — context strategies, stop guards,
-// sub-agents, middleware — reached only when a use case needs it.
+// call boundary. [NewCodec] supplies AgentGo's built-in portable state types;
+// applications may extend it with their own concrete messages. The rest is
+// opt-in — context strategies, stop guards, sub-agents, middleware — reached
+// only when a use case needs it.
 //
 // Models are adapters behind the [ChatModel] interface; the kernel imports no
 // LLM SDK. Provider errors are classified through the [RetryableError] and

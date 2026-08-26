@@ -191,7 +191,7 @@ func commitMessage(currentCtx *AgentContext, newMessages *[]AgentMessage, config
 //   - Streamed tool-call lifecycle signals are authoritative; stop reasons are
 //     only hints and must not be used as the sole source of tool state.
 //   - Tool execution starts only after the complete assistant message has been
-//     committed. This lets CommitMessage establish the durable tool-call
+//     committed. This lets CommitMessage establish the tool-call
 //     record before a tool can produce side effects.
 //   - Tool results are appended after the assistant message that requested them.
 //   - Steering stops not-yet-started tools. Started tools follow their
@@ -853,7 +853,7 @@ func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, tur
 }
 
 // modelCallID is derived from the turn rather than the physical attempt so a
-// retry—or a run restored from the preceding turn checkpoint—addresses the
+// retry—or a run reloaded from the preceding turn boundary—addresses the
 // same logical call. Hosts that persist calls must scope this opaque ID with
 // their own run identity.
 func modelCallID(turnIndex int) string {

@@ -86,15 +86,15 @@ func ReportToolProgress(ctx context.Context, progress ProgressPayload) {
 // captured raw text — pointing at the real root cause instead of running
 // "missing field" checks against the {} placeholder.
 type ToolCall struct {
-	ID             string          `json:"id"`
-	Name           string          `json:"name"`
-	Args           json.RawMessage `json:"args"`
-	ArgsInvalid    bool            `json:"args_invalid,omitempty"`
-	ArgsRawText    string          `json:"args_raw_text,omitempty"`
-	ArgsParseError string          `json:"args_parse_error,omitempty"`
+	ID             string          `json:"id" codec:"id"`
+	Name           string          `json:"name" codec:"name"`
+	Args           json.RawMessage `json:"args" codec:"args"`
+	ArgsInvalid    bool            `json:"args_invalid,omitempty" codec:"args_invalid,omitempty"`
+	ArgsRawText    string          `json:"args_raw_text,omitempty" codec:"args_raw_text,omitempty"`
+	ArgsParseError string          `json:"args_parse_error,omitempty" codec:"args_parse_error,omitempty"`
 	// ThoughtSignature is an opaque provider reasoning signature (Gemini 3) that
 	// must be persisted and replayed verbatim across turns. Empty when absent.
-	ThoughtSignature string `json:"thought_signature,omitempty"`
+	ThoughtSignature string `json:"thought_signature,omitempty" codec:"thought_signature,omitempty"`
 }
 
 // ToolResult represents a tool execution outcome.
