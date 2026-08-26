@@ -382,7 +382,11 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 			sink.emit(Event{Type: EventMessageEnd, Message: assistantMsg})
 			sink.emit(Event{Type: EventModelResponse, Message: assistantMsg})
 			turnCount++
-			sink.emit(Event{Type: EventTurnEnd, Message: assistantMsg})
+			state.Progress.NextTurn = false
+			state.Progress.PendingMessages = nil
+			if !runAfterTurn(turnCount, assistantMsg, nil) {
+				return
+			}
 			reason := EndReasonError
 			if assistantMsg.StopReason == StopReasonAborted {
 				reason = EndReasonAborted

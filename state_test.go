@@ -115,6 +115,50 @@ func TestAgentLoopRunHooksExecuteOnce(t *testing.T) {
 	}
 }
 
+func TestAgentLoopTerminalModelMessageProducesCheckpoint(t *testing.T) {
+	tests := []struct {
+		name       string
+		stopReason StopReason
+		endReason  EndReason
+	}{
+		{name: "error", stopReason: StopReasonError, endReason: EndReasonError},
+		{name: "aborted", stopReason: StopReasonAborted, endReason: EndReasonAborted},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var checkpoint AgentState
+			var final AfterRunContext
+			events := runTestLoop(t,
+				[]AgentMessage{UserMsg("question")},
+				AgentContext{},
+				LoopConfig{
+					Model: mockModel(assistantMsg("terminal", tt.stopReason)),
+					AfterTurn: func(_ context.Context, turn AfterTurnContext) error {
+						checkpoint = turn.State
+						return nil
+					},
+					AfterRun: func(_ context.Context, run AfterRunContext) error {
+						final = run
+						return nil
+					},
+				},
+			)
+
+			if checkpoint.Progress.CompletedTurns != 1 || checkpoint.Progress.NextTurn {
+				t.Fatalf("terminal checkpoint progress = %#v", checkpoint.Progress)
+			}
+			if final.State.Progress.CompletedTurns != 1 || final.Summary.TurnCount != 1 || final.Summary.EndReason != tt.endReason {
+				t.Fatalf("terminal final state/summary = %#v / %#v", final.State.Progress, final.Summary)
+			}
+			turnEnd, ok := findEvent(events, EventTurnEnd)
+			if !ok || turnEnd.State == nil || turnEnd.State.Progress.CompletedTurns != 1 {
+				t.Fatalf("terminal turn_end = %#v", turnEnd)
+			}
+		})
+	}
+}
+
 func TestAgentContinueRestoresStateInBeforeRun(t *testing.T) {
 	restored := AgentState{
 		Messages: []AgentMessage{UserMsg("restored request")},

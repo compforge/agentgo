@@ -39,6 +39,8 @@ agentgo/
    可选能力表达；Go 改动提交前运行 `go test ./...` 与 `go build ./...`。
 6. **状态机制不绑定恢复策略**：`AgentState` 只表达 Loop 在完整 turn 边界可继续执行的状态；checkpoint
    存储、调用结果对账与副作用恢复由宿主通过 Run/Turn hook 和 Model/Tool middleware 组合。
+7. **版本随公开契约演进**：`VERSION` 表达仓库当前发布版本；公开 API、可观察行为或依赖基线变化时，
+   在同一 PR 中按语义版本同步升级，避免代码能力与可识别版本脱节。
 
 ## References
 

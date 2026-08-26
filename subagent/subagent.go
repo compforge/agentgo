@@ -15,7 +15,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/compforge/agentgo"
 	"github.com/compforge/agentgo/schema"
@@ -1020,22 +1019,11 @@ func (r *Runner) run(ctx context.Context, agentName, taskStr string, modelOverri
 		case agentgo.EventToolExecEnd:
 			if opts.reportProgress {
 				if ev.IsError {
-					errMsg := string(ev.Result)
-					if len(errMsg) > 200 {
-						// Back the cut up to a rune boundary: splitting a
-						// multi-byte UTF-8 sequence would render mojibake
-						// in progress displays.
-						cut := 200
-						for cut > 0 && !utf8.RuneStart(errMsg[cut]) {
-							cut--
-						}
-						errMsg = errMsg[:cut]
-					}
 					agentgo.ReportToolProgress(ctx, agentgo.ProgressPayload{
 						Kind:    agentgo.ProgressToolError,
 						Agent:   agentName,
 						Tool:    ev.Tool,
-						Message: errMsg,
+						Message: toolErrorMessage(ev.Result),
 						IsError: true,
 					})
 				} else {
@@ -1084,12 +1072,17 @@ func (r *Runner) run(ctx context.Context, agentName, taskStr string, modelOverri
 			}
 		case agentgo.EventRetry:
 			if opts.reportProgress && ev.RetryInfo != nil {
+				var meta json.RawMessage
+				if ev.RetryInfo.Delay > 0 {
+					meta = json.RawMessage(fmt.Sprintf(`{"retry_delay_ms":%d}`, ev.RetryInfo.Delay.Milliseconds()))
+				}
 				agentgo.ReportToolProgress(ctx, agentgo.ProgressPayload{
 					Kind:       agentgo.ProgressRetry,
 					Agent:      agentName,
 					Attempt:    ev.RetryInfo.Attempt,
 					MaxRetries: ev.RetryInfo.MaxRetries,
 					Message:    ev.RetryInfo.Err.Error(),
+					Meta:       meta,
 				})
 			}
 		case agentgo.EventError:
@@ -1108,6 +1101,14 @@ func (r *Runner) run(ctx context.Context, agentName, taskStr string, modelOverri
 		TerminalResult: terminalToolResult,
 		Usage:          *su,
 	}, nil
+}
+
+func toolErrorMessage(result json.RawMessage) string {
+	var message *string
+	if json.Unmarshal(result, &message) == nil && message != nil {
+		return *message
+	}
+	return string(result)
 }
 
 func reportContext(ctx context.Context, agentName string, mgr agentgo.ContextManager) {
