@@ -19,10 +19,13 @@ const (
 	EventAgentEnd   EventType = "agent_end"
 	EventTurnStart  EventType = "turn_start"
 	EventTurnEnd    EventType = "turn_end"
-	// EventModelResponse fires after every model call completes, including any
-	// tool executions it triggered. One model invocation produces one event —
-	// not one logical user exchange — so steering injections and length
-	// recoveries each produce additional ones within the same run.
+	// EventModelExecStart and EventModelExecEnd cover every AgentGo-owned model
+	// attempt, including internal context summarization calls.
+	EventModelExecStart EventType = "model_exec_start"
+	EventModelExecEnd   EventType = "model_exec_end"
+	// EventModelResponse fires after a conversation model call and any tool
+	// executions it triggered. Internal model calls such as context summaries
+	// use model_exec_start/model_exec_end without becoming conversation output.
 	EventModelResponse  EventType = "model_response"
 	EventMessageStart   EventType = "message_start"
 	EventMessageUpdate  EventType = "message_update"
@@ -82,6 +85,7 @@ const (
 // This is the single output channel for all lifecycle information.
 type Event struct {
 	Type         EventType
+	Execution    *Execution      // shared coordinate for model/tool/compaction execution facts
 	Message      AgentMessage    // for message_start/update/end, turn_end
 	Delta        string          // text delta for message_update
 	DeltaKind    DeltaKind       // for message_update: what kind of delta
@@ -106,7 +110,6 @@ type Event struct {
 
 // RetryInfo carries retry context for EventRetry events.
 type RetryInfo struct {
-	Attempt    int
 	MaxRetries int
 	Delay      time.Duration
 	Err        error

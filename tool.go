@@ -347,14 +347,23 @@ func toolInterruptBehavior(tool Tool, args json.RawMessage) InterruptBehavior {
 	return InterruptBehaviorBlock
 }
 
-// ToolExecuteFunc advances one complete tool call through validation,
+// ToolExecution combines the model-issued ToolCall with the Harness execution
+// coordinate for one physical attempt. Middleware may adjust Call.Args, but
+// must preserve Execution and the call's ID and Name. AgentLoop uses Call.ID as
+// Execution.ID so protocol and execution events share one tool-call identity.
+type ToolExecution struct {
+	Execution
+	Call ToolCall
+}
+
+// ToolExecuteFunc advances one complete tool execution through validation,
 // authorization and execution. It is the next function in middleware chains.
-type ToolExecuteFunc func(context.Context, ToolCall) (ToolResult, error)
+type ToolExecuteFunc func(context.Context, ToolExecution) (ToolResult, error)
 
 // ToolMiddleware wraps tool execution with cross-cutting concerns.
 // Call next to continue the chain; skip next to short-circuit execution.
 // Example: logging, timing, argument/result modification, audit.
-type ToolMiddleware func(context.Context, ToolCall, ToolExecuteFunc) (ToolResult, error)
+type ToolMiddleware func(context.Context, ToolExecution, ToolExecuteFunc) (ToolResult, error)
 
 // ---------------------------------------------------------------------------
 // FuncTool

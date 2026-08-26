@@ -52,6 +52,10 @@ type Config struct {
 	// ToolMiddlewares wrap each tool execution in this sub-agent's runs
 	// (outermost first). Mirrors agentgo.WithToolMiddlewares.
 	ToolMiddlewares []agentgo.ToolMiddleware
+	// ModelMiddlewares wrap every model attempt in this sub-agent, including
+	// model calls made by its ContextManager. Mirrors
+	// agentgo.WithModelMiddlewares.
+	ModelMiddlewares []agentgo.ModelMiddleware
 
 	// ThinkingLevel sets the reasoning depth for this sub-agent's runs.
 	// Empty ("") leaves it unspecified (model/provider default). Mirrors
@@ -909,6 +913,7 @@ func (r *Runner) run(ctx context.Context, agentName, taskStr string, modelOverri
 		MaxTurns:                 cfg.MaxTurns,
 		MaxRetries:               cfg.MaxRetries,
 		ToolGate:                 cfg.ToolGate,
+		ModelMiddlewares:         cfg.ModelMiddlewares,
 		ToolMiddlewares:          cfg.ToolMiddlewares,
 		ContextManager:           contextManager,
 		ToolResultMessageFactory: cfg.ToolResultMessageFactory,
@@ -1072,6 +1077,10 @@ func (r *Runner) run(ctx context.Context, agentName, taskStr string, modelOverri
 			}
 		case agentgo.EventRetry:
 			if opts.reportProgress && ev.RetryInfo != nil {
+				attempt := 0
+				if ev.Execution != nil {
+					attempt = ev.Execution.Attempt
+				}
 				var meta json.RawMessage
 				if ev.RetryInfo.Delay > 0 {
 					meta = json.RawMessage(fmt.Sprintf(`{"retry_delay_ms":%d}`, ev.RetryInfo.Delay.Milliseconds()))
@@ -1079,7 +1088,7 @@ func (r *Runner) run(ctx context.Context, agentName, taskStr string, modelOverri
 				agentgo.ReportToolProgress(ctx, agentgo.ProgressPayload{
 					Kind:       agentgo.ProgressRetry,
 					Agent:      agentName,
-					Attempt:    ev.RetryInfo.Attempt,
+					Attempt:    attempt,
 					MaxRetries: ev.RetryInfo.MaxRetries,
 					Message:    ev.RetryInfo.Err.Error(),
 					Meta:       meta,

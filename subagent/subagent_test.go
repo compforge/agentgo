@@ -837,9 +837,9 @@ func TestTool_GateAndMiddlewarePassThrough(t *testing.T) {
 				return &agentgo.GateDecision{Allowed: true, UpdatedArgs: json.RawMessage(`{"value":"rewritten"}`)}, nil
 			},
 			ToolMiddlewares: []agentgo.ToolMiddleware{
-				func(ctx context.Context, call agentgo.ToolCall, next agentgo.ToolExecuteFunc) (agentgo.ToolResult, error) {
+				func(ctx context.Context, execution agentgo.ToolExecution, next agentgo.ToolExecuteFunc) (agentgo.ToolResult, error) {
 					middlewareCalls++
-					return next(ctx, call)
+					return next(ctx, execution)
 				},
 			},
 		}
@@ -878,6 +878,27 @@ func TestTool_GateAndMiddlewarePassThrough(t *testing.T) {
 			t.Fatalf("output = %q, want the loop to continue after denial", res.Output)
 		}
 	})
+}
+
+func TestRunner_ModelMiddlewarePassThrough(t *testing.T) {
+	var executions []agentgo.Execution
+	cfg := simpleAgent("writer", "done")
+	cfg.ModelMiddlewares = []agentgo.ModelMiddleware{
+		func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
+			executions = append(executions, execution.Execution)
+			return next(ctx, execution)
+		},
+	}
+
+	if _, err := NewRunner(cfg).Run(context.Background(), "writer", "go"); err != nil {
+		t.Fatal(err)
+	}
+	if len(executions) != 1 {
+		t.Fatalf("model executions = %#v, want one", executions)
+	}
+	if got := executions[0]; got.ID != "model-1" || got.Kind != agentgo.ExecutionKindModel || got.TurnIndex != 1 || got.Attempt != 1 {
+		t.Fatalf("model execution = %#v", got)
+	}
 }
 
 // ThinkingOff must be forwarded explicitly (not dropped like an empty level), so

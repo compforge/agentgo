@@ -100,8 +100,9 @@ type LoopConfig struct {
 	// FollowUp: called when the agent would otherwise stop.
 	GetFollowUpMessages func() []AgentMessage
 
-	// ModelMiddlewares wrap each physical provider attempt. ToolMiddlewares wrap
-	// each tool execution. First middleware is outermost.
+	// ModelMiddlewares wrap each AgentGo-owned physical model attempt, including
+	// context summarization. ToolMiddlewares wrap each tool execution. First
+	// middleware is outermost.
 	ModelMiddlewares []ModelMiddleware
 	ToolMiddlewares  []ToolMiddleware
 

@@ -89,6 +89,8 @@ func runSummaryCompaction(
 	}
 
 	var summary string
+	historyExecution := summaryExecution(ctx, "summary-history")
+	prefixExecution := summaryExecution(ctx, "summary-turn-prefix")
 
 	needTurnPrefix := cut.isSplitTurn && cut.turnStartIndex >= 0
 	var turnPrefix []agentgo.AgentMessage
@@ -115,13 +117,13 @@ func runSummaryCompaction(
 			summary = "No prior history."
 		} else {
 			var err error
-			summary, err = generateSummary(ctx, cfg.Model, prompts, toSummarize, previousSummary, historyOpts...)
+			summary, err = generateSummary(ctx, cfg.Model, historyExecution, prompts, toSummarize, previousSummary, historyOpts...)
 			if err != nil {
 				return nil, nil, fmt.Errorf("compaction: %w", err)
 			}
 		}
 
-		prefixSummary, err := generateTurnPrefixSummary(ctx, cfg.Model, prompts, turnPrefix, prefixOpts...)
+		prefixSummary, err := generateTurnPrefixSummary(ctx, cfg.Model, prefixExecution, prompts, turnPrefix, prefixOpts...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("compaction turn prefix: %w", err)
 		}
@@ -130,7 +132,7 @@ func runSummaryCompaction(
 		}
 	} else {
 		var err error
-		summary, err = generateSummary(ctx, cfg.Model, prompts, toSummarize, previousSummary, historyOpts...)
+		summary, err = generateSummary(ctx, cfg.Model, historyExecution, prompts, toSummarize, previousSummary, historyOpts...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("compaction: %w", err)
 		}
@@ -172,6 +174,18 @@ func runSummaryCompaction(
 		ModifiedFiles:  modifiedFiles,
 	}
 	return result, info, nil
+}
+
+// summaryExecution derives a deterministic child coordinate when compaction is
+// owned by AgentLoop, while keeping direct ContextEngine use standalone.
+func summaryExecution(ctx context.Context, name string) agentgo.Execution {
+	execution := agentgo.Execution{ID: name, Kind: agentgo.ExecutionKindModel, Attempt: 1}
+	if parent, ok := agentgo.ExecutionFromContext(ctx); ok {
+		execution.ID = parent.ID + "/" + name
+		execution.ParentID = parent.ID
+		execution.TurnIndex = parent.TurnIndex
+	}
+	return execution
 }
 
 // stripImageBlocks returns a copy of msgs with image content blocks removed.

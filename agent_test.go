@@ -15,7 +15,7 @@ func TestAgent_ModelMiddlewareOption(t *testing.T) {
 	middlewareCalls := 0
 	agent := NewAgent(
 		WithModel(mockModel(assistantMsg("done", StopReasonStop))),
-		WithModelMiddlewares(func(ctx context.Context, call ModelCall, next ModelExecuteFunc) (ModelResult, error) {
+		WithModelMiddlewares(func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
 			middlewareCalls++
 			return next(ctx, call)
 		}),

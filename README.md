@@ -10,6 +10,7 @@ AgentGo evolved from [AgentCore](https://github.com/voocel/agentcore) and now de
 
 - A message-native Agent Loop: applications keep `AgentMessage`; model-level `Message` exists only at the call boundary.
 - A single event stream for model output, tools, context projection and compaction, retries, and completion.
+- One execution coordinate across middleware and events for model, tool, and compaction work.
 - Replaceable models, tools, context management, compaction, stop guards, turn hooks, and permission gates.
 - Stateful `Agent` and standalone `AgentLoop` entry points over the same execution kernel.
 - Steering, follow-up, background tasks, sub-agents, and multi-agent team primitives.
@@ -88,6 +89,8 @@ var state agentgo.AgentState
 _ = stateCodec.Unmarshal(data, &state)
 ```
 
+`Execution` gives expensive or externally visible work one run-scoped identity. A retry keeps the same `ID` and increments `Attempt`; `ModelExecution` and `ToolExecution` carry that coordinate through middleware and the Event stream. Internal summary calls are child executions of compaction, so hosts can correlate or replay known outcomes without AgentGo depending on a ledger or tracing model.
+
 ## Extension points
 
 | Need | Contract |
@@ -100,8 +103,8 @@ _ = stateCodec.Unmarshal(data, &state)
 | Compaction policy | `context.Compactor` |
 | Run state injection and finalization | `WithBeforeRun` / `WithAfterRun` |
 | Turn preparation and state observation | `WithBeforeTurn` / `WithAfterTurn` |
-| Model-call interception | `WithModelMiddlewares` |
-| Tool-call interception | `WithToolMiddlewares` |
+| Model execution interception | `WithModelMiddlewares` |
+| Tool execution interception | `WithToolMiddlewares` |
 | Stop policy | `StopGuard` |
 | UI, logging, and trajectory capture | `<-chan Event` / `Agent.Subscribe` |
 

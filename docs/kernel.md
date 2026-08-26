@@ -28,8 +28,16 @@ AgentGo 原生支持**轨迹驱动的 Loop 优化**：Event stream 记录实际�
 portable projection，应用再注册自定义 `AgentMessage` 的具体类型。
 
 编码能力本身不决定数据保存在哪里、何时传输或者如何重新执行。宿主可以把编码结果用于持久化、进程
-交接或未来 RPC，并在装载状态后重新绑定执行依赖。`ModelCall.ID` 与 `ToolCall.ID` 都标识逻辑调用；
-provider 的单次请求 ID 和外部系统的全局身份由各自边界另行管理。
+交接或未来 RPC，并在装载状态后重新绑定执行依赖。
+
+模型、工具与压缩等昂贵或具有外部作用的动作共享轻量 `Execution` 坐标。`ID` 在一次 Run 内标识逻辑
+执行，重试保持 `ID` 不变并递增 `Attempt`；`ParentID` 表达 summary model execution 与 compaction 等
+必要的父子关系。`ModelExecution`、`ToolExecution` 是带具体输入的类型化边界，Middleware 与 Event 使用
+同一坐标，避免宿主从事件顺序猜测关联。`ToolCall` 仍是模型协议中的工具请求，`Execution` 不替代它。
+
+Execution 只表达 AgentGo 内部执行事实，不承诺跨 Run 全局唯一，也不吸收 Ledger、Trace 或工作流模型。
+宿主负责把它映射到持久化身份、复用已知结果或外部 provider request ID。由 AgentLoop 发起的 threshold /
+overflow compaction 会自动建立坐标；直接调用 ContextManager 的宿主则拥有该调用的执行作用域。
 
 ## ContextItem 与 ContextDemand
 

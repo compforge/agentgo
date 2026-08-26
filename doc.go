@@ -23,6 +23,11 @@
 // policy into the kernel. A single consumer can drive any front end (TUI, web,
 // Slack, logs) without the kernel knowing which.
 //
+// Expensive or externally visible work carries an [Execution] coordinate through
+// middleware and events. [ModelExecution] and [ToolExecution] keep one logical
+// ID across retries while incrementing the attempt, allowing hosts to correlate
+// durable outcomes without coupling AgentGo to a ledger or tracing backend.
+//
 // A small, stable surface carries most uses: [Agent], [AgentLoop], [Event],
 // [Tool], [AgentMessage], and [Message]. AgentMessage is the application
 // transcript type; Message is the model protocol type produced only at the
