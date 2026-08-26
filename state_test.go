@@ -15,6 +15,10 @@ import (
 
 func TestAgentStateCodecRoundTripPortableProjection(t *testing.T) {
 	userMessage := UserMsg("hello")
+	userMessage.Metadata = map[string]any{
+		"$type": "agentgo.message.v1",
+		"value": "application metadata",
+	}
 	assistantMessage := assistantMsg("world", StopReasonToolUse)
 	assistantMessage.Content = append(assistantMessage.Content, ToolCallBlock(ToolCall{
 		ID:   "read-1",
@@ -60,6 +64,10 @@ func TestAgentStateCodecRoundTripPortableProjection(t *testing.T) {
 
 	if len(restored.Messages) != 2 || restored.Messages[0].TextContent() != "hello" || restored.Messages[1].TextContent() != "world" {
 		t.Fatalf("restored messages = %#v", restored.Messages)
+	}
+	restoredUser := restored.Messages[0].(Message)
+	if !reflect.DeepEqual(restoredUser.Metadata, userMessage.Metadata) {
+		t.Fatalf("restored metadata = %#v, want %#v", restoredUser.Metadata, userMessage.Metadata)
 	}
 	restoredAssistant := restored.Messages[1].(Message)
 	toolCalls := restoredAssistant.ToolCalls()

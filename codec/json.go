@@ -8,7 +8,10 @@ import (
 	"strings"
 )
 
-const fieldTag = "codec"
+const (
+	fieldTag         = "codec"
+	escapedObjectKey = "$object"
+)
 
 var (
 	anyType           = reflect.TypeOf((*any)(nil)).Elem()
@@ -19,6 +22,10 @@ var (
 
 type jsonCodec struct {
 	registry *registry
+}
+
+type escapedObject struct {
+	Value map[string]any `json:"$object"`
 }
 
 // NewJSON constructs a JSON Codec with an isolated type registry.
@@ -123,20 +130,7 @@ func (c *jsonCodec) encode(value reflect.Value, path string, allowTag bool) (any
 		}
 		return items, nil
 	case reflect.Map:
-		if value.Type().Key().Kind() != reflect.String {
-			return nil, fmt.Errorf("encode %s: map key type %s is not supported", path, value.Type().Key())
-		}
-		fields := make(map[string]any, value.Len())
-		iterator := value.MapRange()
-		for iterator.Next() {
-			name := iterator.Key().String()
-			encoded, err := c.encode(iterator.Value(), joinPath(path, name), true)
-			if err != nil {
-				return nil, err
-			}
-			fields[name] = encoded
-		}
-		return fields, nil
+		return c.encodeMap(value, path)
 	default:
 		return nil, fmt.Errorf("encode %s: unsupported Go type %s", path, value.Type())
 	}
@@ -153,7 +147,7 @@ func (c *jsonCodec) encodeRegistered(value reflect.Value, registered *registrati
 	return c.encode(reflect.ValueOf(representation), path, true)
 }
 
-func (c *jsonCodec) encodeStruct(value reflect.Value, path string) (map[string]any, error) {
+func (c *jsonCodec) encodeStruct(value reflect.Value, path string) (any, error) {
 	encoded := make(map[string]any)
 	seen := make(map[string]struct{})
 	taggedFields := 0
@@ -190,13 +184,41 @@ func (c *jsonCodec) encodeStruct(value reflect.Value, path string) (map[string]a
 	if taggedFields == 0 && typeInfo.NumField() > 0 {
 		return nil, fmt.Errorf("encode %s: struct %s has no codec-tagged fields; add tags or register a custom handler", path, typeInfo)
 	}
-	return encoded, nil
+	return escapeObject(encoded), nil
+}
+
+func (c *jsonCodec) encodeMap(value reflect.Value, path string) (any, error) {
+	if value.Type().Key().Kind() != reflect.String {
+		return nil, fmt.Errorf("encode %s: map key type %s is not supported", path, value.Type().Key())
+	}
+	fields := make(map[string]any, value.Len())
+	iterator := value.MapRange()
+	for iterator.Next() {
+		name := iterator.Key().String()
+		encoded, err := c.encode(iterator.Value(), joinPath(path, name), true)
+		if err != nil {
+			return nil, err
+		}
+		fields[name] = encoded
+	}
+	return escapeObject(fields), nil
 }
 
 func (c *jsonCodec) decode(raw json.RawMessage, target reflect.Type, path string) (reflect.Value, error) {
 	raw = bytes.TrimSpace(raw)
 	if bytes.Equal(raw, []byte("null")) {
 		return reflect.Zero(target), nil
+	}
+	if isJSONDecodeLeaf(target) {
+		return c.decodePlain(raw, target, path)
+	}
+
+	representation, escaped, err := parseEscapedObject(raw)
+	if err != nil {
+		return reflect.Value{}, fmt.Errorf("decode %s: %w", path, err)
+	}
+	if escaped {
+		return c.decodeEscapedObject(representation, target, path)
 	}
 
 	id, representation, tagged, err := parseTagged(raw)
@@ -242,7 +264,7 @@ func (c *jsonCodec) decode(raw json.RawMessage, target reflect.Type, path string
 
 func (c *jsonCodec) decodeRegistered(raw json.RawMessage, registered *registration, path string) (reflect.Value, error) {
 	if registered.defaultHandler {
-		return c.decodePlain(raw, registered.goType, path)
+		return c.decode(raw, registered.goType, path+".value")
 	}
 	representation, err := c.decode(raw, registered.representationType, path+".value")
 	if err != nil {
@@ -263,6 +285,13 @@ func (c *jsonCodec) decodeRegistered(raw json.RawMessage, registered *registrati
 }
 
 func (c *jsonCodec) decodePlain(raw json.RawMessage, target reflect.Type, path string) (reflect.Value, error) {
+	if isJSONDecodeLeaf(target) {
+		value := reflect.New(target)
+		if err := json.Unmarshal(raw, value.Interface()); err != nil {
+			return reflect.Value{}, fmt.Errorf("decode %s as %s: %w", path, target, err)
+		}
+		return value.Elem(), nil
+	}
 	if target.Kind() == reflect.Pointer {
 		decoded, err := c.decode(raw, target.Elem(), path)
 		if err != nil {
@@ -272,14 +301,6 @@ func (c *jsonCodec) decodePlain(raw json.RawMessage, target reflect.Type, path s
 		pointer.Elem().Set(decoded)
 		return pointer, nil
 	}
-	if target == jsonRawType || isByteSlice(target) || reflect.PointerTo(target).Implements(jsonUnmarshalType) {
-		value := reflect.New(target)
-		if err := json.Unmarshal(raw, value.Interface()); err != nil {
-			return reflect.Value{}, fmt.Errorf("decode %s as %s: %w", path, target, err)
-		}
-		return value.Elem(), nil
-	}
-
 	switch target.Kind() {
 	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
@@ -323,27 +344,60 @@ func (c *jsonCodec) decodePlain(raw json.RawMessage, target reflect.Type, path s
 		}
 		return result, nil
 	case reflect.Map:
-		if target.Key().Kind() != reflect.String {
-			return reflect.Value{}, fmt.Errorf("decode %s: map key type %s is not supported", path, target.Key())
-		}
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &fields); err != nil {
-			return reflect.Value{}, fmt.Errorf("decode %s as %s: %w", path, target, err)
-		}
-		result := reflect.MakeMapWithSize(target, len(fields))
-		for name, field := range fields {
-			decoded, err := c.decode(field, target.Elem(), joinPath(path, name))
-			if err != nil {
-				return reflect.Value{}, err
-			}
-			key := reflect.New(target.Key()).Elem()
-			key.SetString(name)
-			result.SetMapIndex(key, decoded)
-		}
-		return result, nil
+		return c.decodeMap(raw, target, path)
 	default:
 		return reflect.Value{}, fmt.Errorf("decode %s: unsupported Go type %s", path, target)
 	}
+}
+
+func (c *jsonCodec) decodeEscapedObject(raw json.RawMessage, target reflect.Type, path string) (reflect.Value, error) {
+	if target.Kind() == reflect.Pointer {
+		decoded, err := c.decodeEscapedObject(raw, target.Elem(), path)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		pointer := reflect.New(target.Elem())
+		pointer.Elem().Set(decoded)
+		return pointer, nil
+	}
+	switch target.Kind() {
+	case reflect.Interface:
+		if target.NumMethod() != 0 {
+			return reflect.Value{}, fmt.Errorf("decode %s: escaped object cannot implement %s", path, target)
+		}
+		value, err := c.decodeAnyObject(raw, path)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		return reflect.ValueOf(value), nil
+	case reflect.Struct:
+		return c.decodeStruct(raw, target, path)
+	case reflect.Map:
+		return c.decodeMap(raw, target, path)
+	default:
+		return reflect.Value{}, fmt.Errorf("decode %s: escaped object cannot be assigned to %s", path, target)
+	}
+}
+
+func (c *jsonCodec) decodeMap(raw json.RawMessage, target reflect.Type, path string) (reflect.Value, error) {
+	if target.Key().Kind() != reflect.String {
+		return reflect.Value{}, fmt.Errorf("decode %s: map key type %s is not supported", path, target.Key())
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return reflect.Value{}, fmt.Errorf("decode %s as %s: %w", path, target, err)
+	}
+	result := reflect.MakeMapWithSize(target, len(fields))
+	for name, field := range fields {
+		decoded, err := c.decode(field, target.Elem(), joinPath(path, name))
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		key := reflect.New(target.Key()).Elem()
+		key.SetString(name)
+		result.SetMapIndex(key, decoded)
+	}
+	return result, nil
 }
 
 func (c *jsonCodec) decodeStruct(raw json.RawMessage, target reflect.Type, path string) (reflect.Value, error) {
@@ -389,6 +443,13 @@ func (c *jsonCodec) decodeStruct(raw json.RawMessage, target reflect.Type, path 
 }
 
 func (c *jsonCodec) decodeAny(raw json.RawMessage, path string) (any, error) {
+	representation, escaped, err := parseEscapedObject(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode %s: %w", path, err)
+	}
+	if escaped {
+		return c.decodeAnyObject(representation, path)
+	}
 	_, _, tagged, err := parseTagged(raw)
 	if err != nil {
 		return nil, fmt.Errorf("decode %s: %w", path, err)
@@ -406,19 +467,7 @@ func (c *jsonCodec) decodeAny(raw json.RawMessage, path string) (any, error) {
 	}
 	switch raw[0] {
 	case '{':
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &fields); err != nil {
-			return nil, fmt.Errorf("decode %s: %w", path, err)
-		}
-		result := make(map[string]any, len(fields))
-		for name, field := range fields {
-			value, err := c.decodeAny(field, joinPath(path, name))
-			if err != nil {
-				return nil, err
-			}
-			result[name] = value
-		}
-		return result, nil
+		return c.decodeAnyObject(raw, path)
 	case '[':
 		var items []json.RawMessage
 		if err := json.Unmarshal(raw, &items); err != nil {
@@ -444,6 +493,38 @@ func (c *jsonCodec) decodeAny(raw json.RawMessage, path string) (any, error) {
 	}
 }
 
+func (c *jsonCodec) decodeAnyObject(raw json.RawMessage, path string) (map[string]any, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", path, err)
+	}
+	result := make(map[string]any, len(fields))
+	for name, field := range fields {
+		value, err := c.decodeAny(field, joinPath(path, name))
+		if err != nil {
+			return nil, err
+		}
+		result[name] = value
+	}
+	return result, nil
+}
+
+func parseEscapedObject(raw json.RawMessage) (json.RawMessage, bool, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '{' {
+		return nil, false, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, false, err
+	}
+	if len(fields) != 1 {
+		return nil, false, nil
+	}
+	value, escaped := fields[escapedObjectKey]
+	return value, escaped, nil
+}
+
 func parseTagged(raw json.RawMessage) (TypeID, json.RawMessage, bool, error) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || raw[0] != '{' {
@@ -466,6 +547,19 @@ func parseTagged(raw json.RawMessage) (TypeID, json.RawMessage, bool, error) {
 		return "", nil, false, fmt.Errorf("codec type must not be empty")
 	}
 	return id, valueRaw, true, nil
+}
+
+// escapeObject protects ordinary JSON objects that would otherwise be
+// mistaken for codec envelopes. Decoding removes exactly one wrapper and then
+// treats the enclosed value as a plain object, preserving arbitrary map keys.
+func escapeObject(fields map[string]any) any {
+	_, hasType := fields["$type"]
+	_, hasValue := fields["value"]
+	_, hasEscape := fields[escapedObjectKey]
+	if (hasType && hasValue) || (hasEscape && len(fields) == 1) {
+		return escapedObject{Value: fields}
+	}
+	return fields
 }
 
 func parseFieldTag(tag string) (name string, omitEmpty bool, err error) {
@@ -508,6 +602,13 @@ func isJSONLeaf(value reflect.Value) bool {
 
 func isByteSlice(value reflect.Type) bool {
 	return value.Kind() == reflect.Slice && value.Elem().Kind() == reflect.Uint8
+}
+
+func isJSONDecodeLeaf(target reflect.Type) bool {
+	if target == jsonRawType || isByteSlice(target) || target.Implements(jsonUnmarshalType) {
+		return true
+	}
+	return target.Kind() != reflect.Pointer && reflect.PointerTo(target).Implements(jsonUnmarshalType)
 }
 
 func joinPath(parent, child string) string {
