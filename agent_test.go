@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -195,6 +196,76 @@ func TestAgentInject_IsAtomicUnderConcurrentCalls(t *testing.T) {
 	}
 }
 
+func TestAgentExecutionErrorDoesNotBecomeConversationMessage(t *testing.T) {
+	providerErr := errors.New("provider unavailable")
+	var (
+		afterRunState AgentState
+		agentEndState AgentState
+		sawAgentEnd   bool
+	)
+	agent := NewAgent(
+		WithModel(funcModel(func(context.Context, *LLMRequest) (*LLMResponse, error) {
+			return nil, providerErr
+		})),
+		WithMaxRetries(0),
+		WithAfterRun(func(_ context.Context, run AfterRunContext) error {
+			afterRunState = run.State
+			return nil
+		}),
+	)
+	agent.Subscribe(func(ev Event) {
+		if ev.Type == EventAgentEnd && ev.State != nil {
+			agentEndState = *ev.State
+			sawAgentEnd = true
+		}
+	})
+
+	if err := agent.Prompt(context.Background(), "trigger"); err != nil {
+		t.Fatalf("prompt failed: %v", err)
+	}
+	agent.WaitForIdle()
+
+	if !sawAgentEnd {
+		t.Fatal("listener never received EventAgentEnd with state")
+	}
+	state := agent.State()
+	if state.Error != providerErr.Error() {
+		t.Fatalf("agent error = %q, want %q", state.Error, providerErr)
+	}
+	if !reflect.DeepEqual(afterRunState.Messages, agentEndState.Messages) {
+		t.Fatalf("AfterRun messages = %#v, EventAgentEnd messages = %#v", afterRunState.Messages, agentEndState.Messages)
+	}
+	if !reflect.DeepEqual(agentEndState.Messages, state.Messages) {
+		t.Fatalf("EventAgentEnd messages = %#v, Agent messages = %#v", agentEndState.Messages, state.Messages)
+	}
+	if len(state.Messages) != 1 || state.Messages[0].GetRole() != RoleUser || state.Messages[0].TextContent() != "trigger" {
+		t.Fatalf("execution error changed conversation: %#v", state.Messages)
+	}
+	if !reflect.DeepEqual(agentEndState.TotalUsage, state.TotalUsage) || !reflect.DeepEqual(agentEndState.Progress, state.Progress) {
+		t.Fatalf("Agent did not project final loop state: end=%#v agent=%#v", agentEndState, state)
+	}
+}
+
+func TestAgentTerminalErrorMessageRemainsInConversation(t *testing.T) {
+	agent := NewAgent(
+		WithModel(mockModel(assistantMsg("terminal", StopReasonError))),
+	)
+
+	if err := agent.Prompt(context.Background(), "trigger"); err != nil {
+		t.Fatalf("prompt failed: %v", err)
+	}
+	agent.WaitForIdle()
+
+	messages := agent.Messages()
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v, want committed user and terminal model messages", messages)
+	}
+	terminal, ok := messages[1].(Message)
+	if !ok || terminal.StopReason != StopReasonError || terminal.TextContent() != "terminal" {
+		t.Fatalf("terminal model message = %#v", messages[1])
+	}
+}
+
 // midStreamErrorModel emits a text delta (populating Agent.streamMessage)
 // then injects a StreamEventError so the agent surfaces EventError mid-stream.
 type midStreamErrorModel struct{}
@@ -260,17 +331,26 @@ func TestEventError_ClearsStreamMessageBeforeListeners(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for EventAgentEnd")
 	}
+	agent.WaitForIdle()
 
 	mu.Lock()
-	defer mu.Unlock()
-	if !sawMidStream {
+	gotSawMidStream := sawMidStream
+	gotSawError := sawError
+	gotErrorSnapshot := errorSnapshot
+	mu.Unlock()
+	if !gotSawMidStream {
 		t.Fatal("test setup broken: streamMessage was never populated mid-stream")
 	}
-	if !sawError {
+	if !gotSawError {
 		t.Fatal("listener never received EventError")
 	}
-	if errorSnapshot.StreamMessage != nil {
-		t.Fatalf("StreamMessage must be cleared before EventError listeners run, got %+v", errorSnapshot.StreamMessage)
+	if gotErrorSnapshot.StreamMessage != nil {
+		t.Fatalf("StreamMessage must be cleared before EventError listeners run, got %+v", gotErrorSnapshot.StreamMessage)
+	}
+
+	state := agent.State()
+	if len(state.Messages) != 1 || state.Messages[0].TextContent() != "trigger" {
+		t.Fatalf("partial stream or execution error leaked into conversation: %#v", state.Messages)
 	}
 }
 

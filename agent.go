@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 // Agent is a stateful wrapper around the agent loop.
@@ -798,8 +797,9 @@ func (a *Agent) buildConfig() LoopConfig {
 	}
 }
 
-// consumeLoop reads events from the loop channel and updates internal state.
-// handles partial message residue, and constructs error fallback messages.
+// consumeLoop projects loop events into the stateful Agent view. It must not
+// create AgentMessages: new entries come only from committed EventMessageEnd
+// events, while Loop-owned state snapshots may replace the projected history.
 func (a *Agent) consumeLoop(events <-chan Event) {
 	// Capture this run's done channel and cancel up front. A new run can take
 	// over before this loop's defer runs — an auto-continue may start it from
@@ -810,21 +810,8 @@ func (a *Agent) consumeLoop(events <-chan Event) {
 	myCancel := a.cancel
 	a.mu.Unlock()
 
-	var partial AgentMessage // tracks partial message during streaming
-
 	defer func() {
 		a.mu.Lock()
-
-		// Handle partial message residue
-		// If stream ended with an unfinished partial, append it to messages
-		if partial != nil {
-			if msg, ok := partial.(Message); ok {
-				if !msg.IsEmpty() {
-					a.messages = append(a.messages, partial)
-					a.syncContextManagerLocked()
-				}
-			}
-		}
 
 		// Release this run's derived ctx now that the loop has drained — chiefly
 		// the propagation goroutine context starts when the caller passes a
@@ -859,15 +846,12 @@ func (a *Agent) consumeLoop(events <-chan Event) {
 
 		// Message lifecycle
 		case EventMessageStart:
-			partial = ev.Message
 			a.streamMessage = ev.Message
 
 		case EventMessageUpdate:
-			partial = ev.Message
 			a.streamMessage = ev.Message
 
 		case EventMessageEnd:
-			partial = nil
 			a.streamMessage = nil
 			if ev.Message != nil {
 				a.messages = append(a.messages, ev.Message)
@@ -900,10 +884,11 @@ func (a *Agent) consumeLoop(events <-chan Event) {
 				a.applyLoopStateLocked(*ev.State)
 			}
 
-		// Error — construct fallback assistant message (skip for intentional abort)
+		// Execution errors are runtime facts, not conversation messages. A model
+		// may still return a terminal Message with StopReasonError; the Loop
+		// commits that through EventMessageEnd like any other model outcome.
 		case EventError:
-			partial = nil // discard incomplete streaming message to prevent defer from appending it
-			// Also clear the externally-visible streaming view: listeners may
+			// Clear the externally-visible streaming view: listeners may
 			// call State() from this EventError callback, and a stale
 			// streamMessage would surface a never-completing partial that the
 			// agent has already abandoned. Cleared here, before listeners run
@@ -911,22 +896,11 @@ func (a *Agent) consumeLoop(events <-chan Event) {
 			a.streamMessage = nil
 			if ev.Err != nil && !errors.Is(ev.Err, context.Canceled) {
 				a.lastError = ev.Err.Error()
-				errMsg := Message{
-					Role:       RoleAssistant,
-					StopReason: StopReasonError,
-					Metadata: map[string]any{
-						"error_message": ev.Err.Error(),
-					},
-					Timestamp: time.Now(),
-				}
-				a.messages = append(a.messages, errMsg)
-				a.syncContextManagerLocked()
 			}
 
 		case EventAgentEnd:
 			if ev.State != nil {
-				a.totalUsage = ev.State.TotalUsage
-				a.runProgress = cloneRunProgress(ev.State.Progress)
+				a.applyLoopStateLocked(*ev.State)
 			}
 			a.isRunning = false
 			a.streamMessage = nil
