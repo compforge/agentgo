@@ -75,6 +75,8 @@ AgentMessage
 
 `ContextItemProvider` lets an application message expose identifiable information without changing its model rendering. Before each model call, `EventContextProjected` reports the inventory from the actual projected context. `ContextItem` and `ContextDemand` share `ContextKey`; applications and evaluators own all label meanings and demand-extraction rules.
 
+`AgentState.Marshal` / `Unmarshal` expose the durable state at a completed-turn boundary. A host can load it in `WithBeforeRun`, save it in `WithAfterTurn`, and use model/tool middleware to return outcomes already known by an external ledger. AgentGo supplies these mechanisms but does not choose storage, checkpoint frequency, or side-effect recovery policy.
+
 ## Extension points
 
 | Need | Contract |
@@ -85,8 +87,10 @@ AgentMessage
 | Tool authorization | `ToolGate` |
 | Context projection and recovery | `ContextManager` |
 | Compaction policy | `context.Compactor` |
-| Turn preparation and observation | `WithBeforeTurn` / `WithAfterTurn` |
-| Model-call options and validation | `WithBeforeModelCall` / `WithAfterModelCall` |
+| Run restore and finalization | `WithBeforeRun` / `WithAfterRun` |
+| Turn preparation and checkpoint observation | `WithBeforeTurn` / `WithAfterTurn` |
+| Model-call interception | `WithModelMiddlewares` |
+| Tool-call interception | `WithToolMiddlewares` |
 | Stop policy | `StopGuard` |
 | UI, logging, and trajectory capture | `<-chan Event` / `Agent.Subscribe` |
 

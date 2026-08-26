@@ -740,7 +740,7 @@ func TestRunner_SetThinkingLevelOverridesConfig(t *testing.T) {
 	}
 }
 
-// Config.ToolGate and Config.Middlewares must reach the sub-agent's loop —
+// Config.ToolGate and Config.ToolMiddlewares must reach the sub-agent's loop —
 // without the pass-through a harness cannot gate sub-agent tool calls at all.
 // Gate semantics themselves are covered by TestAgentLoop_ToolGate; this test
 // only proves the threading.
@@ -780,10 +780,10 @@ func TestTool_GateAndMiddlewarePassThrough(t *testing.T) {
 			ToolGate: func(ctx context.Context, req agentgo.GateRequest) (*agentgo.GateDecision, error) {
 				return &agentgo.GateDecision{Allowed: true, UpdatedArgs: json.RawMessage(`{"value":"rewritten"}`)}, nil
 			},
-			Middlewares: []agentgo.ToolMiddleware{
-				func(ctx context.Context, call agentgo.ToolCall, next agentgo.ToolExecuteFunc) (json.RawMessage, error) {
+			ToolMiddlewares: []agentgo.ToolMiddleware{
+				func(ctx context.Context, call agentgo.ToolCall, next agentgo.ToolExecuteFunc) (agentgo.ToolResult, error) {
 					middlewareCalls++
-					return next(ctx, call.Args)
+					return next(ctx, call)
 				},
 			},
 		}

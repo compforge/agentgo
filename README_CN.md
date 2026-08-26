@@ -75,6 +75,8 @@ AgentMessage
 
 应用消息可通过 `ContextItemProvider` 暴露有稳定身份的信息，而不改变模型渲染。每次模型调用前，`EventContextProjected` 会报告实际投影后的 Context 清单。`ContextItem` 与 `ContextDemand` 共享 `ContextKey`；标签含义及 Demand 提取规则由应用和 Evaluator 负责。
 
+`AgentState.Marshal` / `Unmarshal` 暴露完整 turn 边界上的可持久状态。宿主可以通过 `WithBeforeRun` 加载状态、通过 `WithAfterTurn` 保存状态，并用 model/tool middleware 返回外部 Ledger 已知的执行结果。AgentGo 只提供机制，不决定存储、checkpoint 频率或副作用恢复策略。
+
 ## 扩展点
 
 | 需求 | 契约 |
@@ -85,8 +87,10 @@ AgentMessage
 | 工具授权 | `ToolGate` |
 | Context 投影与恢复 | `ContextManager` |
 | 压缩策略 | `context.Compactor` |
-| Turn 准备与观察 | `WithBeforeTurn` / `WithAfterTurn` |
-| 模型调用选项与校验 | `WithBeforeModelCall` / `WithAfterModelCall` |
+| Run 恢复与收尾 | `WithBeforeRun` / `WithAfterRun` |
+| Turn 准备与 checkpoint 观察 | `WithBeforeTurn` / `WithAfterTurn` |
+| 模型调用拦截 | `WithModelMiddlewares` |
+| 工具调用拦截 | `WithToolMiddlewares` |
 | 终止策略 | `StopGuard` |
 | UI、日志与轨迹采集 | `<-chan Event` / `Agent.Subscribe` |
 

@@ -56,16 +56,16 @@ type LoopConfig struct {
 	MaxToolErrors int           // consecutive tool failure threshold per tool, 0 = unlimited
 	ThinkingLevel ThinkingLevel // reasoning depth
 
-	// BeforeTurn runs before each model call. Messages it returns are committed
-	// before the request. BeforeModelCall then supplies options for that logical
-	// model call and all of its internal retries. AfterModelCall runs after the
-	// call returns a Message but before it is committed or tools are executed.
-	// AfterTurn runs after a normal assistant/tool turn has been committed and
-	// before the loop decides whether to continue or stop.
-	BeforeTurn      BeforeTurnHook
-	BeforeModelCall BeforeModelCallHook
-	AfterModelCall  AfterModelCallHook
-	AfterTurn       AfterTurnHook
+	// Run hooks execute once around one AgentLoop invocation. Turn hooks execute
+	// once around each logical model/tool turn.
+	BeforeRun  BeforeRunHook
+	AfterRun   AfterRunHook
+	BeforeTurn BeforeTurnHook
+	AfterTurn  AfterTurnHook
+
+	// InitialState is the run baseline supplied by the stateful Agent wrapper.
+	// Direct AgentLoop callers may leave it zero-valued.
+	InitialState AgentState
 
 	// Context lifecycle. ContextManager drives prompt projection, overflow
 	// recovery, and usage reporting. AgentMessage values lower themselves to
@@ -100,9 +100,10 @@ type LoopConfig struct {
 	// FollowUp: called when the agent would otherwise stop.
 	GetFollowUpMessages func() []AgentMessage
 
-	// Middlewares are applied around each tool execution (outermost first).
-	// Use for logging, timing, argument/result modification, etc.
-	Middlewares []ToolMiddleware
+	// ModelMiddlewares wrap each physical provider attempt. ToolMiddlewares wrap
+	// each tool execution. First middleware is outermost.
+	ModelMiddlewares []ModelMiddleware
+	ToolMiddlewares  []ToolMiddleware
 
 	// MaxToolConcurrency limits parallel tool execution.
 	// 0 or 1 = sequential (default, backward compatible).

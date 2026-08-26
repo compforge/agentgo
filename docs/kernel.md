@@ -16,6 +16,22 @@ AgentGo 原生支持**轨迹驱动的 Loop 优化**：Event stream 记录实际�
 轨迹，再把结论反馈给 Prompt、Tool surface 或 Execution mechanism。内核负责让事实稳定、可关联，
 不负责给出具体优化答案。
 
+## 可持久状态与执行边界
+
+一次 Agent Run 包含多个 turn，一个 turn 包含一次逻辑模型调用以及零到多个工具调用。AgentGo 在这三个
+层级提供互不重叠的扩展点：Run 使用 `BeforeRun` / `AfterRun`，turn 使用 `BeforeTurn` / `AfterTurn`，
+具体模型和工具调用使用 middleware。
+
+`AgentState` 是 Loop 自己拥有的状态。它在完整 turn 结束后包含消息、usage、计数以及已经决定的下一步
+内部 continuation；model、tool、hook、流式 partial message 和进程内 context 不属于其持久化投影。
+因此宿主可以在 `AfterTurn` 保存状态，并在下一次 `BeforeRun` 加载状态，而当前进程仍负责重新绑定执行
+依赖。
+
+这种设计让 AgentGo 具备恢复所需的机制，但不让内核接管恢复策略。外部 Ledger 可以通过 model/tool
+middleware 返回已完成调用的结果；某个工具能否重试、是否需要对账或询问用户，仍由宿主依据工具语义
+决定。`ModelCall.ID` 与 `ToolCall.ID` 都标识逻辑调用：模型调用重试以及从上一 turn checkpoint 恢复后
+会沿用同一个 run 内 ID；provider 的单次请求 ID 和 Ledger 的全局身份由各自边界另行管理。
+
 ## ContextItem 与 ContextDemand
 
 `ContextItem` 描述模型调用前的实际 Context 中存在哪些可识别信息；`ContextDemand` 描述轨迹暴露了

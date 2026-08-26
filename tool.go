@@ -346,14 +346,14 @@ func toolInterruptBehavior(tool Tool, args json.RawMessage) InterruptBehavior {
 	return InterruptBehaviorBlock
 }
 
-// ToolExecuteFunc is the function signature for tool execution.
-// Used as the "next" parameter in middleware chains.
-type ToolExecuteFunc func(ctx context.Context, args json.RawMessage) (json.RawMessage, error)
+// ToolExecuteFunc advances one complete tool call through validation,
+// authorization and execution. It is the next function in middleware chains.
+type ToolExecuteFunc func(context.Context, ToolCall) (ToolResult, error)
 
 // ToolMiddleware wraps tool execution with cross-cutting concerns.
 // Call next to continue the chain; skip next to short-circuit execution.
 // Example: logging, timing, argument/result modification, audit.
-type ToolMiddleware func(ctx context.Context, call ToolCall, next ToolExecuteFunc) (json.RawMessage, error)
+type ToolMiddleware func(context.Context, ToolCall, ToolExecuteFunc) (ToolResult, error)
 
 // ---------------------------------------------------------------------------
 // FuncTool
