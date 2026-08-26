@@ -1,6 +1,7 @@
 package codec
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -97,6 +98,61 @@ func TestJSONRejectsUnknownTaggedType(t *testing.T) {
 	err = c.Unmarshal([]byte(`{"$type":"missing.v1","value":{}}`), &target)
 	if err == nil || !strings.Contains(err.Error(), `codec type "missing.v1" is not registered`) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestJSONRoundTripsEnvelopeShapedObjects(t *testing.T) {
+	c, err := NewJSON(Type[*taggedTestValue]("test.tagged-value.v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name  string
+		value map[string]any
+	}{
+		{
+			name: "registered type lookalike",
+			value: map[string]any{
+				"$type": "test.tagged-value.v1",
+				"value": "business payload",
+			},
+		},
+		{
+			name: "unknown type lookalike",
+			value: map[string]any{
+				"$type":  "business.event.v1",
+				"value":  "created",
+				"source": "metadata",
+			},
+		},
+		{
+			name: "escape lookalike",
+			value: map[string]any{
+				"$object": map[string]any{"nested": true},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := map[string]any{"metadata": tt.value}
+			data, err := c.Marshal(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), `"$object"`) {
+				t.Fatalf("encoded object was not escaped: %s", data)
+			}
+
+			var restored map[string]any
+			if err := c.Unmarshal(data, &restored); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(restored, original) {
+				t.Fatalf("restored = %#v, want %#v", restored, original)
+			}
+		})
 	}
 }
 
