@@ -81,7 +81,7 @@ type ContextUsageEstimate struct {
 	Tokens int
 	// UsageTokens is the token count derived from the last LLM-reported Usage.
 	UsageTokens int
-	// TrailingTokens is the chars/4 estimate for messages after the last Usage.
+	// TrailingTokens estimates the assistant output carrying the last Usage and all later messages.
 	TrailingTokens int
 	// LastUsageIndex is the index of the last assistant message with Usage, or -1 if none.
 	LastUsageIndex int
@@ -90,18 +90,18 @@ type ContextUsageEstimate struct {
 // calculateContextTokens computes total input tokens from LLM-reported Usage.
 // Input already includes CacheRead (litellm convention), so the full prompt
 // size is Input + CacheWrite (cache creation is reported separately and not
-// rolled into Input). Output is excluded because previous outputs are already
-// counted as input in the next call.
+// rolled into Input). The output of this call is estimated from its replayable
+// message, not Output usage, which can include non-replayed reasoning.
 func calculateContextTokens(u *agentgo.Usage) int {
 	total := u.Input + u.CacheWrite
 	if total > 0 {
 		return total
 	}
-	return u.TotalTokens
+	return max(0, u.TotalTokens-u.Output)
 }
 
 // EstimateContextTokens uses a hybrid approach: actual Usage from the last
-// non-aborted assistant message, plus chars/4 estimates for trailing messages.
+// non-aborted assistant message, plus estimates for that output and later messages.
 // This approximates the current context window occupancy.
 func EstimateContextTokens(msgs []agentgo.AgentMessage) ContextUsageEstimate {
 	// Walk backwards to find the last assistant projection with valid Usage.
@@ -115,7 +115,7 @@ func EstimateContextTokens(msgs []agentgo.AgentMessage) ContextUsageEstimate {
 		if msg.StopReason == agentgo.StopReasonAborted || msg.StopReason == agentgo.StopReasonError {
 			continue
 		}
-		if msg.Usage != nil {
+		if msg.Usage != nil && calculateContextTokens(msg.Usage) > 0 {
 			lastIdx = i
 			lastUsage = msg.Usage
 			break
@@ -134,9 +134,10 @@ func EstimateContextTokens(msgs []agentgo.AgentMessage) ContextUsageEstimate {
 
 	usageTokens := calculateContextTokens(lastUsage)
 
-	// Estimate trailing messages after the last usage point
+	// Usage describes the request before this assistant output existed. That
+	// output (including tool arguments) is replayed on the next request.
 	var trailing int
-	for i := lastIdx + 1; i < len(msgs); i++ {
+	for i := lastIdx; i < len(msgs); i++ {
 		trailing += EstimateTokens(msgs[i])
 	}
 
@@ -153,4 +154,52 @@ func EstimateContextTokens(msgs []agentgo.AgentMessage) ContextUsageEstimate {
 func ContextEstimateAdapter(msgs []agentgo.AgentMessage) (tokens, usageTokens, trailingTokens int) {
 	e := EstimateContextTokens(msgs)
 	return e.Tokens, e.UsageTokens, e.TrailingTokens
+}
+
+// InvalidateUsage removes context calibration from a rewritten model view.
+// API usage measures the old prompt; retaining it after trimming/removing a
+// prefix would undo the apparent savings or accept an ineffective compaction.
+// Raw messages retain their usage for billing, persistence and later inspection.
+// Applications that rewrite context outside ContextEngine must call this too.
+func InvalidateUsage(messages []agentgo.AgentMessage) []agentgo.AgentMessage {
+	out := make([]agentgo.AgentMessage, len(messages))
+	for i, message := range messages {
+		view, include := message.ToMessage()
+		if !include || view.Usage == nil {
+			out[i] = message
+		} else {
+			out[i] = uncalibratedMessage{message}
+		}
+	}
+	return out
+}
+
+type uncalibratedMessage struct{ agentgo.AgentMessage }
+
+func (m uncalibratedMessage) ToMessage() (agentgo.Message, bool) {
+	view, include := m.AgentMessage.ToMessage()
+	view.Usage = nil
+	return view, include
+}
+
+func (m uncalibratedMessage) Compact(expect float64) (agentgo.AgentMessage, float64) {
+	next, ratio := m.AgentMessage.Compact(expect)
+	if next == nil {
+		return nil, ratio
+	}
+	return uncalibratedMessage{next}, ratio
+}
+
+func (m uncalibratedMessage) ContextItems() []agentgo.ContextItem {
+	if provider, ok := m.AgentMessage.(agentgo.ContextItemProvider); ok {
+		return provider.ContextItems()
+	}
+	return nil
+}
+
+func (m uncalibratedMessage) ContextDemands() []agentgo.ContextDemand {
+	if provider, ok := m.AgentMessage.(agentgo.ContextDemandProvider); ok {
+		return provider.ContextDemands()
+	}
+	return nil
 }
