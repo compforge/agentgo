@@ -198,16 +198,38 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 	if toolErrors == nil {
 		toolErrors = make(map[string]int)
 	}
-	commit := func(msg AgentMessage) bool {
+	recordMessage := func(msg AgentMessage) error {
 		if err := commitMessage(currentCtx, newMessages, config, msg); err != nil {
-			sink.emitError(fmt.Errorf("commit message: %w", err), buildSummary(turnCount, EndReasonError))
-			return false
+			return err
 		}
 		state.Messages = copyMessages(currentCtx.Messages)
 		if message, ok := msg.(Message); ok {
 			state.TotalUsage.Add(message.Usage)
 		}
+		return nil
+	}
+	commit := func(msg AgentMessage) bool {
+		if err := recordMessage(msg); err != nil {
+			sink.emitError(fmt.Errorf("commit message: %w", err), buildSummary(turnCount, EndReasonError))
+			return false
+		}
 		return true
+	}
+	// Model preparation can spend a long time compacting. Accept queued input
+	// after that work, through the same durable commit path as other messages.
+	steer := func() ([]AgentMessage, error) {
+		if config.GetSteeringMessages == nil {
+			return nil, nil
+		}
+		messages := config.GetSteeringMessages()
+		for _, message := range messages {
+			sink.emit(Event{Type: EventMessageStart, Message: message})
+			if err := recordMessage(message); err != nil {
+				return nil, err
+			}
+			sink.emit(Event{Type: EventMessageEnd, Message: message})
+		}
+		return messages, nil
 	}
 	runBeforeTurn := func(turnIndex int) bool {
 		if config.BeforeTurn == nil {
@@ -326,7 +348,7 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 			return
 		}
 		// Call LLM with retry (streaming: events emitted inside callLLM)
-		assistantMsg, callInfo, err := callLLMWithRetry(ctx, currentCtx, config, turnCount+1, sink)
+		assistantMsg, callInfo, err := callLLMWithRetry(ctx, currentCtx, config, turnCount+1, sink, steer)
 		if err != nil {
 			if ctx.Err() != nil {
 				if config.ShouldEmitAbortMarker != nil && config.ShouldEmitAbortMarker() {

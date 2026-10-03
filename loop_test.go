@@ -309,7 +309,7 @@ func TestCallLLM_CommitsProjectedContextWhenRequested(t *testing.T) {
 	}
 
 	events := make(chan Event, 16)
-	if _, _, err := callLLM(context.Background(), agentCtx, cfg, 1, 1, eventSink{ctx: context.Background(), ch: events}); err != nil {
+	if _, _, err := callLLM(context.Background(), agentCtx, cfg, 1, 1, eventSink{ctx: context.Background(), ch: events}, nil); err != nil {
 		t.Fatalf("callLLM failed: %v", err)
 	}
 
@@ -364,6 +364,7 @@ func TestCallLLMWithRetry_EmitsOverflowCompaction(t *testing.T) {
 		LoopConfig{Model: model, ContextManager: manager},
 		1,
 		eventSink{ctx: context.Background(), ch: events},
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
