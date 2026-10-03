@@ -15,6 +15,13 @@ type llmCallInfo struct {
 	HasCompletedToolCalls bool
 }
 
+// A failed durable steering commit must stop the run even when its cause
+// resembles a retryable provider error; retrying would lose dequeued input.
+type steeringCommitError struct{ cause error }
+
+func (e *steeringCommitError) Error() string { return "commit steering: " + e.cause.Error() }
+func (e *steeringCommitError) Unwrap() error { return e.cause }
+
 // callLLMWithRetry wraps callLLM with retry logic for retryable errors.
 // Context overflow errors trigger automatic compaction and a single retry.
 //
@@ -22,7 +29,7 @@ type llmCallInfo struct {
 // a complete response has been committed, so retrying a failed stream cannot
 // replay tool side effects. callOptions are selected once per logical model
 // call and reused by every retry attempt.
-func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopConfig, turnIndex int, sink eventSink) (Message, llmCallInfo, error) {
+func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopConfig, turnIndex int, sink eventSink, steer func() ([]AgentMessage, error)) (Message, llmCallInfo, error) {
 	ctx = withModelExecutionRuntime(ctx, config.ModelMiddlewares, sink.emit)
 	maxRetries := config.MaxRetries
 	if maxRetries < 0 {
@@ -32,16 +39,21 @@ func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopCo
 	var lastErr error
 	var lastInfo llmCallInfo
 	for attempt := 1; attempt <= maxRetries+1; attempt++ {
-		msg, info, err := callLLM(ctx, agentCtx, config, turnIndex, attempt, sink)
+		msg, info, err := callLLM(ctx, agentCtx, config, turnIndex, attempt, sink, steer)
 		if err == nil {
 			return msg, info, nil
 		}
 		lastErr = err
 		lastInfo = info
 
+		var commitErr *steeringCommitError
+		if errors.As(err, &commitErr) {
+			return Message{}, info, err
+		}
+
 		// Context overflow: compact and retry once (not a normal retry)
 		if IsContextOverflow(err) {
-			return recoverOverflow(ctx, agentCtx, config, turnIndex, attempt+1, sink, err)
+			return recoverOverflow(ctx, agentCtx, config, turnIndex, attempt+1, sink, err, steer)
 		}
 
 		// User cancellation is never retryable: the next attempt would just
@@ -87,7 +99,7 @@ func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopCo
 // recoverOverflow attempts to compact the context via the ContextManager and
 // retry the LLM call. If no ContextManager is configured, the original error
 // is returned.
-func recoverOverflow(ctx context.Context, agentCtx *AgentContext, config LoopConfig, turnIndex, attempt int, sink eventSink, originalErr error) (Message, llmCallInfo, error) {
+func recoverOverflow(ctx context.Context, agentCtx *AgentContext, config LoopConfig, turnIndex, attempt int, sink eventSink, originalErr error, steer func() ([]AgentMessage, error)) (Message, llmCallInfo, error) {
 	failedExecution := newModelExecution(turnIndex, attempt-1).Execution
 	if config.ContextManager == nil {
 		return Message{}, llmCallInfo{Execution: failedExecution}, &ContextOverflowError{Cause: fmt.Errorf("no compaction configured: %w", originalErr)}
@@ -121,7 +133,7 @@ func recoverOverflow(ctx context.Context, agentCtx *AgentContext, config LoopCon
 	if recovery.Compaction != nil {
 		sink.emit(Event{Type: EventContextCompacted, Execution: executionRef(compactExecution), Compaction: recovery.Compaction})
 	}
-	return callLLM(ctx, agentCtx, config, turnIndex, attempt, sink)
+	return callLLM(ctx, agentCtx, config, turnIndex, attempt, sink, steer)
 }
 
 // retryDelay calculates the wait duration using exponential backoff.
@@ -144,7 +156,7 @@ func retryDelay(err error, attempt int) time.Duration {
 }
 
 // callLLM applies the two-stage pipeline and calls the model.
-func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, turnIndex, attempt int, sink eventSink) (Message, llmCallInfo, error) {
+func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, turnIndex, attempt int, sink eventSink, steer func() ([]AgentMessage, error)) (Message, llmCallInfo, error) {
 	execution := newModelExecution(turnIndex, attempt)
 	info := llmCallInfo{Execution: execution.Execution}
 	messages := agentCtx.Messages
@@ -171,6 +183,17 @@ func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, tur
 		}
 		if projection.Compaction != nil {
 			sink.emit(Event{Type: EventContextCompacted, Execution: executionRef(compactExecution), Compaction: projection.Compaction})
+		}
+	}
+	// Keep steering in both the durable baseline and this request's projected
+	// view; committing input must not turn a transient projection into history.
+	if steer != nil {
+		pending, err := steer()
+		if err != nil {
+			return Message{}, info, &steeringCommitError{cause: err}
+		}
+		if len(pending) > 0 {
+			messages = append(copyMessages(messages), pending...)
 		}
 	}
 	sink.emit(Event{Type: EventContextProjected, Execution: executionRef(execution.Execution), ContextItems: CollectContextItems(messages)})
@@ -345,7 +368,7 @@ func callLLMStream(ctx context.Context, model ChatModel, execution ModelExecutio
 			case StreamEventToolCallDelta:
 				dk = DeltaToolCall
 			}
-			sink.emit(Event{Type: EventMessageUpdate, Execution: executionRef(execution.Execution), Message: partial, Delta: ev.Delta, DeltaKind: dk})
+			sink.emit(Event{Type: EventMessageUpdate, Execution: executionRef(execution.Execution), Message: partial, Delta: ev.Delta, DeltaKind: dk, ToolID: ev.ToolID})
 
 		case StreamEventTextEnd, StreamEventThinkingEnd, StreamEventToolCallEnd:
 			partial = ev.Message

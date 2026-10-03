@@ -91,7 +91,9 @@ type LoopConfig struct {
 	// reasoning of its own.
 	ToolGate ToolGate
 
-	// Steering: called after each tool execution to check for user interruptions.
+	// Steering is drained at turn/tool boundaries and after context preparation,
+	// before each model request (including retries). Input queued during a slow
+	// compaction is committed and included in the immediately following call.
 	GetSteeringMessages func() []AgentMessage
 
 	// FollowUp: called when the agent would otherwise stop.
@@ -427,6 +429,9 @@ type StreamEvent struct {
 	ContentIndex int     // which content block is being updated
 	Delta        string  // text/thinking/toolcall argument delta
 	Message      Message // partial (during streaming) or final (done)
+	// ToolID identifies the call for toolcall start/delta/end events. It is
+	// empty until the provider supplies an ID.
+	ToolID string
 	// CompletedToolCall is populated on StreamEventToolCallEnd with the fully
 	// reconstructed tool call. It lets the loop start execution immediately
 	// without re-parsing the partial assistant message.

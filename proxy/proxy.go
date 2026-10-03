@@ -27,10 +27,10 @@ const (
 
 // Frame is a single bandwidth-optimized event from a remote proxy server.
 type Frame struct {
-	Type       FrameType            `json:"type"`
-	Delta      string               `json:"delta,omitempty"`
-	ToolCallID string               `json:"tool_call_id,omitempty"`
-	ToolName   string               `json:"tool_name,omitempty"`
+	Type       FrameType          `json:"type"`
+	Delta      string             `json:"delta,omitempty"`
+	ToolCallID string             `json:"tool_call_id,omitempty"`
+	ToolName   string             `json:"tool_name,omitempty"`
 	StopReason agentgo.StopReason `json:"stop_reason,omitempty"`
 	Usage      *agentgo.Usage     `json:"usage,omitempty"`
 	// Error carries a FrameError message. It is a string (not error) so it
@@ -118,13 +118,17 @@ func (p *Model) GenerateStream(ctx context.Context, messages []agentgo.Message, 
 					ID:   fr.ToolCallID,
 					Name: fr.ToolName,
 				}))
-				out <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallStart, Message: partial}
+				out <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallStart, ToolID: fr.ToolCallID, Message: partial}
 
 			case FrameToolCallDelta:
-				if idx := lastToolCall(partial.Content); idx >= 0 && partial.Content[idx].ToolCall != nil {
+				callID := fr.ToolCallID
+				if idx := findToolCall(partial.Content, callID); idx >= 0 && partial.Content[idx].ToolCall != nil {
 					partial.Content[idx].ToolCall.Args = append(partial.Content[idx].ToolCall.Args, json.RawMessage(fr.Delta)...)
+					if callID == "" {
+						callID = partial.Content[idx].ToolCall.ID
+					}
 				}
-				out <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallDelta, Delta: fr.Delta, Message: partial}
+				out <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallDelta, ToolID: callID, Delta: fr.Delta, Message: partial}
 
 			case FrameDone:
 				partial.StopReason = fr.StopReason
@@ -166,10 +170,11 @@ func findOrCreate(blocks *[]agentgo.ContentBlock, ct agentgo.ContentType) int {
 	return len(*blocks) - 1
 }
 
-// lastToolCall returns the index of the last tool call block, or -1.
-func lastToolCall(blocks []agentgo.ContentBlock) int {
+// findToolCall resolves explicit IDs for interleaved calls. ID-less frames
+// continue the most recently started call, as the sequential proxy protocol does.
+func findToolCall(blocks []agentgo.ContentBlock, id string) int {
 	for i := len(blocks) - 1; i >= 0; i-- {
-		if blocks[i].Type == agentgo.ContentToolCall {
+		if blocks[i].Type == agentgo.ContentToolCall && blocks[i].ToolCall != nil && (id == "" || blocks[i].ToolCall.ID == id) {
 			return i
 		}
 	}

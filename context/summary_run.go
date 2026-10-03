@@ -240,22 +240,11 @@ type cutResult struct {
 	isSplitTurn bool
 }
 
-// findCutPoint walks backwards from the end, accumulating tokens until
-// keepTokens is reached. Returns the cut result with turn-awareness.
-//
-// Rules:
-//   - Never cut between an assistant message (with tool calls) and its tool results
-//   - Prefer cutting at user message boundaries
-//   - Detect split turns and report the turn start index
+// findCutPoint keeps a recent suffix, retreating to the assistant call when
+// the token boundary lands on a tool result. Advancing instead can skip every
+// remaining group in a tool-only conversation and prevent compaction entirely.
 func findCutPoint(msgs []agentgo.AgentMessage, keepTokens int) cutResult {
-	if len(msgs) == 0 {
-		return cutResult{}
-	}
-
-	accumulated := 0
-	cutIndex := len(msgs) // start past end
-
-	// Walk backwards
+	cutIndex, accumulated := -1, 0
 	for i := len(msgs) - 1; i >= 0; i-- {
 		accumulated += EstimateTokens(msgs[i])
 		if accumulated >= keepTokens {
@@ -263,61 +252,23 @@ func findCutPoint(msgs []agentgo.AgentMessage, keepTokens int) cutResult {
 			break
 		}
 	}
-
-	// If we couldn't accumulate enough, keep everything
-	if cutIndex >= len(msgs) {
+	for cutIndex > 0 && msgs[cutIndex].GetRole() == agentgo.RoleTool {
+		cutIndex--
+	}
+	if cutIndex <= 0 {
 		return cutResult{}
 	}
-
-	// Align to a valid cut point: walk forward to find a user message boundary
-	// Never split tool pair (assistant with toolCalls + following tool results)
-	for cutIndex < len(msgs) {
-		msg := msgs[cutIndex]
-		// Don't cut at a tool result — it belongs to the previous assistant.
-		if msg.GetRole() == agentgo.RoleTool {
-			cutIndex++
-			continue
-		}
-		// Good cut point: user message.
-		if msg.GetRole() == agentgo.RoleUser {
+	cut := cutResult{firstKeptIndex: cutIndex, turnStartIndex: -1}
+	if msgs[cutIndex].GetRole() == agentgo.RoleUser {
+		return cut
+	}
+	for i := cutIndex - 1; i >= 0; i-- {
+		if msgs[i].GetRole() == agentgo.RoleUser {
+			cut.turnStartIndex, cut.isSplitTurn = i, true
 			break
 		}
-		// Assistant message with tool calls: skip past all its tool results.
-		if msg.GetRole() == agentgo.RoleAssistant && msg.HasToolCalls() {
-			cutIndex++
-			for cutIndex < len(msgs) && msgs[cutIndex].GetRole() == agentgo.RoleTool {
-				cutIndex++
-			}
-			continue
-		}
-		// Assistant without tool calls and custom roles are valid cut points.
-		break
 	}
-
-	// Safety: don't compact everything
-	if cutIndex >= len(msgs) {
-		return cutResult{}
-	}
-
-	// Detect split turn: if cut is not at a user message, find the turn start
-	isSplitTurn := false
-	turnStartIndex := -1
-	if msgs[cutIndex].GetRole() != agentgo.RoleUser {
-		// Walk backwards from cutIndex to find the user message that started this turn
-		for i := cutIndex - 1; i >= 0; i-- {
-			if msgs[i].GetRole() == agentgo.RoleUser {
-				turnStartIndex = i
-				isSplitTurn = true
-				break
-			}
-		}
-	}
-
-	return cutResult{
-		firstKeptIndex: cutIndex,
-		turnStartIndex: turnStartIndex,
-		isSplitTurn:    isSplitTurn,
-	}
+	return cut
 }
 
 // extractFileOps scans messages for tool calls and extracts file paths.

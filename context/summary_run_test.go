@@ -22,7 +22,7 @@ func (m stubModel) GenerateStream(ctx context.Context, messages []agentgo.Messag
 
 func (m stubModel) SupportsTools() bool { return true }
 
-func TestFindCutPoint_SkipsToolResultBoundary(t *testing.T) {
+func TestFindCutPoint_StopsAtUserBoundary(t *testing.T) {
 	msgs := []agentgo.AgentMessage{
 		agentgo.UserMsg("old"),
 		agentgo.Message{
@@ -35,7 +35,7 @@ func TestFindCutPoint_SkipsToolResultBoundary(t *testing.T) {
 
 	cut := findCutPoint(msgs, 2)
 	if cut.firstKeptIndex != 3 {
-		t.Fatalf("expected cut to advance past tool result to index 3, got %d", cut.firstKeptIndex)
+		t.Fatalf("expected cut at user index 3, got %d", cut.firstKeptIndex)
 	}
 	if cut.isSplitTurn {
 		t.Fatal("expected cut at user boundary, got split turn")

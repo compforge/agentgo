@@ -381,10 +381,11 @@ func (l *LiteLLMAdapter) GenerateStream(ctx context.Context, messages []agentgo.
 				if key != "" {
 					toolBlockIndices[key] = idx
 				}
-				eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallStart, Message: partial}
+				eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallStart, ToolID: e.ID, Message: partial}
 			case litellm.ToolUseDelta:
 				key := toolUseEventKey(e.ID, e.ItemID, e.Index, e.OutputIndex)
 				idx := findPendingToolCallBlock(partial.Content, toolBlockIndices, key)
+				callID := e.ID
 				if idx >= 0 {
 					block := partial.Content[idx]
 					if block.ToolCall != nil {
@@ -395,6 +396,10 @@ func (l *LiteLLMAdapter) GenerateStream(ctx context.Context, messages []agentgo.
 							block.ToolCall.ThoughtSignature = e.Signature
 						}
 						partial.Content[idx] = block
+						// Continuation chunks may identify only a block index.
+						if callID == "" {
+							callID = block.ToolCall.ID
+						}
 					}
 					if key != "" {
 						toolBlockIndices[key] = idx
@@ -402,7 +407,7 @@ func (l *LiteLLMAdapter) GenerateStream(ctx context.Context, messages []agentgo.
 				}
 				if len(e.ArgumentsDelta) > 0 {
 					toolArgs[key] = append(toolArgs[key], e.ArgumentsDelta...)
-					eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallDelta, Delta: string(e.ArgumentsDelta), Message: partial}
+					eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallDelta, ToolID: callID, Delta: string(e.ArgumentsDelta), Message: partial}
 				}
 			case litellm.ToolUseDone:
 				key := toolUseEventKey(e.ID, e.ItemID, e.Index, e.OutputIndex)
@@ -422,7 +427,7 @@ func (l *LiteLLMAdapter) GenerateStream(ctx context.Context, messages []agentgo.
 					partial.Content = append(partial.Content, agentgo.ToolCallBlock(completed))
 					idx = len(partial.Content) - 1
 				}
-				eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallEnd, ContentIndex: idx, Message: partial, CompletedToolCall: &completed}
+				eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallEnd, ToolID: completed.ID, ContentIndex: idx, Message: partial, CompletedToolCall: &completed}
 			}
 			return nil
 		})
