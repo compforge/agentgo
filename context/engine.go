@@ -394,9 +394,12 @@ func (e *ContextEngine) apply(ctx context.Context, msgs []agentgo.AgentMessage, 
 	if err != nil {
 		return applyResult{}, err
 	}
-	after := EstimateContextTokens(next).Tokens
-	changed := after < before
-	if !changed {
+	// Compare both views with the same estimator: old API usage no longer
+	// measures a rewritten prefix, and a no-op must not erase valid calibration.
+	changed := EstimateTotal(next) < EstimateTotal(view)
+	if changed {
+		next = InvalidateUsage(next)
+	} else {
 		next = view
 	}
 	info := summaryInfoFromView(next)
