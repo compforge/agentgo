@@ -131,6 +131,8 @@ _ = restored.Continue(ctx)
 | 终止策略 | `StopGuard` |
 | UI、日志与轨迹采集 | `<-chan Event` / `Agent.Subscribe` |
 
+生命周期事件携带源头时间与执行坐标，覆盖上下文准备、重试等待、工具调度和实际调用；Middleware 派生的 context 会传入模型与工具。失败、取消和 turn 提交的边界见[生命周期契约](docs/kernel.md#扩展与生命周期事实)。
+
 内置包包括 `codec/` 类型化状态编码、`llm/` 模型适配、`context/` 上下文策略、`tools/` 编程工具，以及可选的 `subagent/`、`team/`、`task/`、`proxy/` 和 `permission/` 能力。
 
 ## 设计与 API

@@ -40,8 +40,8 @@ func ContextWithExecution(ctx context.Context, execution Execution) context.Cont
 	return context.WithValue(ctx, executionContextKey{}, execution)
 }
 
-// ExecutionFromContext returns the nearest parent execution when one was
-// installed by AgentGo or the caller.
+// ExecutionFromContext returns the current execution installed by AgentGo or
+// the caller. Nested work can use it as its parent coordinate.
 func ExecutionFromContext(ctx context.Context) (Execution, bool) {
 	execution, ok := ctx.Value(executionContextKey{}).(Execution)
 	return execution, ok

@@ -21,14 +21,16 @@ type AfterTurnContext struct {
 	State       AgentState
 }
 
-// BeforeTurnHook runs before each model call. Returned messages are committed
+// BeforeTurnHook runs once before each logical turn, not once per retry. Returned messages are committed
 // to the transcript before the request, allowing applications to prepare or
 // steer the next turn without teaching the loop about business phases.
 type BeforeTurnHook func(context.Context, BeforeTurnContext) ([]AgentMessage, error)
 
 // AfterTurnHook runs after a turn has been committed and the loop has decided
 // whether and how to advance. State therefore reflects a complete turn
-// boundary. Returning an error stops the run.
+// boundary. It is not a finally hook: preparation/provider/commit failures do
+// not call it. Their incomplete turn_end event carries Err without a State.
+// Returning an error stops the run after the committed turn_end event.
 type AfterTurnHook func(context.Context, AfterTurnContext) error
 
 func snapshotAgentContext(current *AgentContext) AgentContext {

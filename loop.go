@@ -47,6 +47,9 @@ func startAgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentC
 	ch := make(chan Event, 128)
 	terminal := &terminalEvent{}
 	sink := eventSink{ctx: ctx, ch: ch, terminal: terminal}
+	// The runtime belongs to the whole loop, so model calls made inside tools
+	// use the same middleware and event path as conversation and summary calls.
+	ctx = withModelExecutionRuntime(ctx, config.ModelMiddlewares, sink.emit)
 
 	go func() {
 		var newMessages []AgentMessage
@@ -79,7 +82,6 @@ func startAgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentC
 
 		startState := snapshotRunState(state, &currentCtx)
 		sink.emit(Event{Type: EventAgentStart, State: &startState})
-		sink.emit(Event{Type: EventTurnStart})
 
 		for _, prompt := range prompts {
 			sink.emit(Event{Type: EventMessageStart, Message: prompt})
@@ -134,6 +136,9 @@ func snapshotRunState(state AgentState, current *AgentContext) AgentState {
 func finishAgentRun(current *AgentContext, state *AgentState, sink eventSink) {
 	if sink.terminal.event == nil {
 		sink.emitError(errors.New("agent loop ended without terminal event"), &RunSummary{EndReason: EndReasonError})
+	}
+	if sink.terminal.turnOpen {
+		sink.emit(Event{Type: EventTurnEnd, TurnIndex: sink.terminal.turnIndex, Err: sink.terminal.event.Err})
 	}
 	state.Progress.Active = false
 	state.IsRunning = false
@@ -191,7 +196,6 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 		maxTurns = defaultMaxTurns
 	}
 
-	firstTurn := true
 	turnCount := state.Progress.CompletedTurns
 	lengthRecoveryCount := state.Progress.LengthRecoveries
 	toolErrors := cloneStringIntMap(state.Progress.ConsecutiveToolErrors)
@@ -259,7 +263,7 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 		state.Progress.ToolErrors = summaryState.toolErrors
 		state.Progress.ConsecutiveToolErrors = cloneStringIntMap(toolErrors)
 		turnState := snapshotRunState(*state, currentCtx)
-		sink.emit(Event{Type: EventTurnEnd, Message: message, ToolResults: append([]ToolResult(nil), results...), State: &turnState})
+		sink.emit(Event{Type: EventTurnEnd, TurnIndex: turnIndex, Message: message, ToolResults: append([]ToolResult(nil), results...), State: &turnState})
 		if config.AfterTurn == nil {
 			return true
 		}
@@ -327,11 +331,7 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 			return
 		}
 
-		if !firstTurn {
-			sink.emit(Event{Type: EventTurnStart})
-		} else {
-			firstTurn = false
-		}
+		sink.emit(Event{Type: EventTurnStart, TurnIndex: turnCount + 1})
 
 		// Process pending messages (inject before next LLM call)
 		if len(pendingMessages) > 0 {

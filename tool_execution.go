@@ -21,7 +21,10 @@ func executeToolCalls(ctx context.Context, turnIndex int, tools []Tool, calls []
 // executeSingleToolCall wraps the complete validation, authorization and
 // execution pipeline. A middleware can return a known ToolResult without
 // invoking next, so replay never reaches gates or external side effects.
-func executeSingleToolCall(ctx context.Context, tools []Tool, execution ToolExecution, config LoopConfig, failCount int, sink eventSink) ToolResult {
+func executeSingleToolCall(ctx context.Context, tools []Tool, execution ToolExecution, config LoopConfig, failCount int, sink eventSink) (result ToolResult) {
+	ctx = ContextWithExecution(ctx, execution.Execution)
+	disposition := ToolShortCircuited
+	var executionErr error
 	call := execution.Call
 	tool := findTool(tools, call.Name)
 	label := toolLabel(tool)
@@ -34,40 +37,38 @@ func executeSingleToolCall(ctx context.Context, tools []Tool, execution ToolExec
 		Args:      call.Args,
 	})
 
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			executionErr = fmt.Errorf("tool execution %s panicked: %v", execution.ID, recovered)
+			result = toolFailureResult(call, executionErr.Error(), true)
+		}
+		// A middleware cannot change the assistant's durable result pairing.
+		result.ToolCallID = call.ID
+		if !result.IsError && result.ToolName == "" {
+			result.ToolName = call.Name
+		}
+		sink.emit(Event{Type: EventToolExecEnd, Execution: executionRef(execution.Execution), ToolID: call.ID, Tool: call.Name, ToolLabel: label, Result: result.Content, IsError: result.IsError, Disposition: disposition, Err: executionErr})
+	}()
 	execute := func(ctx context.Context, execution ToolExecution) (ToolResult, error) {
-		return executeToolCallCore(ctx, tool, execution, config, failCount, label, sink), nil
+		disposition = ToolRejected
+		return executeToolCallCore(ctx, tool, execution, config, failCount, label, sink, &disposition), nil
 	}
 	if len(config.ToolMiddlewares) > 0 {
 		execute = buildToolMiddlewareChain(execute, config.ToolMiddlewares)
 	}
-	result, err := execute(ctx, execution)
-	if err != nil {
-		result = toolFailureResult(call, err.Error(), true)
+	result, executionErr = execute(ctx, execution)
+	if executionErr != nil {
+		result = toolFailureResult(call, executionErr.Error(), true)
 	}
-	// The assistant-issued ID is the durable pairing key. Middleware may
-	// replace the outcome, but cannot retarget it to another tool call.
-	result.ToolCallID = call.ID
-	if !result.IsError && result.ToolName == "" {
-		result.ToolName = call.Name
-	}
-
-	sink.emit(Event{
-		Type:      EventToolExecEnd,
-		Execution: executionRef(execution.Execution),
-		ToolID:    call.ID,
-		Tool:      call.Name,
-		ToolLabel: label,
-		Result:    result.Content,
-		IsError:   result.IsError,
-	})
 	return result
 }
 
 // executeToolCallCore performs one real tool call without middleware or the
 // start/end lifecycle events owned by executeSingleToolCall.
-func executeToolCallCore(ctx context.Context, tool Tool, execution ToolExecution, config LoopConfig, failCount int, label string, sink eventSink) ToolResult {
+func executeToolCallCore(ctx context.Context, tool Tool, execution ToolExecution, config LoopConfig, failCount int, label string, sink eventSink, disposition *ToolDisposition) ToolResult {
 	call := execution.Call
 	if ctx.Err() != nil {
+		*disposition = ToolSkipped
 		return toolFailureResult(call, "Tool execution cancelled.", false)
 	}
 	if config.MaxToolErrors > 0 && failCount >= config.MaxToolErrors {
@@ -138,7 +139,7 @@ func executeToolCallCore(ctx context.Context, tool Tool, execution ToolExecution
 				return toolFailureResult(call, reason, false)
 			}
 			// Adopt the gate's rewrite before execution so the tool, progress
-			// events, and middleware all see the approved arguments. The
+			// and invocation events see the approved arguments. The
 			// assistant message keeps the model's original args — like the
 			// exec-start event above, it records what was requested.
 			if decision != nil && len(decision.UpdatedArgs) > 0 {
@@ -161,10 +162,27 @@ func executeToolCallCore(ctx context.Context, tool Tool, execution ToolExecution
 			})
 		})
 
+		// Cancellation during authorization must not fall through into the tool.
+		if ctx.Err() != nil {
+			*disposition = ToolSkipped
+			return toolFailureResult(call, "Tool execution cancelled.", false)
+		}
+		*disposition = ToolInvoked
 		var result ToolResult
+		var invokeErr error
+		sink.emit(Event{Type: EventToolInvokeStart, Execution: executionRef(execution.Execution), ToolID: call.ID, Tool: call.Name, Args: call.Args})
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				invokeErr = fmt.Errorf("tool invocation panicked: %v", recovered)
+				sink.emit(Event{Type: EventToolInvokeEnd, Execution: executionRef(execution.Execution), ToolID: call.ID, Tool: call.Name, Err: invokeErr, IsError: true})
+				panic(recovered) // The execution boundary turns this into one tool result.
+			}
+			sink.emit(Event{Type: EventToolInvokeEnd, Execution: executionRef(execution.Execution), ToolID: call.ID, Tool: call.Name, Err: invokeErr, IsError: result.IsError})
+		}()
 		// ContentTool returns rich content blocks such as images.
 		if ct, ok := tool.(ContentTool); ok {
 			blocks, output, execErr := executeContentTool(progressCtx, ct, call)
+			invokeErr = execErr
 			if execErr != nil {
 				errContent, _ := json.Marshal(execErr.Error())
 				result = ToolResult{
@@ -200,6 +218,7 @@ func executeToolCallCore(ctx context.Context, tool Tool, execution ToolExecution
 			}
 		} else {
 			output, execErr := tool.Execute(progressCtx, call.Args)
+			invokeErr = execErr
 			if execErr != nil {
 				errContent, _ := json.Marshal(execErr.Error())
 				result = ToolResult{
@@ -236,13 +255,14 @@ func failToolCall(sink eventSink, execution ToolExecution, label, msg string, co
 	call := execution.Call
 	result := toolFailureResult(call, msg, countErr)
 	sink.emit(Event{
-		Type:      EventToolExecEnd,
-		Execution: executionRef(execution.Execution),
-		ToolID:    call.ID,
-		Tool:      call.Name,
-		ToolLabel: label,
-		Result:    result.Content,
-		IsError:   true,
+		Type:        EventToolExecEnd,
+		Execution:   executionRef(execution.Execution),
+		ToolID:      call.ID,
+		Tool:        call.Name,
+		ToolLabel:   label,
+		Result:      result.Content,
+		IsError:     true,
+		Disposition: ToolSkipped,
 	})
 	return result
 }

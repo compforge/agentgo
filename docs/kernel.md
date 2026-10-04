@@ -31,7 +31,7 @@ stateful `Agent` 在 Loop 之外还持有 steering / follow-up queue：输入一
 
 `codec` 包提供通用的 tagged value、稳定类型身份与 JSON 编解码；`AgentState`、`AgentSnapshot` 通过字段
 tag 声明自己的 portable projection，应用再注册自定义 `AgentMessage` 的具体类型。宿主可以在
-`EventTurnEnd` 已投影后调用 `Agent.Snapshot()` 保存 turn 边界，也可以直接使用 `AfterRunContext.Snapshot`
+携带 `State` 的 `EventTurnEnd` 已投影后调用 `Agent.Snapshot()` 保存 turn 边界，也可以直接使用 `AfterRunContext.Snapshot`
 保存终态。恢复 adapter 通过 `WithBeforeRun` 在 Loop 启动前返回完整 Snapshot；装载错误会拒绝本次 Run，
 后续 `Continue` 可以重试。`AfterRun` 在 Loop 完全结束、最终状态已经投影后执行，并先于终态 listener。
 `SetSnapshot` 只保留为低层状态操作，不是正常恢复流程必需的用户编排步骤。进入 AgentGo 之前的 durable
@@ -48,6 +48,38 @@ inbox 仍由宿主负责，Snapshot 只承诺覆盖 Agent 已经接受的输入�
 Execution 只表达 AgentGo 内部执行事实，不承诺跨 Run 全局唯一，也不吸收 Ledger、Trace 或工作流模型。
 宿主负责把它映射到持久化身份、复用已知结果或外部 provider request ID。由 AgentLoop 发起的 threshold /
 overflow compaction 会自动建立坐标；直接调用 ContextManager 的宿主则拥有该调用的执行作用域。
+
+## 扩展与生命周期事实
+
+Hook、Middleware 和 Event 分别承担有明确边界的工作：Run hook 属于 stateful Agent 的装载与收尾，
+Turn hook 负责准备输入和观察已提交的 turn，Middleware 包裹模型或工具执行，Event 输出发生过的事实。
+观测适配器组合这些公开契约；内核不另设 telemetry 层，也不依赖特定时间线或 tracing SDK。
+
+Middleware 按注册顺序由外向内执行，可修改请求、派生 context 或短路返回已知结果；每层最多调用一次
+`next`。模型重试由 Loop 管理，工具可能有外部副作用，不允许 Middleware 隐式重复执行。派生 context
+会传到 provider，以及工具的校验、预览、授权与实际调用；`ExecutionFromContext` 返回当前执行坐标。
+工具或 ContextManager 内的模型工作通过 `ExecuteModel` 进入相同执行路径，缺省 `ParentID` 从 context
+继承；直接调用 provider 不受此入口管理。嵌套调用必须在所属操作返回前完成；并发工具也可能并发进入
+模型 Middleware，调用状态应保持局部。Middleware 返回错误会影响执行，观测写入失败由适配器自行
+处理，不能伪装成业务执行失败。模型、ContextManager 方法和工具执行边界将 panic 转为失败结果。
+
+| 事实 | 边界与解释 |
+|------|------------|
+| `turn_start` / `turn_end` | 用 `TurnIndex` 关联。准备、模型或提交失败仍结束已开始的 turn；此时 `Err` 非空、`State` 为空，不推进已完成轮数，也不调用 `AfterTurn`。完整提交的 turn 才携带可恢复的 `State`。 |
+| `model_exec_start` / `model_exec_end` | 每次物理模型尝试，包含 Middleware；重试保持逻辑 ID，递增 Attempt。内部 summary 和工具中的模型调用也使用此路径。 |
+| `tool_queued` → `tool_exec_start` / `tool_exec_end` | 区分调度等待与执行管线。执行管线包含 Middleware、参数校验、预览和授权；结束时的 `Disposition` 区分实际调用、前置拒绝、Middleware 短路和跳过。 |
+| `tool_invoke_start` / `tool_invoke_end` | 仅覆盖 `Tool.Execute` / `ExecuteContent`，起始事件携带授权后实参。拒绝、短路和跳过不产生调用事件。 |
+| `context_prepare_start` / `context_prepare_end` | 覆盖 `ContextManager.Project` 或 `RecoverOverflow`，包括不压缩、失败的情况；`ContextOperation` 区分方法。结束表示方法返回，后续提交成功与否仍由提交路径负责。 |
+| `retry` 与 `retry_wait_start` / `retry_wait_end` | 前者报告重试计划；后者记录实际退避等待，包括取消提前结束。overflow recovery 本身不退避，不产生等待事件。 |
+
+`AfterTurn` 是提交边界回调，不是 finally；它失败时已提交的 turn 仍有效，Run 随后报告错误。
+`agent_end` 在 Loop 收尾和最终状态生成后记录，stateful Agent 的 `AfterRun` 在其后执行；该事件不能
+用于推断外层 hook 的耗时。并发工具事件按实际发生顺序输出，消息历史仍按模型请求顺序提交。
+
+Event 的 `Timestamp` 在源头、进入 channel 前记录，消费者不应以接收时间代替执行时间。并发事件的
+到达顺序未必与时间戳排序一致；耗时必须按 Run + Execution ID + Attempt 和事件种类配对。事件区间包含
+其间的流式输出与背压，不等同于 provider 服务端耗时。正常运行时 channel 使用背压；取消后维持既有的
+best-effort 投递，消费者需持续 drain，不能把缺失结束事件解释成成功，也不能假定所有结束事件必达。
 
 ## ContextItem 与 ContextDemand
 
