@@ -131,6 +131,8 @@ _ = restored.Continue(ctx)
 | Stop policy | `StopGuard` |
 | UI, logging, and trajectory capture | `<-chan Event` / `Agent.Subscribe` |
 
+Lifecycle events carry source timestamps and execution coordinates, including context preparation, retry waits, tool scheduling, and actual invocation. Middleware propagates derived contexts into model and tool calls. See the [lifecycle contract](docs/kernel.md#扩展与生命周期事实) for failure, cancellation, and committed-turn semantics.
+
 Built-in packages include typed state encoding under `codec/`, model adapters under `llm/`, context strategies under `context/`, coding tools under `tools/`, and optional `subagent/`, `team/`, `task/`, `proxy/`, and `permission/` capabilities.
 
 ## Design and API

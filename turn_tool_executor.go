@@ -67,6 +67,7 @@ func (e *turnToolExecutor) Add(call ToolCall) {
 		interruptBehavior: toolInterruptBehavior(tool, call.Args),
 	}
 
+	e.sink.emit(Event{Type: EventToolQueued, Execution: executionRef(entry.execution.Execution), ToolID: call.ID, Tool: call.Name, Args: call.Args})
 	e.mu.Lock()
 	entry.failCount = e.toolErrors[call.Name]
 	e.entries = append(e.entries, entry)

@@ -26,13 +26,17 @@ const (
 	// EventModelResponse fires after a conversation model call and any tool
 	// executions it triggered. Internal model calls such as context summaries
 	// use model_exec_start/model_exec_end without becoming conversation output.
-	EventModelResponse  EventType = "model_response"
-	EventMessageStart   EventType = "message_start"
-	EventMessageUpdate  EventType = "message_update"
-	EventMessageEnd     EventType = "message_end"
-	EventToolExecStart  EventType = "tool_exec_start"
-	EventToolExecUpdate EventType = "tool_exec_update"
-	EventToolExecEnd    EventType = "tool_exec_end"
+	EventModelResponse EventType = "model_response"
+	EventMessageStart  EventType = "message_start"
+	EventMessageUpdate EventType = "message_update"
+	EventMessageEnd    EventType = "message_end"
+	// EventToolQueued records scheduler admission, before a call can start or be skipped.
+	EventToolQueued      EventType = "tool_queued"
+	EventToolInvokeStart EventType = "tool_invoke_start"
+	EventToolInvokeEnd   EventType = "tool_invoke_end"
+	EventToolExecStart   EventType = "tool_exec_start"
+	EventToolExecUpdate  EventType = "tool_exec_update"
+	EventToolExecEnd     EventType = "tool_exec_end"
 	// EventContextProjected fires before each model call with the identifiable
 	// items exposed by the actual projected AgentMessage context. It is a trace
 	// fact, not a judgment that any item was useful or sufficient.
@@ -41,8 +45,32 @@ const (
 	// context compaction transaction and before the compacted view is sent to
 	// the model. Internal compactor stages do not emit separate events.
 	EventContextCompacted EventType = "context_compacted"
-	EventRetry            EventType = "retry"
-	EventError            EventType = "error"
+	// Context preparation brackets the ContextManager method, before any commit.
+	// ContextCompacted remains the fact that a rewrite occurred.
+	EventContextPrepareStart EventType = "context_prepare_start"
+	EventContextPrepareEnd   EventType = "context_prepare_end"
+	EventRetryWaitStart      EventType = "retry_wait_start"
+	EventRetryWaitEnd        EventType = "retry_wait_end"
+	EventRetry               EventType = "retry"
+	EventError               EventType = "error"
+)
+
+// ToolDisposition distinguishes an actual invocation from pipeline-only outcomes.
+type ToolDisposition string
+
+const (
+	ToolInvoked        ToolDisposition = "invoked"
+	ToolRejected       ToolDisposition = "rejected"
+	ToolShortCircuited ToolDisposition = "short_circuited"
+	ToolSkipped        ToolDisposition = "skipped"
+)
+
+// ContextOperation identifies the ContextManager method being observed.
+type ContextOperation string
+
+const (
+	ContextProject         ContextOperation = "project"
+	ContextRecoverOverflow ContextOperation = "recover_overflow"
 )
 
 // ToolExecUpdateKind distinguishes update payload semantics for tool_exec_update events.
@@ -84,7 +112,17 @@ const (
 // Event is a lifecycle event emitted by the agent loop.
 // This is the single output channel for all lifecycle information.
 type Event struct {
-	Type         EventType
+	Type EventType
+	// Timestamp is captured at the source before channel delivery can block.
+	// Concurrent producers need not arrive in timestamp order.
+	Timestamp time.Time
+	// TurnIndex is one-based on turn_start/turn_end. A failed turn_end has Err,
+	// no completed State, and does not invoke AfterTurn or advance saved progress.
+	TurnIndex        int
+	ContextOperation ContextOperation
+	// Disposition is populated on tool_exec_end. Invocation events bracket only
+	// Tool.Execute/ExecuteContent; execution events include middleware and gates.
+	Disposition  ToolDisposition
 	Execution    *Execution      // shared coordinate for model/tool/compaction execution facts
 	Message      AgentMessage    // for message_start/update/end, turn_end
 	Delta        string          // text delta for message_update
@@ -99,7 +137,7 @@ type Event struct {
 	IsError      bool // tool error flag for tool_exec_end
 	Preview      json.RawMessage
 	ToolResults  []ToolResult    // for turn_end: all tool results from this turn
-	Err          error           // for error events
+	Err          error           // failure cause on error and lifecycle end events
 	NewMessages  []AgentMessage  // for agent_end: messages added during this loop
 	RetryInfo    *RetryInfo      // for retry events
 	ContextItems []ContextItem   // for context_projected
@@ -130,8 +168,10 @@ type eventSink struct {
 }
 
 type terminalEvent struct {
-	event *Event
-	err   error
+	event     *Event
+	err       error
+	turnIndex int
+	turnOpen  bool
 }
 
 // emit sends an event to the channel, blocking when it is full — backpressure,
@@ -141,6 +181,17 @@ type terminalEvent struct {
 // full the event is dropped so an abandoned channel cannot leak the loop
 // goroutine.
 func (s eventSink) emit(ev Event) {
+	if ev.Timestamp.IsZero() {
+		ev.Timestamp = time.Now()
+	}
+	if s.terminal != nil {
+		switch ev.Type {
+		case EventTurnStart:
+			s.terminal.turnIndex, s.terminal.turnOpen = ev.TurnIndex, true
+		case EventTurnEnd:
+			s.terminal.turnOpen = false
+		}
+	}
 	if ev.Type == EventError && s.terminal != nil && ev.Err != nil {
 		s.terminal.err = errors.Join(s.terminal.err, ev.Err)
 	}
@@ -170,6 +221,9 @@ func (s eventSink) flushTerminal() {
 	if s.terminal == nil || s.terminal.event == nil {
 		return
 	}
+	// agent_end becomes complete only after final state and an unfinished turn
+	// have been finalized. Timestamp it here, still before channel delivery.
+	s.terminal.event.Timestamp = time.Now()
 	s.emitNow(*s.terminal.event)
 }
 

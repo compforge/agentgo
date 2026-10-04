@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // buildConfig constructs a LoopConfig from the agent's settings. Must be called with lock held.
@@ -230,7 +231,7 @@ func (a *Agent) consumeAgentEnd(runCtx context.Context, kind RunKind, ev Event) 
 	a.runMu.Unlock()
 
 	if hookErr != nil {
-		notifyListeners(listeners, Event{Type: EventError, Err: hookErr})
+		notifyListeners(listeners, Event{Type: EventError, Timestamp: time.Now(), Err: hookErr})
 	}
 	notifyListeners(listeners, ev)
 }

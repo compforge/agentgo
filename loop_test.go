@@ -250,8 +250,8 @@ func TestAgentLoop_ModelMiddlewareErrorStopsRun(t *testing.T) {
 		if len(committed) != 1 || committed[0].GetRole() != RoleUser {
 			t.Fatalf("committed messages = %#v, want only the prompt", committed)
 		}
-		if _, ok := findEvent(events, EventTurnEnd); ok {
-			t.Fatal("turn_end emitted for rejected model response")
+		if turnEnd, ok := findEvent(events, EventTurnEnd); !ok || turnEnd.Err == nil || turnEnd.State != nil {
+			t.Fatal("rejected model response must end the turn without committing progress")
 		}
 		requireEvent(t, events, EventError)
 		end, _ := findEvent(events, EventAgentEnd)
@@ -321,8 +321,11 @@ func TestCallLLM_CommitsProjectedContextWhenRequested(t *testing.T) {
 	}
 	close(events)
 	gotEvents := collectEvents(events)
-	if len(gotEvents) == 0 || gotEvents[0].Type != EventContextCompacted {
-		t.Fatalf("first event = %+v, want context_compacted before model events", gotEvents)
+	wantPrefix := []EventType{EventContextPrepareStart, EventContextPrepareEnd, EventContextCompacted, EventContextProjected}
+	for i, want := range wantPrefix {
+		if len(gotEvents) <= i || gotEvents[i].Type != want {
+			t.Fatalf("event %d = %+v, want preparation then compaction before model events", i, gotEvents)
+		}
 	}
 	if got := countEvent(gotEvents, EventContextCompacted); got != 1 {
 		t.Fatalf("context_compacted events = %d, want 1", got)

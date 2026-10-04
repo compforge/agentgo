@@ -30,7 +30,6 @@ func (e *steeringCommitError) Unwrap() error { return e.cause }
 // replay tool side effects. callOptions are selected once per logical model
 // call and reused by every retry attempt.
 func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopConfig, turnIndex int, sink eventSink, steer func() ([]AgentMessage, error)) (Message, llmCallInfo, error) {
-	ctx = withModelExecutionRuntime(ctx, config.ModelMiddlewares, sink.emit)
 	maxRetries := config.MaxRetries
 	if maxRetries < 0 {
 		maxRetries = 0
@@ -87,10 +86,8 @@ func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopCo
 			},
 		})
 
-		select {
-		case <-ctx.Done():
-			return Message{}, lastInfo, ctx.Err()
-		case <-time.After(delay):
+		if err := waitForRetry(ctx, info.Execution, delay, sink); err != nil {
+			return Message{}, lastInfo, err
 		}
 	}
 	return Message{}, lastInfo, lastErr
@@ -117,7 +114,7 @@ func recoverOverflow(ctx context.Context, agentCtx *AgentContext, config LoopCon
 
 	compactExecution := newCompactExecution(turnIndex, CompactReasonOverflow, 1)
 	recoveryCtx := ContextWithExecution(ctx, compactExecution)
-	recovery, err := config.ContextManager.RecoverOverflow(recoveryCtx, agentCtx.Messages, originalErr)
+	recovery, err := recoverContext(recoveryCtx, config.ContextManager, compactExecution, agentCtx.Messages, originalErr, sink)
 	if err != nil {
 		return Message{}, llmCallInfo{Execution: failedExecution}, &ContextOverflowError{Cause: fmt.Errorf("compaction failed: %w", err)}
 	}
@@ -158,6 +155,9 @@ func retryDelay(err error, attempt int) time.Duration {
 // callLLM applies the two-stage pipeline and calls the model.
 func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, turnIndex, attempt int, sink eventSink, steer func() ([]AgentMessage, error)) (Message, llmCallInfo, error) {
 	execution := newModelExecution(turnIndex, attempt)
+	if parent, ok := ExecutionFromContext(ctx); ok && parent.ID != execution.ID {
+		execution.ParentID = parent.ID
+	}
 	info := llmCallInfo{Execution: execution.Execution}
 	messages := agentCtx.Messages
 
@@ -165,7 +165,7 @@ func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, tur
 	if config.ContextManager != nil {
 		compactExecution := newCompactExecution(turnIndex, CompactReasonThreshold, attempt)
 		projectionCtx := ContextWithExecution(ctx, compactExecution)
-		projection, err := config.ContextManager.Project(projectionCtx, messages)
+		projection, err := projectContext(projectionCtx, config.ContextManager, compactExecution, messages, sink)
 		if err != nil {
 			return Message{}, info, fmt.Errorf("project context: %w", err)
 		}

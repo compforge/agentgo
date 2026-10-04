@@ -362,7 +362,11 @@ type ToolExecuteFunc func(context.Context, ToolExecution) (ToolResult, error)
 
 // ToolMiddleware wraps tool execution with cross-cutting concerns.
 // Call next to continue the chain; skip next to short-circuit execution.
-// Example: logging, timing, argument/result modification, audit.
+// The first middleware is outermost. Call next at most once: repeating a tool
+// can duplicate side effects. The chain includes validation, preview, gate and
+// invocation, but excludes scheduler waiting. A derived context reaches all
+// inner stages. Errors become tool results; panics at this boundary do too.
+// A diagnostic adapter must not return its own recording failure as a tool error.
 type ToolMiddleware func(context.Context, ToolExecution, ToolExecuteFunc) (ToolResult, error)
 
 // ---------------------------------------------------------------------------
