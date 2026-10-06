@@ -10,7 +10,11 @@ import (
 // MessageCompactor asks application messages for progressively smaller
 // semantic representations before generic trimming or summarization discards
 // structure the application understands better.
-type MessageCompactor struct{}
+type MessageCompactor struct {
+	// OldestFirst compacts older messages first within a priority tier. The
+	// default preserves the longest unchanged prefix for provider caches.
+	OldestFirst bool
+}
 
 func NewMessageCompactor() *MessageCompactor {
 	return &MessageCompactor{}
@@ -29,10 +33,13 @@ func (s *MessageCompactor) Compact(
 	tokens := EstimateTotal(out)
 	target := int(float64(tokens) * clampRatio(expect))
 
-	// Spend the deficit on lower-priority messages first. Within one tier start
-	// at the tail to preserve the longest prompt prefix for provider caches.
+	// Priority controls importance; the selected order breaks ties only.
 	for _, priority := range compactionPriorities(out) {
-		for i := len(out) - 1; i >= 0 && tokens > target; i-- {
+		for offset := 0; offset < len(out) && tokens > target; offset++ {
+			i := len(out) - 1 - offset
+			if s.OldestFirst {
+				i = offset
+			}
 			message := out[i]
 			if message.Priority() != priority {
 				continue

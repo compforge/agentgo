@@ -7,6 +7,7 @@ import (
 	"github.com/compforge/agentgo"
 )
 
+// KeepRecent uses the default at zero; a negative value disables suffix protection.
 type LightTrimConfig struct {
 	KeepRecent    int
 	TextThreshold int
@@ -19,8 +20,10 @@ type LightTrimCompactor struct {
 }
 
 func NewLightTrimCompactor(cfg LightTrimConfig) *LightTrimCompactor {
-	if cfg.KeepRecent <= 0 {
+	if cfg.KeepRecent == 0 {
 		cfg.KeepRecent = 4
+	} else if cfg.KeepRecent < 0 {
+		cfg.KeepRecent = 0
 	}
 	if cfg.TextThreshold <= 0 {
 		cfg.TextThreshold = 4000

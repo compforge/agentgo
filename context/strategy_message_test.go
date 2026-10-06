@@ -160,3 +160,24 @@ func TestMessageCompactorPriorityOverridesRecency(t *testing.T) {
 		t.Fatalf("high-priority stage = %d, want 0", got)
 	}
 }
+
+func TestMessageCompactorOldestFirstKeepsPriorityAndRaw(t *testing.T) {
+	full := strings.Repeat("x", 8000)
+	messages := []agentgo.AgentMessage{
+		stagedMessage{contents: []string{full, "high"}, priority: 20},
+		stagedMessage{contents: []string{full, "old"}},
+		stagedMessage{contents: []string{full, "new"}},
+	}
+	view, err := (&MessageCompactor{OldestFirst: true}).Compact(t.Context(), messages, 0.8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, stage := range []int{0, 1, 0} {
+		if view[i].(stagedMessage).stage != stage {
+			t.Fatalf("message %d stage = %d, want %d", i, view[i].(stagedMessage).stage, stage)
+		}
+		if view[i].Raw().TextContent() != full || messages[i].TextContent() != full {
+			t.Fatal("raw or input changed")
+		}
+	}
+}

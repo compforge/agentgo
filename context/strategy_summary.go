@@ -21,7 +21,8 @@ type FullSummaryConfig struct {
 	// Nil defaults to true.
 	StripImages *bool
 	// KeepRecentTokens reserves a recent suffix to keep verbatim. Zero scales it
-	// from the budget instead.
+	// from the budget instead. A negative value summarizes the entire input;
+	// use this when the caller already protects its active context.
 	KeepRecentTokens int
 	// PostSummaryHooks inject lightweight reminder messages after the summary.
 	PostSummaryHooks []PostSummaryHook
@@ -56,7 +57,7 @@ func (s *SummaryCompactor) setContextWindow(window, reserve int) {
 
 // keepRecentTokens scales the verbatim tail with the requested output size.
 func (s *SummaryCompactor) keepRecentTokens(target int) int {
-	if s.cfg.KeepRecentTokens > 0 {
+	if s.cfg.KeepRecentTokens != 0 {
 		return s.cfg.KeepRecentTokens
 	}
 	return min(maxKeepRecentTokens, max(minKeepRecentTokens, target/4))

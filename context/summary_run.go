@@ -244,6 +244,9 @@ type cutResult struct {
 // the token boundary lands on a tool result. Advancing instead can skip every
 // remaining group in a tool-only conversation and prevent compaction entirely.
 func findCutPoint(msgs []agentgo.AgentMessage, keepTokens int) cutResult {
+	if keepTokens < 0 {
+		return cutResult{firstKeptIndex: len(msgs), turnStartIndex: -1}
+	}
 	cutIndex, accumulated := -1, 0
 	for i := len(msgs) - 1; i >= 0; i-- {
 		accumulated += EstimateTokens(msgs[i])

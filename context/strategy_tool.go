@@ -13,6 +13,7 @@ import (
 // re-spell it and drift.
 const DefaultClearedToolResult = "[Tool result cleared to save context.]"
 
+// KeepRecent uses the default at zero; a negative value disables suffix protection.
 type ToolResultMicrocompactConfig struct {
 	Classifier     ToolClassifier
 	KeepRecent     int
@@ -33,8 +34,10 @@ type ToolResultCompactor struct {
 }
 
 func NewToolResultCompactor(cfg ToolResultMicrocompactConfig) *ToolResultCompactor {
-	if cfg.KeepRecent <= 0 {
+	if cfg.KeepRecent == 0 {
 		cfg.KeepRecent = 5
+	} else if cfg.KeepRecent < 0 {
+		cfg.KeepRecent = 0
 	}
 	if cfg.ClearedMessage == "" {
 		cfg.ClearedMessage = DefaultClearedToolResult
