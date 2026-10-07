@@ -39,9 +39,8 @@ func TestAgentLoopModelMiddlewareCoversContextSummaryExecution(t *testing.T) {
 	summaryModel := executionTestModel{reply: "<summary>compacted history</summary>"}
 	mainModel := executionTestModel{reply: "done"}
 	manager := agentcontext.NewEngine(agentcontext.EngineConfig{
-		ContextWindow:   1024,
-		ReserveTokens:   128,
-		CommitOnProject: true,
+		ContextWindow: 1024,
+		ReserveTokens: 128,
 		Compactor: agentcontext.NewSummaryCompactor(agentcontext.FullSummaryConfig{
 			Model:            summaryModel,
 			ContextWindow:    1024,

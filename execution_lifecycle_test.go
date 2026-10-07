@@ -161,14 +161,14 @@ type lifecycleManager struct {
 	failure string
 }
 
-func (m lifecycleManager) Project(ctx context.Context, messages []AgentMessage) (ContextProjection, error) {
+func (m lifecycleManager) Transform(ctx context.Context, messages []AgentMessage) ([]AgentMessage, error) {
 	if m.failure == "panic" {
 		panic("projection failed")
 	}
 	if m.failure == "error" {
-		return ContextProjection{}, errors.New("projection failed")
+		return nil, errors.New("projection failed")
 	}
-	return ContextProjection{Messages: messages}, nil
+	return messages, nil
 }
 func (m lifecycleManager) RecoverOverflow(ctx context.Context, messages []AgentMessage, cause error) (ContextRecoveryResult, error) {
 	if m.failure == "overflow" {

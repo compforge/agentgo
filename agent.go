@@ -652,13 +652,11 @@ func (a *Agent) BuildLLMMessages() ([]Message, error) {
 	a.mu.Unlock()
 
 	if mgr != nil {
-		proj, err := mgr.Project(context.Background(), msgs)
+		view, err := mgr.Transform(context.Background(), msgs)
 		if err != nil {
 			return nil, err
 		}
-		if proj.Messages != nil {
-			msgs = proj.Messages
-		}
+		msgs = view
 	}
 
 	llmMessages := RepairMessageSequence(ToMessages(msgs))

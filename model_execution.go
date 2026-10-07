@@ -165,24 +165,22 @@ func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, tur
 	if config.ContextManager != nil {
 		compactExecution := newCompactExecution(turnIndex, CompactReasonThreshold, attempt)
 		projectionCtx := ContextWithExecution(ctx, compactExecution)
-		projection, err := projectContext(projectionCtx, config.ContextManager, compactExecution, messages, sink)
+		view, compacted, err := prepareContext(projectionCtx, config.ContextManager, compactExecution, messages, sink)
 		if err != nil {
-			return Message{}, info, fmt.Errorf("project context: %w", err)
+			return Message{}, info, fmt.Errorf("transform context: %w", err)
 		}
-		if projection.ShouldCommit && len(projection.CommitMessages) > 0 {
+		if compacted.Changed {
 			if config.CommitContext != nil {
-				if err := config.CommitContext(projection.CommitMessages, projection.Usage); err != nil {
-					return Message{}, info, fmt.Errorf("project context commit failed: %w", err)
+				if err := config.CommitContext(compacted.Messages, compacted.Usage); err != nil {
+					return Message{}, info, fmt.Errorf("transform context commit failed: %w", err)
 				}
 			}
-			agentCtx.Messages = copyMessages(projection.CommitMessages)
-			messages = copyMessages(projection.CommitMessages)
+			agentCtx.Messages = copyMessages(compacted.Messages)
+			messages = copyMessages(compacted.Messages)
 		}
-		if projection.Messages != nil {
-			messages = projection.Messages
-		}
-		if projection.Compaction != nil {
-			sink.emit(Event{Type: EventContextCompacted, Execution: executionRef(compactExecution), Compaction: projection.Compaction})
+		messages = view
+		if compacted.Compaction != nil {
+			sink.emit(Event{Type: EventContextCompacted, Execution: executionRef(compactExecution), Compaction: compacted.Compaction})
 		}
 	}
 	// Keep steering in both the durable baseline and this request's projected
@@ -194,6 +192,12 @@ func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, tur
 		}
 		if len(pending) > 0 {
 			messages = append(copyMessages(messages), pending...)
+			if config.ContextManager != nil {
+				messages, err = transformContextView(ctx, config.ContextManager, messages)
+				if err != nil {
+					return Message{}, info, err
+				}
+			}
 		}
 	}
 	sink.emit(Event{Type: EventContextProjected, Execution: executionRef(execution.Execution), ContextItems: CollectContextItems(messages)})

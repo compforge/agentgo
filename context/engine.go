@@ -34,15 +34,14 @@ type EngineConfig struct {
 	// Compactor owns the complete reduction policy. The engine only computes
 	// the aggregate target ratio and validates the resulting size.
 	Compactor Compactor
-	// CommitOnProject makes threshold-triggered projections replace the runtime
-	// baseline. Explicit Compact and overflow recovery always commit changes.
-	CommitOnProject bool
-	// OnProject is called when Project rewrites the prompt view.
-	OnProject func(RewriteEvent)
+	// Transformers build the request view on every call, independently of pressure.
+	Transformers []Transformer
+	// OnCompact is called when threshold compaction rewrites the baseline candidate.
+	OnCompact func(RewriteEvent)
 	// OnRecover is called when RecoverOverflow rewrites the prompt view.
 	OnRecover func(RewriteEvent)
 	// MaxConsecutiveFailures is the circuit breaker threshold. After this many
-	// consecutive Project failures, the engine skips compression and returns
+	// consecutive threshold compaction failures, the engine skips compression and returns
 	// the original messages to avoid wasting API calls. 0 = default (3).
 	MaxConsecutiveFailures int
 }
@@ -67,7 +66,7 @@ type RewriteEvent struct {
 }
 
 // ContextEngine implements agentgo.ContextManager with one replaceable
-// compaction policy.
+// compaction policy and request-local transformations.
 type ContextEngine struct {
 	cfg EngineConfig
 
@@ -79,7 +78,7 @@ type ContextEngine struct {
 	lastScope  string
 	lastChange changeState
 
-	// Circuit breaker: consecutive Project failures. Reset on success.
+	// Circuit breaker: consecutive threshold compaction failures. Reset on success.
 	consecutiveFailures int
 	maxFailures         int
 }
@@ -125,12 +124,11 @@ func NewDefaultEngine(model agentgo.ChatModel, contextWindow int) *ContextEngine
 	})
 }
 
-// SetProjectHook installs the callback fired when Project rewrites the prompt
-// view due to context pressure.
-func (e *ContextEngine) SetProjectHook(fn func(RewriteEvent)) {
+// SetCompactHook observes threshold compaction and circuit-breaker decisions.
+func (e *ContextEngine) SetCompactHook(fn func(RewriteEvent)) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.cfg.OnProject = fn
+	e.cfg.OnCompact = fn
 }
 
 // SetRecoverHook installs the callback fired when RecoverOverflow rewrites the
@@ -211,15 +209,20 @@ func (e *ContextEngine) Snapshot() *agentgo.ContextSnapshot {
 	}
 }
 
-// Project builds the prompt view for one LLM call without committing a new
-// runtime baseline. Includes a circuit breaker: after maxFailures consecutive
-// compression errors, Project skips one cycle, reports the skipped state, then
+// compactThreshold prepares an explicit baseline rewrite under pressure. Includes a circuit breaker: after maxFailures consecutive
+// compression errors, threshold compaction skips one cycle, reports the skipped state, then
 // re-arms itself in a half-open state so later calls can retry compression.
-func (e *ContextEngine) Project(ctx context.Context, msgs []agentgo.AgentMessage) (agentgo.ContextProjection, error) {
-	e.Sync(msgs)
+func (e *ContextEngine) compactThreshold(ctx context.Context, msgs []agentgo.AgentMessage) (agentgo.ContextCommitResult, error) {
+	view, err := e.Transform(ctx, msgs)
+	if err != nil {
+		return agentgo.ContextCommitResult{}, err
+	}
+	if e.cfg.ContextWindow <= 0 || e.estimateUsage(view).Tokens <= e.threshold(e.cfg.ContextWindow) {
+		return agentgo.ContextCommitResult{Messages: msgs, Usage: ptrUsage(e.estimateUsage(view))}, nil
+	}
 
 	// Circuit breaker: skip compression after too many consecutive failures.
-	// Unlike a silent bypass, we still fire OnProject so the host can observe
+	// Unlike a silent bypass, we still fire OnCompact so the host can observe
 	// and display the skipped state.
 	e.mu.Lock()
 	tripped := e.consecutiveFailures >= e.maxFailures
@@ -235,8 +238,8 @@ func (e *ContextEngine) Project(ctx context.Context, msgs []agentgo.AgentMessage
 			e.consecutiveFailures = 0
 		}
 		e.mu.Unlock()
-		if e.cfg.OnProject != nil {
-			e.cfg.OnProject(RewriteEvent{
+		if e.cfg.OnCompact != nil {
+			e.cfg.OnCompact(RewriteEvent{
 				Reason:       "circuit_breaker",
 				Changed:      false,
 				Committed:    false,
@@ -245,7 +248,7 @@ func (e *ContextEngine) Project(ctx context.Context, msgs []agentgo.AgentMessage
 				Failures:     failures,
 			})
 		}
-		return agentgo.ContextProjection{Messages: msgs, Usage: usage}, nil
+		return agentgo.ContextCommitResult{Messages: msgs, Usage: usage}, nil
 	}
 
 	r, err := e.apply(ctx, msgs, false)
@@ -253,7 +256,7 @@ func (e *ContextEngine) Project(ctx context.Context, msgs []agentgo.AgentMessage
 		e.mu.Lock()
 		e.consecutiveFailures++
 		e.mu.Unlock()
-		return agentgo.ContextProjection{}, err
+		return agentgo.ContextCommitResult{}, err
 	}
 
 	// Reset on successful compression.
@@ -262,9 +265,9 @@ func (e *ContextEngine) Project(ctx context.Context, msgs []agentgo.AgentMessage
 		e.consecutiveFailures = 0
 		e.mu.Unlock()
 	}
-	compaction := newCompactionInfo(agentgo.CompactReasonThreshold, e.cfg.CommitOnProject, msgs, r)
-	if r.Changed && e.cfg.OnProject != nil {
-		e.cfg.OnProject(RewriteEvent{
+	compaction := newCompactionInfo(agentgo.CompactReasonThreshold, true, msgs, r)
+	if r.Changed && e.cfg.OnCompact != nil {
+		e.cfg.OnCompact(RewriteEvent{
 			Reason:       string(compaction.Reason),
 			Changed:      true,
 			Committed:    compaction.Committed,
@@ -274,22 +277,16 @@ func (e *ContextEngine) Project(ctx context.Context, msgs []agentgo.AgentMessage
 			View:         r.View,
 		})
 	}
-	proj := agentgo.ContextProjection{
-		Messages:   r.View,
-		Usage:      r.Usage,
-		Compaction: compaction,
-	}
-	if r.Changed && e.cfg.CommitOnProject {
-		proj.CommitMessages = copyMessages(r.View)
-		proj.ShouldCommit = true
-	}
-	return proj, nil
+	return agentgo.ContextCommitResult{Messages: r.View, Usage: r.Usage, Changed: r.Changed, Compaction: compaction}, nil
 }
 
 // Compact performs a forced rewrite suitable for explicit committed actions
 // such as /compact. The caller should replace its runtime baseline with the
 // returned Messages when Changed is true.
 func (e *ContextEngine) Compact(ctx context.Context, msgs []agentgo.AgentMessage, reason agentgo.CompactReason) (agentgo.ContextCommitResult, error) {
+	if reason == agentgo.CompactReasonThreshold {
+		return e.compactThreshold(ctx, msgs)
+	}
 	e.Sync(msgs)
 	r, err := e.apply(ctx, msgs, true)
 	if err != nil {

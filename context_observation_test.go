@@ -96,7 +96,7 @@ func TestAgentLoopEmitsProjectedContextInventory(t *testing.T) {
 	}
 }
 
-func TestContextProjectedEventUsesActualCompactedRepresentation(t *testing.T) {
+func TestContextTransformedEventUsesActualCompactedRepresentation(t *testing.T) {
 	key := ContextKey{Kind: "file", Identity: "a.go"}
 	raw := observedApplicationMessage{
 		applicationMessage: applicationMessage{text: "full source", include: true},
@@ -110,7 +110,7 @@ func TestContextProjectedEventUsesActualCompactedRepresentation(t *testing.T) {
 	events := make(chan Event, 8)
 	config := LoopConfig{
 		ContextManager: projectionCommitManager{
-			projection: ContextProjection{Messages: []AgentMessage{outline}},
+			projection: ContextCommitResult{Messages: []AgentMessage{outline}},
 		},
 		Model: mockModel(assistantMsg("done", StopReasonStop)),
 	}
