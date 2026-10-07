@@ -274,7 +274,7 @@ func TestCallLLM_CommitsProjectedContextWhenRequested(t *testing.T) {
 	var committed []AgentMessage
 	cfg := LoopConfig{
 		ContextManager: projectionCommitManager{
-			projection: ContextProjection{
+			projection: ContextCommitResult{
 				Messages: []AgentMessage{
 					UserMsg(trimmed),
 					UserMsg("recent"),
@@ -284,11 +284,7 @@ func TestCallLLM_CommitsProjectedContextWhenRequested(t *testing.T) {
 					ContextWindow: 1024,
 					Percent:       12.5,
 				},
-				CommitMessages: []AgentMessage{
-					UserMsg(trimmed),
-					UserMsg("recent"),
-				},
-				ShouldCommit: true,
+				Changed: true,
 				Compaction: &CompactionInfo{
 					Reason: CompactReasonThreshold, Committed: true,
 					TokensBefore: 200, TokensAfter: 128,
@@ -350,7 +346,7 @@ func TestCallLLMWithRetry_EmitsOverflowCompaction(t *testing.T) {
 		return &LLMResponse{Message: assistantMsg("recovered", StopReasonStop)}, nil
 	})
 	manager := projectionCommitManager{
-		projection: ContextProjection{Messages: []AgentMessage{UserMsg("compact")}},
+		projection: ContextCommitResult{Messages: []AgentMessage{UserMsg("compact")}},
 		recovery: ContextRecoveryResult{
 			View: []AgentMessage{UserMsg("compact")},
 			Compaction: &CompactionInfo{
@@ -1826,16 +1822,19 @@ func (t *richContentTool) ExecuteContent(ctx context.Context, args json.RawMessa
 }
 
 type projectionCommitManager struct {
-	projection ContextProjection
+	projection ContextCommitResult
 	recovery   ContextRecoveryResult
 }
 
-func (m projectionCommitManager) Project(ctx context.Context, msgs []AgentMessage) (ContextProjection, error) {
-	return m.projection, nil
+func (m projectionCommitManager) Transform(ctx context.Context, msgs []AgentMessage) ([]AgentMessage, error) {
+	if m.projection.Messages != nil {
+		return m.projection.Messages, nil
+	}
+	return msgs, nil
 }
 
 func (m projectionCommitManager) Compact(ctx context.Context, msgs []AgentMessage, reason CompactReason) (ContextCommitResult, error) {
-	return ContextCommitResult{}, nil
+	return m.projection, nil
 }
 
 func (m projectionCommitManager) RecoverOverflow(ctx context.Context, msgs []AgentMessage, cause error) (ContextRecoveryResult, error) {

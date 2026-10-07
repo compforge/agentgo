@@ -25,18 +25,6 @@ type CompactionInfo struct {
 	Summarized     bool
 }
 
-// ContextProjection is the prompt view projected for a single LLM call.
-// By default the projection does not modify the runtime message baseline.
-// When ShouldCommit is true, CommitMessages should replace the runtime
-// baseline before continuing the current call.
-type ContextProjection struct {
-	Messages       []AgentMessage
-	Usage          *ContextUsage
-	CommitMessages []AgentMessage
-	ShouldCommit   bool
-	Compaction     *CompactionInfo
-}
-
 // ContextSnapshot describes both the runtime baseline and the current active
 // context view, including its identifiable Items, plus the most recent rewrite
 // details remembered by the manager.
@@ -98,7 +86,7 @@ type ContextRecoveryResult struct {
 //
 // The manager deliberately distinguishes between transient prompt projection
 // and explicit baseline rewrites:
-//   - Project builds a prompt view for one LLM call without committing it.
+//   - Transform builds a prompt view for one LLM call without committing it.
 //   - Compact performs an explicit committed rewrite such as /compact.
 //   - RecoverOverflow produces a retryable prompt view after context overflow
 //     and may optionally return a new committed baseline.
@@ -108,11 +96,12 @@ type ContextRecoveryResult struct {
 //   - Snapshot reports the current active view and recent rewrite details for
 //     debugging and UI surfaces.
 type ContextManager interface {
-	// Project builds the prompt view for a single model call without mutating
-	// the caller's runtime baseline.
-	Project(ctx context.Context, msgs []AgentMessage) (ContextProjection, error)
+	// Transform builds the model view without mutating messages or committing
+	// history. It runs even below the compaction threshold and must be idempotent.
+	Transform(ctx context.Context, msgs []AgentMessage) ([]AgentMessage, error)
 
-	// Compact performs an explicit committed rewrite of msgs. The caller is
+	// Compact returns an explicit baseline rewrite. Threshold requests must be
+	// no-ops when the transformed view fits the configured budget. The caller is
 	// responsible for replacing its runtime baseline with the returned Messages
 	// when Changed is true.
 	Compact(ctx context.Context, msgs []AgentMessage, reason CompactReason) (ContextCommitResult, error)

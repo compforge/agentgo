@@ -78,7 +78,7 @@ func TestContextEngineProjectUsesAggregateRatioAndTracksUsage(t *testing.T) {
 	}
 	rawFirst := msgs[0].TextContent()
 
-	proj, err := engine.Project(t.Context(), msgs)
+	proj, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonThreshold)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestContextEngineProjectUsesAggregateRatioAndTracksUsage(t *testing.T) {
 	if proj.Compaction == nil {
 		t.Fatal("expected compaction details")
 	}
-	if got := proj.Compaction; got.Reason != agentgo.CompactReasonThreshold || got.Committed || got.TokensAfter >= got.TokensBefore || got.MessagesBefore != 2 || got.MessagesAfter != 2 || got.Summarized {
+	if got := proj.Compaction; got.Reason != agentgo.CompactReasonThreshold || !got.Committed || got.TokensAfter >= got.TokensBefore || got.MessagesBefore != 2 || got.MessagesAfter != 2 || got.Summarized {
 		t.Fatalf("unexpected compaction details: %+v", got)
 	}
 	if msgs[0].TextContent() != rawFirst {
@@ -111,29 +111,29 @@ func TestContextEngineProjectUsesAggregateRatioAndTracksUsage(t *testing.T) {
 }
 
 func TestContextEngineProjectCanCommitCompactedMessages(t *testing.T) {
-	engine := NewEngine(EngineConfig{ContextWindow: 1024, Compactor: trimCompactor(), CommitOnProject: true})
+	engine := NewEngine(EngineConfig{ContextWindow: 1024, Compactor: trimCompactor()})
 	msgs := []agentgo.AgentMessage{
 		agentgo.UserMsg(strings.Repeat("a", 800)),
 		agentgo.UserMsg("recent"),
 	}
-	proj, err := engine.Project(t.Context(), msgs)
+	proj, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonThreshold)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !proj.ShouldCommit || len(proj.CommitMessages) != len(proj.Messages) {
+	if !proj.Changed || len(proj.Messages) != len(proj.Messages) {
 		t.Fatalf("projection did not request a matching commit: %+v", proj)
 	}
 	if proj.Compaction == nil || !proj.Compaction.Committed {
 		t.Fatalf("expected committed compaction details: %+v", proj.Compaction)
 	}
-	if proj.CommitMessages[0].Raw().TextContent() != msgs[0].TextContent() {
+	if proj.Messages[0].Raw().TextContent() != msgs[0].TextContent() {
 		t.Fatal("committed projection lost its raw message")
 	}
 }
 
 func TestContextEngineProjectBelowThresholdHasNoCompaction(t *testing.T) {
 	engine := NewEngine(EngineConfig{ContextWindow: 128_000, Compactor: trimCompactor()})
-	proj, err := engine.Project(t.Context(), []agentgo.AgentMessage{agentgo.UserMsg("small")})
+	proj, err := engine.Compact(t.Context(), []agentgo.AgentMessage{agentgo.UserMsg("small")}, agentgo.CompactReasonThreshold)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestContextEnginePassesCalculatedAndForcedRatios(t *testing.T) {
 	msgs := []agentgo.AgentMessage{agentgo.UserMsg(strings.Repeat("x", 800))}
 	before := EstimateContextTokens(msgs).Tokens
 
-	if _, err := engine.Project(t.Context(), msgs); err != nil {
+	if _, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonThreshold); err != nil {
 		t.Fatal(err)
 	}
 	want := float64(80) / float64(before)
@@ -348,7 +348,7 @@ func TestToolResultCompactorDeduplicatesIdenticalCalls(t *testing.T) {
 func TestContextEngineSnapshotAndSync(t *testing.T) {
 	engine := NewEngine(EngineConfig{ContextWindow: 1024, Compactor: trimCompactor()})
 	msgs := []agentgo.AgentMessage{agentgo.UserMsg(strings.Repeat("a", 800)), agentgo.UserMsg("recent")}
-	if _, err := engine.Project(t.Context(), msgs); err != nil {
+	if _, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonThreshold); err != nil {
 		t.Fatal(err)
 	}
 	snapshot := engine.Snapshot()
@@ -377,21 +377,21 @@ func TestCircuitBreakerTripsAndRetries(t *testing.T) {
 	var event RewriteEvent
 	engine := NewEngine(EngineConfig{
 		ContextWindow: 100, ReserveTokens: 1, Compactor: compactor, MaxConsecutiveFailures: 2,
-		OnProject: func(ev RewriteEvent) { event = ev },
+		OnCompact: func(ev RewriteEvent) { event = ev },
 	})
 	msgs := []agentgo.AgentMessage{agentgo.UserMsg(strings.Repeat("x", 500))}
 	for range 2 {
-		if _, err := engine.Project(t.Context(), msgs); err == nil {
+		if _, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonThreshold); err == nil {
 			t.Fatal("expected compactor failure")
 		}
 	}
-	if _, err := engine.Project(t.Context(), msgs); err != nil {
+	if _, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonThreshold); err != nil {
 		t.Fatalf("breaker should skip one cycle: %v", err)
 	}
 	if event.Reason != "circuit_breaker" || event.Failures != 2 || event.Changed {
 		t.Fatalf("unexpected breaker event: %+v", event)
 	}
-	if _, err := engine.Project(t.Context(), msgs); err == nil {
+	if _, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonThreshold); err == nil {
 		t.Fatal("breaker should retry after the skipped cycle")
 	}
 	if compactor.callCount != 3 {
@@ -403,7 +403,7 @@ func TestCircuitBreakerResetsAfterSuccessfulRewrite(t *testing.T) {
 	engine := NewEngine(EngineConfig{ContextWindow: 64, ReserveTokens: 1, Compactor: trimCompactor()})
 	engine.consecutiveFailures = 2
 	msgs := []agentgo.AgentMessage{agentgo.UserMsg(strings.Repeat("a", 800)), agentgo.UserMsg("recent")}
-	if _, err := engine.Project(t.Context(), msgs); err != nil {
+	if _, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonThreshold); err != nil {
 		t.Fatal(err)
 	}
 	if engine.ConsecutiveFailures() != 0 {

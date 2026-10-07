@@ -8,15 +8,37 @@ import (
 
 // Preparation is observed at the ContextManager boundary, not inferred from a
 // successful compaction notification: projection can fail or leave history intact.
-func projectContext(ctx context.Context, manager ContextManager, execution Execution, messages []AgentMessage, sink eventSink) (projection ContextProjection, err error) {
-	sink.emit(Event{Type: EventContextPrepareStart, Execution: executionRef(execution), ContextOperation: ContextProject})
+func prepareContext(ctx context.Context, manager ContextManager, execution Execution, messages []AgentMessage, sink eventSink) (view []AgentMessage, compacted ContextCommitResult, err error) {
+	sink.emit(Event{Type: EventContextPrepareStart, Execution: executionRef(execution), ContextOperation: ContextTransform})
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("project context panicked: %v", recovered)
+			err = fmt.Errorf("transform context panicked: %v", recovered)
 		}
-		sink.emit(Event{Type: EventContextPrepareEnd, Execution: executionRef(execution), ContextOperation: ContextProject, Err: err})
+		sink.emit(Event{Type: EventContextPrepareEnd, Execution: executionRef(execution), ContextOperation: ContextTransform, Err: err})
 	}()
-	return manager.Project(ctx, messages)
+	view, err = manager.Transform(ctx, messages)
+	if err != nil {
+		return
+	}
+	// The manager owns its threshold; the loop owns durable baseline submission.
+	compacted, err = manager.Compact(ctx, messages, CompactReasonThreshold)
+	if err != nil {
+		return
+	}
+	if compacted.Changed {
+		view, err = manager.Transform(ctx, compacted.Messages)
+	}
+	return
+}
+
+// transformContextView repeats only the cheap view stage after late steering.
+func transformContextView(ctx context.Context, manager ContextManager, messages []AgentMessage) (view []AgentMessage, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("transform context panicked: %v", recovered)
+		}
+	}()
+	return manager.Transform(ctx, messages)
 }
 
 func recoverContext(ctx context.Context, manager ContextManager, execution Execution, messages []AgentMessage, cause error, sink eventSink) (recovery ContextRecoveryResult, err error) {

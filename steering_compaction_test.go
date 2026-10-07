@@ -8,12 +8,16 @@ import (
 
 type steeringContext struct {
 	projectionCommitManager
-	project func([]AgentMessage) ContextProjection
+	project func([]AgentMessage) ContextCommitResult
 	recover func([]AgentMessage) ContextRecoveryResult
+	compact func() ContextCommitResult
 }
 
-func (m steeringContext) Project(_ context.Context, msgs []AgentMessage) (ContextProjection, error) {
-	return m.project(msgs), nil
+func (m steeringContext) Transform(_ context.Context, msgs []AgentMessage) ([]AgentMessage, error) {
+	return m.project(msgs).Messages, nil
+}
+func (m steeringContext) Compact(_ context.Context, msgs []AgentMessage, _ CompactReason) (ContextCommitResult, error) {
+	return m.compact(), nil
 }
 func (m steeringContext) RecoverOverflow(_ context.Context, msgs []AgentMessage, _ error) (ContextRecoveryResult, error) {
 	return m.recover(msgs), nil
@@ -24,15 +28,18 @@ func TestSteeringDuringCompactionReachesNextCall(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			var queued []AgentMessage
 			projected := false
+			var compacted ContextCommitResult
 			manager := steeringContext{
-				project: func(msgs []AgentMessage) ContextProjection {
+				compact: func() ContextCommitResult { return compacted },
+				project: func(msgs []AgentMessage) ContextCommitResult {
 					if mode == "overflow" || projected {
-						return ContextProjection{Messages: msgs}
+						return ContextCommitResult{Messages: msgs}
 					}
 					projected = true
 					queued = []AgentMessage{UserMsg("focus on tests")}
 					view := []AgentMessage{UserMsg("summary")}
-					return ContextProjection{Messages: view, CommitMessages: view, ShouldCommit: mode != "transient"}
+					compacted = ContextCommitResult{Messages: view, Changed: mode != "transient"}
+					return ContextCommitResult{Messages: view}
 				},
 				recover: func([]AgentMessage) ContextRecoveryResult {
 					queued = []AgentMessage{UserMsg("focus on tests")}

@@ -52,12 +52,12 @@ func (removePrefix) Compact(_ context.Context, messages []agentgo.AgentMessage, 
 func TestCompactionInvalidatesOldPromptUsageAndPreservesRaw(t *testing.T) {
 	assistant := agentgo.Message{Role: agentgo.RoleAssistant, Content: []agentgo.ContentBlock{agentgo.TextBlock("kept")}, Usage: &agentgo.Usage{Input: 90000}}
 	messages := []agentgo.AgentMessage{agentgo.UserMsg(strings.Repeat("x", 4000)), assistant}
-	engine := NewEngine(EngineConfig{ContextWindow: 1000, ReserveTokens: 100, CommitOnProject: true, Compactor: removePrefix{}})
-	projection, err := engine.Project(context.Background(), messages)
+	engine := NewEngine(EngineConfig{ContextWindow: 1000, ReserveTokens: 100, Compactor: removePrefix{}})
+	projection, err := engine.Compact(context.Background(), messages, agentgo.CompactReasonThreshold)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !projection.ShouldCommit || len(projection.Messages) != 1 {
+	if !projection.Changed || len(projection.Messages) != 1 {
 		t.Fatalf("projection = %+v", projection)
 	}
 	if projection.Usage.Tokens != EstimateTokens(assistant) {
@@ -80,11 +80,11 @@ func TestCompactionInvalidatesOldPromptUsageAndPreservesRaw(t *testing.T) {
 func TestNoOpCompactionKeepsCalibration(t *testing.T) {
 	messages := []agentgo.AgentMessage{agentgo.Message{Role: agentgo.RoleAssistant, Content: []agentgo.ContentBlock{agentgo.TextBlock("kept")}, Usage: &agentgo.Usage{Input: 90000}}}
 	engine := NewEngine(EngineConfig{ContextWindow: 1000, ReserveTokens: 100, Compactor: Chain()})
-	projection, err := engine.Project(context.Background(), messages)
+	projection, err := engine.Compact(context.Background(), messages, agentgo.CompactReasonThreshold)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if projection.ShouldCommit || projection.Usage.UsageTokens != 90000 {
+	if projection.Changed || projection.Usage.UsageTokens != 90000 {
 		t.Fatalf("no-op discarded calibration: %+v", projection)
 	}
 }
@@ -94,7 +94,7 @@ func TestLatestToolArgumentsTriggerCompaction(t *testing.T) {
 	assistant := agentgo.Message{Role: agentgo.RoleAssistant, Content: []agentgo.ContentBlock{agentgo.ToolCallBlock(agentgo.ToolCall{Name: "submit", Args: args})}, Usage: &agentgo.Usage{Input: 100}}
 	compactor := &replacingCompactor{text: "summary"}
 	engine := NewEngine(EngineConfig{ContextWindow: 5000, ReserveTokens: 100, Compactor: compactor})
-	result, err := engine.Project(context.Background(), []agentgo.AgentMessage{assistant})
+	result, err := engine.Compact(context.Background(), []agentgo.AgentMessage{assistant}, agentgo.CompactReasonThreshold)
 	if err != nil {
 		t.Fatal(err)
 	}

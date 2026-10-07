@@ -69,7 +69,7 @@ const (
 type ContextOperation string
 
 const (
-	ContextProject         ContextOperation = "project"
+	ContextTransform       ContextOperation = "project" // wire value retained for recorded sessions
 	ContextRecoverOverflow ContextOperation = "recover_overflow"
 )
 

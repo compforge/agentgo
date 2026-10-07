@@ -69,7 +69,7 @@ Middleware 按注册顺序由外向内执行，可修改请求、派生 context 
 | `model_exec_start` / `model_exec_end` | 每次物理模型尝试，包含 Middleware；重试保持逻辑 ID，递增 Attempt。内部 summary 和工具中的模型调用也使用此路径。 |
 | `tool_queued` → `tool_exec_start` / `tool_exec_end` | 区分调度等待与执行管线。执行管线包含 Middleware、参数校验、预览和授权；结束时的 `Disposition` 区分实际调用、前置拒绝、Middleware 短路和跳过。 |
 | `tool_invoke_start` / `tool_invoke_end` | 仅覆盖 `Tool.Execute` / `ExecuteContent`，起始事件携带授权后实参。拒绝、短路和跳过不产生调用事件。 |
-| `context_prepare_start` / `context_prepare_end` | 覆盖 `ContextManager.Project` 或 `RecoverOverflow`，包括不压缩、失败的情况；`ContextOperation` 区分方法。结束表示方法返回，后续提交成功与否仍由提交路径负责。 |
+| `context_prepare_start` / `context_prepare_end` | 覆盖 `ContextManager.Transform` 或 `RecoverOverflow`，包括不压缩、失败的情况；`ContextOperation` 区分方法。结束表示方法返回，后续提交成功与否仍由提交路径负责。 |
 | `retry` 与 `retry_wait_start` / `retry_wait_end` | 前者报告重试计划；后者记录实际退避等待，包括取消提前结束。overflow recovery 本身不退避，不产生等待事件。 |
 
 `AfterTurn` 是提交边界回调，不是 finally；它失败时已提交的 turn 仍有效，Run 随后报告错误。
@@ -152,3 +152,20 @@ AgentGo 可以逐步增加支持轨迹分析的稳定事件和协议，但不吸
 压缩或重写后的模型视图不能继续使用旧 prompt 的 usage 校准：ContextEngine 在接受压缩结果时
 使其失效，应用在引擎外自行重写时调用 `context.InvalidateUsage`。Raw 消息仍保留原始 usage，
 供计费统计、持久化和诊断使用。这套估算衡量上下文占用，不代表累计消耗预算。
+
+## 请求视图转换与基线压缩
+
+Loop 持续维护 `[]AgentMessage`。每次模型请求准备阶段调用 `ContextManager.Transform`，
+返回本次视图；默认 ContextEngine 顺序执行 `Transformers`，即使低于压缩阈值也运行。
+转换必须保持 raw、调用配对与输入不变，并可重复执行。文件范围、版本或检索去重策略归应用。
+
+`Compact(CompactReasonThreshold)` 根据转换后视图判断是否需要压缩，但只返回独立的基线改写，
+不提交临时转换结果。Loop 使用原有 CommitContext 路径接受改写，再基于新基线重新 Transform。
+手动压缩和 RecoverOverflow 保留各自结果与提交契约；Transform 不生成摘要，也不递归压缩。
+晚到的 steering 输入在提交后再经过轻量 Transform，不重复触发摘要。ToMessage 保持无参、无副作用，
+实际请求转换只发生在模型边界；估算器也可调用它检查当前表示。
+
+API 迁移：Project 与 ContextProjection 已移除，改用返回消息列表的 Transform；
+CommitOnProject 移除，达到阈值的压缩通过显式 Compact 结果提交；OnProject/SetProjectHook 改为
+OnCompact/SetCompactHook。已有 context_projected 事件与 context_prepare 的 project wire 值继续保留，
+它们描述执行事实，不要求跟随方法机械重命名。
