@@ -44,7 +44,7 @@ func (m fileView) ToMessage() (agentgo.Message, bool) {
 	return message, ok
 }
 
-func registerInitial(_ context.Context, run agentgo.BeforeRunContext) (agentgo.AgentSnapshot, error) {
+func registerInitial(_ context.Context, run agentgo.BeforeRunContext) error {
 	for _, messages := range [][]agentgo.AgentMessage{run.Snapshot.State.Messages, run.Input} {
 		for _, message := range messages {
 			file, ok := message.Raw().(fileMessage)
@@ -56,11 +56,11 @@ func registerInitial(_ context.Context, run agentgo.BeforeRunContext) (agentgo.A
 				continue
 			}
 			if err := run.Artifacts.AddArtifact(file.File, false); err != nil {
-				return agentgo.AgentSnapshot{}, err
+				return err
 			}
 		}
 	}
-	return run.Snapshot, nil
+	return nil
 }
 
 func fileTransformer() agentcontext.Transformer {

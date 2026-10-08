@@ -47,8 +47,6 @@ func newArtifactManager() *memoryArtifactManager {
 type memoryArtifactManager struct {
 	mu        sync.RWMutex
 	artifacts map[string]Artifact
-	// Non-nil only during BeforeRun admission; nil values record deletions.
-	changes map[string]Artifact
 }
 
 func (m *memoryArtifactManager) AddArtifact(artifact Artifact, overwrite bool) error {
@@ -62,9 +60,6 @@ func (m *memoryArtifactManager) AddArtifact(artifact Artifact, overwrite bool) e
 		return fmt.Errorf("%w: %q", ErrArtifactExists, id)
 	}
 	m.artifacts[id] = artifact
-	if m.changes != nil {
-		m.changes[id] = artifact
-	}
 	return nil
 }
 
@@ -95,9 +90,6 @@ func (m *memoryArtifactManager) DeleteArtifact(id string) bool {
 	defer m.mu.Unlock()
 	_, exists := m.artifacts[id]
 	delete(m.artifacts, id)
-	if m.changes != nil {
-		m.changes[id] = nil
-	}
 	return exists
 }
 
@@ -116,34 +108,4 @@ func (m *memoryArtifactManager) replace(values map[string]Artifact) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.artifacts = values
-	m.changes = nil
-}
-
-// beginAdmission makes membership changes provisional until the hook's returned
-// snapshot is accepted. Payload objects are not cloned or rolled back.
-func (m *memoryArtifactManager) beginAdmission() map[string]Artifact {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	before := make(map[string]Artifact, len(m.artifacts))
-	for id, value := range m.artifacts {
-		before[id] = value
-	}
-	m.changes = make(map[string]Artifact)
-	return before
-}
-
-// finishAdmission overlays explicit hook operations onto the restored baseline.
-// Tracking deletions, even of absent IDs, prevents restored values from reappearing.
-func (m *memoryArtifactManager) finishAdmission(base map[string]Artifact) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for id, value := range m.changes {
-		if value == nil {
-			delete(base, id)
-		} else {
-			base[id] = value
-		}
-	}
-	m.artifacts = base
-	m.changes = nil
 }

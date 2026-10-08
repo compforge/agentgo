@@ -97,7 +97,7 @@ _ = snapshotStore.Save(ctx, data)
 
 restored := agentgo.NewAgent(
     agentgo.WithModel(model),
-    agentgo.WithBeforeRun(func(ctx context.Context, run agentgo.BeforeRunContext) (agentgo.AgentSnapshot, error) {
+    agentgo.WithSnapshotLoader(func(ctx context.Context, run agentgo.SnapshotLoadContext) (agentgo.AgentSnapshot, error) {
         data, err := snapshotStore.Load(ctx)
         if err != nil {
             return agentgo.AgentSnapshot{}, err
@@ -119,7 +119,7 @@ restored := agentgo.NewAgent(
 _ = restored.Continue(ctx)
 ```
 
-`BeforeRun` runs synchronously before a stateful `Agent` starts its Loop and may replace the complete snapshot. A load error rejects the run before it is accepted, so a later `Continue` can retry. `AfterRun` observes the final projected snapshot outside the Loop and before terminal listeners; adapters commonly package these hooks together so callers only configure the adapter and call `Continue`.
+`WithSnapshotLoader` recovers the baseline before `BeforeRun` initializes its materials. `BeforeRun` returns only an error and receives an isolated material collection populated from the recovered snapshot. Successful preparation publishes messages, queues and materials together; loading or initialization failure leaves the accepted state unchanged, so a later `Continue` can retry. `AfterRun` observes the completed run outside the Loop and before terminal listeners. Recovery adapters can pair a snapshot loader with `AfterRun` persistence.
 
 `Execution` gives expensive or externally visible work one run-scoped identity. A retry keeps the same `ID` and increments `Attempt`; `ModelExecution` and `ToolExecution` carry that coordinate through middleware and the Event stream. Internal summary calls are child executions of compaction, so hosts can correlate or replay known outcomes without AgentGo depending on a ledger or tracing model.
 
@@ -134,7 +134,7 @@ _ = restored.Continue(ctx)
 | Tool authorization | `ToolGate` |
 | Context projection and recovery | `ContextManager` |
 | Compaction policy | `context.Compactor` |
-| Stateful Agent restoration and finalization | `AgentSnapshot` / `WithBeforeRun` / `WithAfterRun` |
+| Stateful Agent restoration and finalization | `AgentSnapshot` / `WithSnapshotLoader` / `WithBeforeRun` / `WithAfterRun` |
 | Turn preparation and state observation | `WithBeforeTurn` / `WithAfterTurn` |
 | Model execution interception | `WithModelMiddlewares` |
 | Tool execution interception | `WithToolMiddlewares` |

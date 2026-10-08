@@ -22,11 +22,11 @@ func TestArtifactRunLifecycle(t *testing.T) {
 	options := append(artifactOptions(),
 		agentgo.WithModel(model),
 		agentgo.WithMaxRetries(1),
-		agentgo.WithBeforeRun(func(ctx context.Context, run agentgo.BeforeRunContext) (agentgo.AgentSnapshot, error) {
+		agentgo.WithBeforeRun(func(ctx context.Context, run agentgo.BeforeRunContext) error {
 			beforeCalls++
 			if beforeCalls == 2 {
 				if err := run.Artifacts.AddArtifact(fileArtifact{Path: "main.go", Content: "updated source"}, true); err != nil {
-					return run.Snapshot, err
+					return err
 				}
 			}
 			return registerInitial(ctx, run)
@@ -109,20 +109,20 @@ func countContent(messages []agentgo.Message, text string) int {
 func TestArtifactTransformRebuildsRequestCoverage(t *testing.T) {
 	// Exercise a reusable transformer using the capability supplied by AgentGo.
 	agent := agentgo.NewAgent(agentgo.WithModel(&demoModel{}), agentgo.WithMaxTurns(1),
-		agentgo.WithBeforeRun(func(ctx context.Context, run agentgo.BeforeRunContext) (agentgo.AgentSnapshot, error) {
+		agentgo.WithBeforeRun(func(ctx context.Context, run agentgo.BeforeRunContext) error {
 			file := fileArtifact{Path: "a.go", Content: "original source"}
 			if err := run.Artifacts.AddArtifact(file, false); err != nil {
-				return run.Snapshot, err
+				return err
 			}
 			transformer := fileTransformer()
 			input := agentgo.TransformContext{Artifacts: run.Artifacts, Messages: []agentgo.AgentMessage{userFile(file), userFile(file)}}
 			view, err := transformer.Transform(ctx, input)
 			if err != nil {
-				return run.Snapshot, err
+				return err
 			}
 			again, err := transformer.Transform(ctx, agentgo.TransformContext{Artifacts: run.Artifacts, Messages: view})
 			if err != nil {
-				return run.Snapshot, err
+				return err
 			}
 			for i := range view {
 				if again[i].TextContent() != view[i].TextContent() || view[i].Raw().(fileMessage).File != file {
@@ -131,7 +131,7 @@ func TestArtifactTransformRebuildsRequestCoverage(t *testing.T) {
 			}
 			surviving, err := transformer.Transform(ctx, agentgo.TransformContext{Artifacts: run.Artifacts, Messages: view[1:]})
 			if err != nil {
-				return run.Snapshot, err
+				return err
 			}
 			if !strings.Contains(surviving[0].TextContent(), file.Content) {
 				t.Error("coverage was not rebuilt")
@@ -139,12 +139,12 @@ func TestArtifactTransformRebuildsRequestCoverage(t *testing.T) {
 			run.Artifacts.DeleteArtifact(file.ID())
 			without, err := transformer.Transform(ctx, input)
 			if err != nil {
-				return run.Snapshot, err
+				return err
 			}
 			if without[0].TextContent() != input.Messages[0].TextContent() {
 				t.Error("missing artifact should leave source unchanged")
 			}
-			return run.Snapshot, nil
+			return nil
 		}))
 	if err := agent.Prompt(t.Context(), "check"); err != nil {
 		t.Fatal(err)

@@ -35,6 +35,7 @@ type Agent struct {
 	onMessage            func(AgentMessage)
 	beforeTurn           BeforeTurnHook
 	afterTurn            AfterTurnHook
+	snapshotLoader       SnapshotLoader
 	beforeRun            BeforeRunHook
 	afterRun             AfterRunHook
 	stopGuard            StopGuard

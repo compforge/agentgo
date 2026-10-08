@@ -43,7 +43,7 @@ agentgo/
    可选能力表达；Go 改动提交前运行 `go test ./...` 与 `go build ./...`。
 6. **编码机制不绑定存储或传输策略**：`codec` 提供通用 tagged value、类型注册和编解码机制；
    `AgentState` 是 Loop state，`AgentSnapshot` 聚合 stateful Agent 已接受但未消费的 queue；stateful
-   Agent 的 `BeforeRun` / `AfterRun` 位于 Loop 外层，供宿主组合装载与保存，裸 `AgentLoop` 不提供同名
+   Agent 的 `SnapshotLoader` / `BeforeRun` / `AfterRun` 位于 Loop 外层，分别承载恢复、初始化与收尾；恢复与初始化成功后统一提交准备态，裸 `AgentLoop` 不提供同名
    hook。持久化、进程交接、RPC 与进入 Agent 前的 durable inbox 均由宿主负责。
 7. **版本随公开契约演进**：`VERSION` 表达仓库当前发布版本；公开 API、可观察行为或依赖基线变化时，
    在同一 PR 中按语义版本同步升级，避免代码能力与可识别版本脱节。

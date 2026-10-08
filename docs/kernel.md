@@ -33,10 +33,12 @@ Snapshot 替换同时替换消息与材料。宿主决定存储位置及持久�
 裸 AgentLoop 根据 InitialState 建立独立 Manager，并通过状态事件交付材料值；新建 Agent 和子 Loop
 默认隔离，即使调用方复用标准 context.Context，也不会继承父级材料管理器。
 
-初始化输入仍是 AgentMessage 列表。业务在 stateful Agent 的 `BeforeRun` 中读取已有 Snapshot 与新增
-Input，登记初始材料；该 Hook 在启动 Loop 前执行一次，不随模型重试或 turn 推进重复执行。Hook 中
-的 Manager 反映当前工作集合；返回的 Snapshot 是恢复基线，本次 Hook 显式新增、覆盖和删除的 ID
-优先于恢复值，避免安装快照时丢失刚登记的材料。拒绝 Run 时回滚集合操作，不回滚业务对象的原地修改。
+初始化输入仍是 AgentMessage 列表。stateful Agent 先通过 `SnapshotLoader` 加载基线，再向
+`BeforeRun` 提供恢复后的 Snapshot、新增 Input 与独立的材料准备态。Hook 只返回错误，CRUD 始终
+针对这同一份恢复基线；该 Hook 每次准备 Run 执行一次，不随模型重试或 turn 推进重复执行。
+准备成功后一次性提交消息、队列与材料，运行中的扩展点共用该材料集合；失败则丢弃准备态。
+准备期间 `State()` / `Snapshot()` 仍只观察已接受的状态。业务材料对象保持共享，不回滚原地修改，
+需要拒绝时保留内容的业务应通过替换值更新材料。
 裸 AgentLoop 调用方可通过 InitialState 提供材料值，或在 BeforeTurn 等扩展点登记初始消息中的材料。
 
 Run / Turn Hook、Model / Tool Middleware 通过具名的 `Artifacts` 字段访问所属运行时的能力。
@@ -68,7 +70,7 @@ stateful `Agent` 在 Loop 之外还持有 steering / follow-up queue：输入一
 `codec` 包提供通用的 tagged value、稳定类型身份与 JSON 编解码；`AgentState`、`AgentSnapshot` 通过字段
 tag 声明自己的 portable projection，应用再注册自定义 `AgentMessage` 的具体类型。宿主可以在
 携带 `State` 的 `EventTurnEnd` 已投影后调用 `Agent.Snapshot()` 保存 turn 边界，也可以直接使用 `AfterRunContext.Snapshot`
-保存终态。恢复 adapter 通过 `WithBeforeRun` 在 Loop 启动前返回完整 Snapshot；装载错误会拒绝本次 Run，
+保存终态。恢复 adapter 通过 `WithSnapshotLoader` 在初始化之前加载完整 Snapshot；装载错误会拒绝本次 Run，
 后续 `Continue` 可以重试。`AfterRun` 在 Loop 完全结束、最终状态已经投影后执行，并先于终态 listener。
 `SetSnapshot` 只保留为低层状态操作，不是正常恢复流程必需的用户编排步骤。进入 AgentGo 之前的 durable
 inbox 仍由宿主负责，Snapshot 只承诺覆盖 Agent 已经接受的输入。
