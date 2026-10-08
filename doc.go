@@ -29,9 +29,13 @@
 // durable outcomes without coupling AgentGo to a ledger or tracing backend.
 //
 // A small, stable surface carries most uses: [Agent], [AgentLoop], [Event],
-// [Tool], [AgentMessage], and [Message]. AgentMessage is the application
+// [Tool], [AgentMessage], [Artifact], and [Message]. AgentMessage is the application
 // transcript type; Message is the model protocol type produced only at the
-// call boundary. [AgentState] describes Loop-owned execution state, while
+// call boundary. Artifact identifies application-owned material independently of
+// messages. [NewArtifactManager] provides in-memory CRUD; hosts share it with
+// run hooks, tools, middleware, and context transformers through dependency
+// injection. Applications own extraction, associations, rendering, and storage.
+// [AgentState] describes Loop-owned execution state, while
 // [AgentSnapshot] adds input accepted into a stateful Agent's steering and
 // follow-up queues. [WithBeforeRun] and [WithAfterRun] let an adapter restore
 // and finalize that snapshot outside the Loop without binding AgentGo to a

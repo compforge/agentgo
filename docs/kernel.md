@@ -16,6 +16,30 @@ AgentGo 原生支持**轨迹驱动的 Loop 优化**：Event stream 记录实际�
 轨迹，再把结论反馈给 Prompt、Tool surface 或 Execution mechanism。内核负责让事实稳定、可关联，
 不负责给出具体优化答案。
 
+## AgentMessage 与 Artifact
+
+Agent Loop 会接收文件、工具结果等材料，并在运行中产生和更新材料。消息记录对话中的发生顺序，
+`Artifact` 表达这些材料的独立身份；二者是并列概念。应用可以扩展具体 Artifact 类型，一个材料可以
+关联多条消息，一条消息也可以涉及多个材料，材料还可以独立于消息存在。
+
+`ArtifactManager` 提供 CRUD，保证一个 Manager 内 ID 唯一。ID 与 Kind 的含义、材料内容及消息关联
+归业务所有。覆盖操作整体替换该 ID 的值；宿主选择 Manager 的生命周期，并拥有持久化与恢复策略。
+内存实现支持并发访问，但不深拷贝业务对象，因此共享内容应通过替换或由应用同步更新。
+
+初始化输入仍是 AgentMessage 列表。业务在 stateful Agent 的 `BeforeRun` 中读取已有 Snapshot 与新增
+Input，登记初始材料；该 Hook 在启动 Loop 前执行一次，不随模型重试或 turn 推进重复执行。若同一
+Hook 还要恢复 Snapshot，应先完成恢复，再从将要生效的消息基线中提取材料。裸 AgentLoop 的调用方
+在调用前完成相应准备。运行中的 Tool、Middleware 等通过注入的同一个 Manager 继续维护材料。
+
+业务 Transformer 结合输入消息和 ArtifactManager 构造请求视图。登记信息使业务能够实现内容去重、
+引用、摘要等策略；AgentGo 不替业务决定哪些材料应该进入 prompt。供本次转换使用的材料必须在
+Transformer 执行前登记，位于转换之后的 ModelMiddleware 更新只能影响后续转换。
+
+材料库存与模型可见内容是不同事实：删除材料不会删除历史消息，更新材料也不会改写过去的模型请求。
+去重等覆盖状态应根据每次请求的实际消息重新计算，避免 compaction 删除早先的内容后只剩悬空引用。
+Transformer 对相同的消息与材料状态应产生确定且幂等的结果，并保留 Raw 和工具调用配对。
+`ContextItem` 则继续描述实际投影出的信息，由业务决定是否将 Artifact 映射为该观测协议。
+
 ## 可编码状态与执行边界
 
 一次 stateful Agent Run 包含一次 AgentLoop 调用，Loop 包含多个 turn，一个 turn 包含一次逻辑模型调用

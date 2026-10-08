@@ -8,6 +8,7 @@ AgentGo 从 [AgentCore](https://github.com/voocel/agentcore) 发展而来，现�
 
 ## 核心能力
 
+- 与消息并列的可扩展 Artifact：通过 Run Hook、Tool 和 Middleware 管理材料，由业务决定如何呈现到模型输入。
 - Message-native Agent Loop：应用始终持有 `AgentMessage`，只在模型调用边界转换为 `Message`。
 - 单一 Event stream：统一承载模型输出、工具、Context 投影与压缩、重试和结束状态。
 - Middleware 与 Event 共享同一个执行坐标，统一关联模型、工具与压缩动作。
@@ -74,6 +75,14 @@ AgentMessage
     ─commit─▶ AgentMessage history
 ```
 
+`Artifact` 表达独立于消息历史的业务材料。应用通过实现 `ID()` 和 `Kind()` 定义自己的内容类型，再使用 `NewArtifactManager()` 新增、读取、列举、替换或删除材料。ID 在一个 Manager 内唯一，分类和内容含义由业务定义。
+
+调用方仍然只需传入消息。业务可以在 `WithBeforeRun` 中提取初始 Artifact，在 Tool 或 Middleware 中持续维护同一个 Manager，并将它注入 `context.Transformer`，决定材料如何进入每次模型请求，例如只展开一次内容、在其他位置保留引用。AgentGo 提供机制，提取、消息关联、呈现与持久化策略由应用负责。[离线示例](examples/artifacts) 无需 API key 即可展示完整流程：
+
+```bash
+go run ./examples/artifacts
+```
+
 应用消息可通过 `ContextItemProvider` 暴露有稳定身份的信息，而不改变模型渲染。每次模型调用前，`EventContextProjected` 会报告实际投影后的 Context 清单。`ContextItem` 与 `ContextDemand` 共享 `ContextKey`；标签含义及 Demand 提取规则由应用和 Evaluator 负责。
 
 `AgentState` 是 Loop 自己拥有的执行状态。对于 stateful `Agent`，`AgentSnapshot` 还会聚合已经被 Agent 接受、但尚未交给 Loop 的 steering 和 follow-up 输入。两者都感知 codec，但不绑定存储或传输方式。`agentgo.NewCodec` 会注册 AgentGo 内置状态类型；应用只需用一个稳定 TypeID 注册自己的具体 `AgentMessage` 类型。字段通过 `codec` tag 主动参与编码，特殊 wire 表示则使用自定义 Handler。同一份编码快照可用于持久化、进程交接或未来的 RPC 协议。
@@ -120,6 +129,7 @@ _ = restored.Continue(ctx)
 |------|------|
 | 模型 Provider | `ChatModel` |
 | 应用消息 | `AgentMessage` |
+| 业务材料 | `Artifact` / `ArtifactManager` |
 | 工具能力 | `Tool` 及其可选接口 |
 | 工具授权 | `ToolGate` |
 | Context 投影与恢复 | `ContextManager` |

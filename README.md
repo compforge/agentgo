@@ -8,6 +8,7 @@ AgentGo evolved from [AgentCore](https://github.com/voocel/agentcore) and now de
 
 ## What it provides
 
+- Extensible artifacts alongside messages: share material through run hooks, tools, and middleware, with application-defined prompt rendering.
 - A message-native Agent Loop: applications keep `AgentMessage`; model-level `Message` exists only at the call boundary.
 - A single event stream for model output, tools, context projection and compaction, retries, and completion.
 - One execution coordinate across middleware and events for model, tool, and compaction work.
@@ -74,6 +75,14 @@ AgentMessage
     ─commit─▶ AgentMessage history
 ```
 
+`Artifact` represents application-owned material independently of the transcript. Implement its `ID()` and `Kind()` methods with your own payload type, then use `NewArtifactManager()` to add, get, list, replace, or delete values. IDs are unique within a manager; kinds and content remain application-defined.
+
+Callers still supply messages. A `WithBeforeRun` hook can extract initial artifacts; tools and middleware can maintain the same manager during execution. Inject that manager into a `context.Transformer` to choose how material enters each request—for example, one expansion with references at later occurrences. AgentGo supplies the mechanism; extraction, message associations, rendering, and persistence belong to the application. The [offline artifact example](examples/artifacts) demonstrates the complete flow without an API key:
+
+```bash
+go run ./examples/artifacts
+```
+
 `ContextItemProvider` lets an application message expose identifiable information without changing its model rendering. Before each model call, `EventContextProjected` reports the inventory from the actual projected context. `ContextItem` and `ContextDemand` share `ContextKey`; applications and evaluators own all label meanings and demand-extraction rules.
 
 `AgentState` is the Loop-owned execution state. A stateful `Agent` exposes `AgentSnapshot`, which adds steering and follow-up input already accepted by the Agent but not yet handed to the Loop. Both are codec-aware without being tied to storage or transport. `agentgo.NewCodec` registers AgentGo's built-in state types; applications register their own concrete `AgentMessage` types with one stable type ID. Fields opt in through `codec` tags, while custom handlers cover special wire representations. Hosts can use the same encoded snapshot for persistence, process handoff, or future RPC protocols.
@@ -120,6 +129,7 @@ _ = restored.Continue(ctx)
 |------|----------|
 | Model provider | `ChatModel` |
 | Application message | `AgentMessage` |
+| Application material | `Artifact` / `ArtifactManager` |
 | Tool capability | `Tool` and optional tool interfaces |
 | Tool authorization | `ToolGate` |
 | Context projection and recovery | `ContextManager` |

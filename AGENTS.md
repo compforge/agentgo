@@ -13,7 +13,7 @@ Event、调度与多 Agent 的通用执行能力，但不内建具体业务流�
 
 ```text
 agentgo/
-├── *.go          Agent / AgentLoop、AgentMessage / Message、Tool、Event、Context 契约及调度入口
+├── *.go          Agent / AgentLoop、AgentMessage / Message、Artifact、Tool、Event、Context 契约及调度入口
 ├── codec/        通用 tagged value、类型注册与 JSON 编解码
 ├── context/      默认 ContextEngine、可替换 Compactor、投影、压缩、summary 与 overflow recovery
 ├── llm/          模型 Provider 适配；核心包不依赖具体 LLM SDK
@@ -30,7 +30,9 @@ agentgo/
 
 1. **Message-native 边界不可反转**：Loop、Context、Event 和持久化使用 `AgentMessage`；
    `ToMessage` 是唯一模型协议转换边界，compaction 必须保留 `Raw`。
-2. **Kernel 记录事实，不解释业务**：ContextItem / ContextDemand 共享身份协议，但 kind、representation、
+2. **Kernel 记录事实，不解释业务**：Artifact 与 AgentMessage 并列，材料管理通过 ArtifactManager 提供；
+   业务通过 Run Hook、Tool、Middleware 和 Transformer 决定提取、消息关联与呈现策略。
+   ContextItem / ContextDemand 共享身份协议，但 kind、representation、
    signal、提取器和评分含义归应用；权限、终止和 Context 策略均通过扩展点注入。
 3. **Event stream 是统一观测面**：模型、工具、Context 投影/压缩及结束状态都从 Event 输出；新增运行
    能力时优先补完整事实事件，而不是让 UI、日志或 Harness 猜内部状态。
@@ -50,6 +52,6 @@ agentgo/
 ## References
 
 - `README.md` / `README_CN.md` —— 产品定位、能力与最短使用路径
-- `docs/kernel.md` —— Message-native 内核、ContextItem / ContextDemand 与轨迹驱动优化
+- `docs/kernel.md` —— Message-native 内核、Artifact、ContextItem / ContextDemand 与轨迹驱动优化
 - `doc.go` —— Go Package 总览
 - `examples/` —— 可运行示例

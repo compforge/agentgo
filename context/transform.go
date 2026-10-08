@@ -10,7 +10,10 @@ import (
 // Transformer changes the request view, not the runtime baseline. Implementations
 // must preserve Raw and tool-call pairing, must not mutate input messages, and
 // must be deterministic and idempotent. Domain coverage semantics belong here,
-// not in the generic loop or ToMessage.
+// not in the generic loop or ToMessage. Applications may inject an
+// agentgo.ArtifactManager into their transformer; determinism and idempotence
+// apply to the same messages and artifact state. Material needed for this view
+// must be registered before Transform runs.
 type Transformer interface {
 	Transform(context.Context, []agentgo.AgentMessage) ([]agentgo.AgentMessage, error)
 }
