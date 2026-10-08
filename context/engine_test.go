@@ -78,7 +78,7 @@ func TestContextEngineProjectUsesAggregateRatioAndTracksUsage(t *testing.T) {
 	}
 	rawFirst := msgs[0].TextContent()
 
-	proj, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonThreshold)
+	proj, err := engine.Compact(t.Context(), agentgo.TransformContext{Messages: msgs}, agentgo.CompactReasonThreshold)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestContextEngineProjectCanCommitCompactedMessages(t *testing.T) {
 		agentgo.UserMsg(strings.Repeat("a", 800)),
 		agentgo.UserMsg("recent"),
 	}
-	proj, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonThreshold)
+	proj, err := engine.Compact(t.Context(), agentgo.TransformContext{Messages: msgs}, agentgo.CompactReasonThreshold)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestContextEngineProjectCanCommitCompactedMessages(t *testing.T) {
 
 func TestContextEngineProjectBelowThresholdHasNoCompaction(t *testing.T) {
 	engine := NewEngine(EngineConfig{ContextWindow: 128_000, Compactor: trimCompactor()})
-	proj, err := engine.Compact(t.Context(), []agentgo.AgentMessage{agentgo.UserMsg("small")}, agentgo.CompactReasonThreshold)
+	proj, err := engine.Compact(t.Context(), agentgo.TransformContext{Messages: []agentgo.AgentMessage{agentgo.UserMsg("small")}}, agentgo.CompactReasonThreshold)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,20 +148,20 @@ func TestContextEnginePassesCalculatedAndForcedRatios(t *testing.T) {
 	msgs := []agentgo.AgentMessage{agentgo.UserMsg(strings.Repeat("x", 800))}
 	before := EstimateContextTokens(msgs).Tokens
 
-	if _, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonThreshold); err != nil {
+	if _, err := engine.Compact(t.Context(), agentgo.TransformContext{Messages: msgs}, agentgo.CompactReasonThreshold); err != nil {
 		t.Fatal(err)
 	}
 	want := float64(80) / float64(before)
 	if len(compactor.expects) != 1 || compactor.expects[0] != want {
 		t.Fatalf("project expects = %v, want [%f]", compactor.expects, want)
 	}
-	if _, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonManual); err != nil {
+	if _, err := engine.Compact(t.Context(), agentgo.TransformContext{Messages: msgs}, agentgo.CompactReasonManual); err != nil {
 		t.Fatal(err)
 	}
 	if got := compactor.expects[len(compactor.expects)-1]; got != 0 {
 		t.Fatalf("manual compact expect = %f, want 0", got)
 	}
-	if _, err := engine.RecoverOverflow(t.Context(), msgs, context.DeadlineExceeded); err != nil {
+	if _, err := engine.RecoverOverflow(t.Context(), agentgo.TransformContext{Messages: msgs}, context.DeadlineExceeded); err != nil {
 		t.Fatal(err)
 	}
 	if got := compactor.expects[len(compactor.expects)-1]; got != 0 {
@@ -173,7 +173,7 @@ func TestContextEngineForcedCompactionReportsReason(t *testing.T) {
 	msgs := []agentgo.AgentMessage{agentgo.UserMsg(strings.Repeat("x", 800))}
 
 	manualEngine := NewEngine(EngineConfig{ContextWindow: 1024, Compactor: &replacingCompactor{text: "small"}})
-	manual, err := manualEngine.Compact(t.Context(), msgs, agentgo.CompactReasonManual)
+	manual, err := manualEngine.Compact(t.Context(), agentgo.TransformContext{Messages: msgs}, agentgo.CompactReasonManual)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestContextEngineForcedCompactionReportsReason(t *testing.T) {
 	}
 
 	recoveryEngine := NewEngine(EngineConfig{ContextWindow: 1024, Compactor: &replacingCompactor{text: "small"}})
-	recovery, err := recoveryEngine.RecoverOverflow(t.Context(), msgs, context.DeadlineExceeded)
+	recovery, err := recoveryEngine.RecoverOverflow(t.Context(), agentgo.TransformContext{Messages: msgs}, context.DeadlineExceeded)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestContextEngineCompactProducesSummaryAndRetainsRaw(t *testing.T) {
 	engine := NewEngine(EngineConfig{ContextWindow: 1024, Compactor: summary})
 	msgs := []agentgo.AgentMessage{agentgo.UserMsg(strings.Repeat("a", 4000)), agentgo.UserMsg("keep")}
 
-	result, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonManual)
+	result, err := engine.Compact(t.Context(), agentgo.TransformContext{Messages: msgs}, agentgo.CompactReasonManual)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +348,7 @@ func TestToolResultCompactorDeduplicatesIdenticalCalls(t *testing.T) {
 func TestContextEngineSnapshotAndSync(t *testing.T) {
 	engine := NewEngine(EngineConfig{ContextWindow: 1024, Compactor: trimCompactor()})
 	msgs := []agentgo.AgentMessage{agentgo.UserMsg(strings.Repeat("a", 800)), agentgo.UserMsg("recent")}
-	if _, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonThreshold); err != nil {
+	if _, err := engine.Compact(t.Context(), agentgo.TransformContext{Messages: msgs}, agentgo.CompactReasonThreshold); err != nil {
 		t.Fatal(err)
 	}
 	snapshot := engine.Snapshot()
@@ -381,17 +381,17 @@ func TestCircuitBreakerTripsAndRetries(t *testing.T) {
 	})
 	msgs := []agentgo.AgentMessage{agentgo.UserMsg(strings.Repeat("x", 500))}
 	for range 2 {
-		if _, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonThreshold); err == nil {
+		if _, err := engine.Compact(t.Context(), agentgo.TransformContext{Messages: msgs}, agentgo.CompactReasonThreshold); err == nil {
 			t.Fatal("expected compactor failure")
 		}
 	}
-	if _, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonThreshold); err != nil {
+	if _, err := engine.Compact(t.Context(), agentgo.TransformContext{Messages: msgs}, agentgo.CompactReasonThreshold); err != nil {
 		t.Fatalf("breaker should skip one cycle: %v", err)
 	}
 	if event.Reason != "circuit_breaker" || event.Failures != 2 || event.Changed {
 		t.Fatalf("unexpected breaker event: %+v", event)
 	}
-	if _, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonThreshold); err == nil {
+	if _, err := engine.Compact(t.Context(), agentgo.TransformContext{Messages: msgs}, agentgo.CompactReasonThreshold); err == nil {
 		t.Fatal("breaker should retry after the skipped cycle")
 	}
 	if compactor.callCount != 3 {
@@ -403,7 +403,7 @@ func TestCircuitBreakerResetsAfterSuccessfulRewrite(t *testing.T) {
 	engine := NewEngine(EngineConfig{ContextWindow: 64, ReserveTokens: 1, Compactor: trimCompactor()})
 	engine.consecutiveFailures = 2
 	msgs := []agentgo.AgentMessage{agentgo.UserMsg(strings.Repeat("a", 800)), agentgo.UserMsg("recent")}
-	if _, err := engine.Compact(t.Context(), msgs, agentgo.CompactReasonThreshold); err != nil {
+	if _, err := engine.Compact(t.Context(), agentgo.TransformContext{Messages: msgs}, agentgo.CompactReasonThreshold); err != nil {
 		t.Fatal(err)
 	}
 	if engine.ConsecutiveFailures() != 0 {

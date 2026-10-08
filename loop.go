@@ -47,13 +47,23 @@ func startAgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentC
 	ch := make(chan Event, 128)
 	terminal := &terminalEvent{}
 	sink := eventSink{ctx: ctx, ch: ch, terminal: terminal}
+	var artifactErr error
+	if config.artifacts == nil {
+		config.artifacts = newArtifactManager()
+		var values map[string]Artifact
+		values, artifactErr = artifactValues(config.InitialState.Artifacts)
+		if artifactErr == nil {
+			config.artifacts.replace(values)
+		}
+	}
 	// The runtime belongs to the whole loop, so model calls made inside tools
 	// use the same middleware and event path as conversation and summary calls.
-	ctx = withModelExecutionRuntime(ctx, config.ModelMiddlewares, sink.emit)
+	ctx = withModelExecutionRuntime(ctx, config.ModelMiddlewares, sink.emit, config.artifacts)
 
 	go func() {
 		var newMessages []AgentMessage
 		currentCtx := AgentContext{
+			artifacts:    config.artifacts,
 			SystemPrompt: agentCtx.SystemPrompt,
 			SystemBlocks: append([]SystemBlock(nil), agentCtx.SystemBlocks...),
 			Messages:     copyMessages(agentCtx.Messages),
@@ -75,6 +85,10 @@ func startAgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentC
 			close(ch)
 		}()
 
+		if artifactErr != nil {
+			sink.emitError(fmt.Errorf("restore artifacts: %w", artifactErr), &RunSummary{EndReason: EndReasonError})
+			return
+		}
 		if continuing && len(currentCtx.Messages) == 0 {
 			sink.emitError(ErrNoMessages, &RunSummary{EndReason: EndReasonError})
 			return
@@ -128,6 +142,9 @@ func bindRunState(state AgentState, current *AgentContext) AgentState {
 
 func snapshotRunState(state AgentState, current *AgentContext) AgentState {
 	state.Messages = copyMessages(current.Messages)
+	if current.artifacts != nil {
+		state.Artifacts = current.artifacts.ListArtifacts()
+	}
 	state.Progress = cloneRunProgress(state.Progress)
 	state.Tools = append([]Tool(nil), current.Tools...)
 	return state
@@ -240,6 +257,7 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 			return true
 		}
 		messages, err := config.BeforeTurn(ctx, BeforeTurnContext{
+			Artifacts: config.artifacts,
 			TurnIndex: turnIndex,
 			Context:   snapshotAgentContext(currentCtx),
 		})
@@ -268,6 +286,7 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 			return true
 		}
 		if err := config.AfterTurn(ctx, AfterTurnContext{
+			Artifacts:   config.artifacts,
 			TurnIndex:   turnIndex,
 			Message:     message,
 			ToolResults: append([]ToolResult(nil), results...),

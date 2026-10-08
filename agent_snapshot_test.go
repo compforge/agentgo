@@ -156,17 +156,17 @@ func TestAgentSetSnapshotRestoresFollowUpQueue(t *testing.T) {
 }
 
 func TestAgentContinueRestoresSnapshotBeforeRun(t *testing.T) {
-	beforeRunCalls := 0
+	loadCalls := 0
 	var (
-		beforeRunKind     RunKind
-		beforeRunMessages int
-		turnIndexes       []int
+		loadKind     RunKind
+		loadMessages int
+		turnIndexes  []int
 	)
 	agent := NewAgent(
-		WithBeforeRun(func(_ context.Context, run BeforeRunContext) (AgentSnapshot, error) {
-			beforeRunCalls++
-			beforeRunKind = run.Kind
-			beforeRunMessages = len(run.Snapshot.State.Messages)
+		WithSnapshotLoader(func(_ context.Context, run SnapshotLoadContext) (AgentSnapshot, error) {
+			loadCalls++
+			loadKind = run.Kind
+			loadMessages = len(run.Snapshot.State.Messages)
 			return AgentSnapshot{State: AgentState{
 				Messages: []AgentMessage{
 					UserMsg("request"),
@@ -191,25 +191,25 @@ func TestAgentContinueRestoresSnapshotBeforeRun(t *testing.T) {
 	}
 	agent.WaitForIdle()
 
-	if beforeRunCalls != 1 {
-		t.Fatalf("BeforeRun calls = %d, want 1", beforeRunCalls)
+	if loadCalls != 1 {
+		t.Fatalf("SnapshotLoader calls = %d, want 1", loadCalls)
 	}
-	if beforeRunKind != RunKindContinue || beforeRunMessages != 0 {
-		t.Fatalf("BeforeRun input = kind %q messages %d", beforeRunKind, beforeRunMessages)
+	if loadKind != RunKindContinue || loadMessages != 0 {
+		t.Fatalf("SnapshotLoader input = kind %q messages %d", loadKind, loadMessages)
 	}
 	if !slices.Equal(turnIndexes, []int{5}) {
 		t.Fatalf("turn indexes = %v, want [5]", turnIndexes)
 	}
 }
 
-func TestAgentBeforeRunFailureCanRetry(t *testing.T) {
+func TestAgentSnapshotLoaderFailureCanRetry(t *testing.T) {
 	loadErr := errors.New("snapshot store unavailable")
-	beforeRunCalls := 0
+	loadCalls := 0
 	afterRunCalls := 0
 	agent := NewAgent(
-		WithBeforeRun(func(context.Context, BeforeRunContext) (AgentSnapshot, error) {
-			beforeRunCalls++
-			if beforeRunCalls == 1 {
+		WithSnapshotLoader(func(context.Context, SnapshotLoadContext) (AgentSnapshot, error) {
+			loadCalls++
+			if loadCalls == 1 {
 				return AgentSnapshot{}, loadErr
 			}
 			return AgentSnapshot{State: AgentState{
@@ -234,8 +234,8 @@ func TestAgentBeforeRunFailureCanRetry(t *testing.T) {
 	}
 	agent.WaitForIdle()
 
-	if beforeRunCalls != 2 {
-		t.Fatalf("BeforeRun calls = %d, want 2", beforeRunCalls)
+	if loadCalls != 2 {
+		t.Fatalf("SnapshotLoader calls = %d, want 2", loadCalls)
 	}
 	if afterRunCalls != 1 {
 		t.Fatalf("AfterRun calls = %d, want only the accepted run", afterRunCalls)

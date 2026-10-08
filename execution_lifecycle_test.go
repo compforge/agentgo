@@ -161,7 +161,8 @@ type lifecycleManager struct {
 	failure string
 }
 
-func (m lifecycleManager) Transform(ctx context.Context, messages []AgentMessage) ([]AgentMessage, error) {
+func (m lifecycleManager) Transform(ctx context.Context, input TransformContext) ([]AgentMessage, error) {
+	messages := input.Messages
 	if m.failure == "panic" {
 		panic("projection failed")
 	}
@@ -170,7 +171,8 @@ func (m lifecycleManager) Transform(ctx context.Context, messages []AgentMessage
 	}
 	return messages, nil
 }
-func (m lifecycleManager) RecoverOverflow(ctx context.Context, messages []AgentMessage, cause error) (ContextRecoveryResult, error) {
+func (m lifecycleManager) RecoverOverflow(ctx context.Context, input TransformContext, cause error) (ContextRecoveryResult, error) {
+	messages := input.Messages
 	if m.failure == "overflow" {
 		return ContextRecoveryResult{}, errors.New("recovery failed")
 	}

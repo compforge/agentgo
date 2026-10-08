@@ -181,8 +181,14 @@ func WithAfterTurn(hook AfterTurnHook) AgentOption {
 	return func(a *Agent) { a.afterTurn = hook }
 }
 
-// WithBeforeRun installs the synchronous stateful-Agent admission hook. It runs
-// before Prompt, Continue, or a resumable Inject starts the Loop.
+// WithSnapshotLoader installs recovery before BeforeRun on each stateful-Agent
+// run admission. The returned snapshot is staged until initialization succeeds.
+func WithSnapshotLoader(loader SnapshotLoader) AgentOption {
+	return func(a *Agent) { a.snapshotLoader = loader }
+}
+
+// WithBeforeRun installs initialization after snapshot loading and before Prompt,
+// Continue, or a resumable Inject starts the Loop. An error discards preparation.
 func WithBeforeRun(hook BeforeRunHook) AgentOption {
 	return func(a *Agent) { a.beforeRun = hook }
 }

@@ -81,6 +81,14 @@ type ContextRecoveryResult struct {
 	SplitTurn      bool
 }
 
+// TransformContext carries the messages to project and their runtime's material
+// capability. Direct context-engine users may omit Artifacts when their policies
+// do not use material. AgentGo supplies it on all runtime-owned context calls.
+type TransformContext struct {
+	Artifacts ArtifactManager
+	Messages  []AgentMessage
+}
+
 // ContextManager owns prompt projection, committed rewrites, overflow
 // recovery, and usage reporting for long-running agent sessions.
 //
@@ -98,18 +106,18 @@ type ContextRecoveryResult struct {
 type ContextManager interface {
 	// Transform builds the model view without mutating messages or committing
 	// history. It runs even below the compaction threshold and must be idempotent.
-	Transform(ctx context.Context, msgs []AgentMessage) ([]AgentMessage, error)
+	Transform(ctx context.Context, input TransformContext) ([]AgentMessage, error)
 
 	// Compact returns an explicit baseline rewrite. Threshold requests must be
 	// no-ops when the transformed view fits the configured budget. The caller is
 	// responsible for replacing its runtime baseline with the returned Messages
 	// when Changed is true.
-	Compact(ctx context.Context, msgs []AgentMessage, reason CompactReason) (ContextCommitResult, error)
+	Compact(ctx context.Context, input TransformContext, reason CompactReason) (ContextCommitResult, error)
 
 	// RecoverOverflow produces a retryable view after a provider reports
 	// context overflow. When ShouldCommit is true, CommitMessages should replace
 	// the runtime baseline before continuing.
-	RecoverOverflow(ctx context.Context, msgs []AgentMessage, cause error) (ContextRecoveryResult, error)
+	RecoverOverflow(ctx context.Context, input TransformContext, cause error) (ContextRecoveryResult, error)
 
 	// Sync tells the manager what the current runtime baseline is after restore,
 	// clear, import, or any other external replacement of messages.

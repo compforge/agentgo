@@ -114,7 +114,7 @@ func recoverOverflow(ctx context.Context, agentCtx *AgentContext, config LoopCon
 
 	compactExecution := newCompactExecution(turnIndex, CompactReasonOverflow, 1)
 	recoveryCtx := ContextWithExecution(ctx, compactExecution)
-	recovery, err := recoverContext(recoveryCtx, config.ContextManager, compactExecution, agentCtx.Messages, originalErr, sink)
+	recovery, err := recoverContext(recoveryCtx, config.ContextManager, compactExecution, TransformContext{Messages: agentCtx.Messages, Artifacts: config.artifacts}, originalErr, sink)
 	if err != nil {
 		return Message{}, llmCallInfo{Execution: failedExecution}, &ContextOverflowError{Cause: fmt.Errorf("compaction failed: %w", err)}
 	}
@@ -165,7 +165,7 @@ func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, tur
 	if config.ContextManager != nil {
 		compactExecution := newCompactExecution(turnIndex, CompactReasonThreshold, attempt)
 		projectionCtx := ContextWithExecution(ctx, compactExecution)
-		view, compacted, err := prepareContext(projectionCtx, config.ContextManager, compactExecution, messages, sink)
+		view, compacted, err := prepareContext(projectionCtx, config.ContextManager, compactExecution, TransformContext{Messages: messages, Artifacts: config.artifacts}, sink)
 		if err != nil {
 			return Message{}, info, fmt.Errorf("transform context: %w", err)
 		}
@@ -193,7 +193,7 @@ func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, tur
 		if len(pending) > 0 {
 			messages = append(copyMessages(messages), pending...)
 			if config.ContextManager != nil {
-				messages, err = transformContextView(ctx, config.ContextManager, messages)
+				messages, err = transformContextView(ctx, config.ContextManager, TransformContext{Messages: messages, Artifacts: config.artifacts})
 				if err != nil {
 					return Message{}, info, err
 				}

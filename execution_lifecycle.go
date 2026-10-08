@@ -8,7 +8,7 @@ import (
 
 // Preparation is observed at the ContextManager boundary, not inferred from a
 // successful compaction notification: projection can fail or leave history intact.
-func prepareContext(ctx context.Context, manager ContextManager, execution Execution, messages []AgentMessage, sink eventSink) (view []AgentMessage, compacted ContextCommitResult, err error) {
+func prepareContext(ctx context.Context, manager ContextManager, execution Execution, input TransformContext, sink eventSink) (view []AgentMessage, compacted ContextCommitResult, err error) {
 	sink.emit(Event{Type: EventContextPrepareStart, Execution: executionRef(execution), ContextOperation: ContextTransform})
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -16,32 +16,32 @@ func prepareContext(ctx context.Context, manager ContextManager, execution Execu
 		}
 		sink.emit(Event{Type: EventContextPrepareEnd, Execution: executionRef(execution), ContextOperation: ContextTransform, Err: err})
 	}()
-	view, err = manager.Transform(ctx, messages)
+	view, err = manager.Transform(ctx, input)
 	if err != nil {
 		return
 	}
 	// The manager owns its threshold; the loop owns durable baseline submission.
-	compacted, err = manager.Compact(ctx, messages, CompactReasonThreshold)
+	compacted, err = manager.Compact(ctx, input, CompactReasonThreshold)
 	if err != nil {
 		return
 	}
 	if compacted.Changed {
-		view, err = manager.Transform(ctx, compacted.Messages)
+		view, err = manager.Transform(ctx, TransformContext{Messages: compacted.Messages, Artifacts: input.Artifacts})
 	}
 	return
 }
 
 // transformContextView repeats only the cheap view stage after late steering.
-func transformContextView(ctx context.Context, manager ContextManager, messages []AgentMessage) (view []AgentMessage, err error) {
+func transformContextView(ctx context.Context, manager ContextManager, input TransformContext) (view []AgentMessage, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("transform context panicked: %v", recovered)
 		}
 	}()
-	return manager.Transform(ctx, messages)
+	return manager.Transform(ctx, input)
 }
 
-func recoverContext(ctx context.Context, manager ContextManager, execution Execution, messages []AgentMessage, cause error, sink eventSink) (recovery ContextRecoveryResult, err error) {
+func recoverContext(ctx context.Context, manager ContextManager, execution Execution, input TransformContext, cause error, sink eventSink) (recovery ContextRecoveryResult, err error) {
 	sink.emit(Event{Type: EventContextPrepareStart, Execution: executionRef(execution), ContextOperation: ContextRecoverOverflow})
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -49,7 +49,7 @@ func recoverContext(ctx context.Context, manager ContextManager, execution Execu
 		}
 		sink.emit(Event{Type: EventContextPrepareEnd, Execution: executionRef(execution), ContextOperation: ContextRecoverOverflow, Err: err})
 	}()
-	return manager.RecoverOverflow(ctx, messages, cause)
+	return manager.RecoverOverflow(ctx, input, cause)
 }
 
 func waitForRetry(ctx context.Context, execution Execution, delay time.Duration, sink eventSink) (err error) {

@@ -53,7 +53,7 @@ func TestCompactionInvalidatesOldPromptUsageAndPreservesRaw(t *testing.T) {
 	assistant := agentgo.Message{Role: agentgo.RoleAssistant, Content: []agentgo.ContentBlock{agentgo.TextBlock("kept")}, Usage: &agentgo.Usage{Input: 90000}}
 	messages := []agentgo.AgentMessage{agentgo.UserMsg(strings.Repeat("x", 4000)), assistant}
 	engine := NewEngine(EngineConfig{ContextWindow: 1000, ReserveTokens: 100, Compactor: removePrefix{}})
-	projection, err := engine.Compact(context.Background(), messages, agentgo.CompactReasonThreshold)
+	projection, err := engine.Compact(context.Background(), agentgo.TransformContext{Messages: messages}, agentgo.CompactReasonThreshold)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestCompactionInvalidatesOldPromptUsageAndPreservesRaw(t *testing.T) {
 func TestNoOpCompactionKeepsCalibration(t *testing.T) {
 	messages := []agentgo.AgentMessage{agentgo.Message{Role: agentgo.RoleAssistant, Content: []agentgo.ContentBlock{agentgo.TextBlock("kept")}, Usage: &agentgo.Usage{Input: 90000}}}
 	engine := NewEngine(EngineConfig{ContextWindow: 1000, ReserveTokens: 100, Compactor: Chain()})
-	projection, err := engine.Compact(context.Background(), messages, agentgo.CompactReasonThreshold)
+	projection, err := engine.Compact(context.Background(), agentgo.TransformContext{Messages: messages}, agentgo.CompactReasonThreshold)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestLatestToolArgumentsTriggerCompaction(t *testing.T) {
 	assistant := agentgo.Message{Role: agentgo.RoleAssistant, Content: []agentgo.ContentBlock{agentgo.ToolCallBlock(agentgo.ToolCall{Name: "submit", Args: args})}, Usage: &agentgo.Usage{Input: 100}}
 	compactor := &replacingCompactor{text: "summary"}
 	engine := NewEngine(EngineConfig{ContextWindow: 5000, ReserveTokens: 100, Compactor: compactor})
-	result, err := engine.Compact(context.Background(), []agentgo.AgentMessage{assistant}, agentgo.CompactReasonThreshold)
+	result, err := engine.Compact(context.Background(), agentgo.TransformContext{Messages: []agentgo.AgentMessage{assistant}}, agentgo.CompactReasonThreshold)
 	if err != nil {
 		t.Fatal(err)
 	}

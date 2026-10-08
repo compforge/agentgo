@@ -35,6 +35,7 @@ type Agent struct {
 	onMessage            func(AgentMessage)
 	beforeTurn           BeforeTurnHook
 	afterTurn            AfterTurnHook
+	snapshotLoader       SnapshotLoader
 	beforeRun            BeforeRunHook
 	afterRun             AfterRunHook
 	stopGuard            StopGuard
@@ -42,6 +43,7 @@ type Agent struct {
 	promptCacheKey       string
 
 	// State
+	artifacts        *memoryArtifactManager
 	messages         []AgentMessage
 	isRunning        bool
 	lastError        string
@@ -72,6 +74,7 @@ type Agent struct {
 // ContextEstimator / ContextWindowProvider interfaces.
 func NewAgent(opts ...AgentOption) *Agent {
 	a := &Agent{
+		artifacts:        newArtifactManager(),
 		maxTurns:         defaultMaxTurns,
 		maxRetries:       defaultMaxRetries,
 		pendingToolCalls: make(map[string]struct{}),
@@ -391,6 +394,7 @@ func (a *Agent) stateLocked() AgentState {
 	return AgentState{
 		SystemPrompt:     sp,
 		Messages:         copyMessages(a.messages),
+		Artifacts:        a.artifacts.ListArtifacts(),
 		Tools:            a.tools,
 		IsRunning:        a.isRunning,
 		StreamMessage:    a.streamMessage,
@@ -649,10 +653,11 @@ func (a *Agent) BuildLLMMessages() ([]Message, error) {
 	blocks := a.systemBlocks
 	sp := a.systemPrompt
 	mgr := a.contextManager
+	artifacts := a.artifacts
 	a.mu.Unlock()
 
 	if mgr != nil {
-		view, err := mgr.Transform(context.Background(), msgs)
+		view, err := mgr.Transform(context.Background(), TransformContext{Messages: msgs, Artifacts: artifacts})
 		if err != nil {
 			return nil, err
 		}

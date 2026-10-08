@@ -223,7 +223,7 @@ func TestAgentLoopTerminalModelMessageProducesCheckpoint(t *testing.T) {
 	}
 }
 
-func TestAgentContinueRestoresStateInBeforeRun(t *testing.T) {
+func TestAgentContinueRestoresStateWithLoader(t *testing.T) {
 	restored := AgentState{
 		Messages: []AgentMessage{UserMsg("restored request")},
 		Progress: RunProgress{Active: true, NextTurn: true, CompletedTurns: 4},
@@ -232,7 +232,7 @@ func TestAgentContinueRestoresStateInBeforeRun(t *testing.T) {
 	var callIDs []string
 	agent := NewAgent(
 		WithModel(mockModel(assistantMsg("done", StopReasonStop))),
-		WithBeforeRun(func(context.Context, BeforeRunContext) (AgentSnapshot, error) {
+		WithSnapshotLoader(func(context.Context, SnapshotLoadContext) (AgentSnapshot, error) {
 			return AgentSnapshot{State: restored}, nil
 		}),
 		WithModelMiddlewares(func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
@@ -265,9 +265,9 @@ func TestAgentRunHooksRepeatPerRunNotPerTurn(t *testing.T) {
 			assistantMsg("first", StopReasonStop),
 			assistantMsg("second", StopReasonStop),
 		)),
-		WithBeforeRun(func(_ context.Context, run BeforeRunContext) (AgentSnapshot, error) {
+		WithBeforeRun(func(_ context.Context, run BeforeRunContext) error {
 			beforeRuns++
-			return run.Snapshot, nil
+			return nil
 		}),
 		WithAfterRun(func(context.Context, AfterRunContext) error {
 			afterRuns++
@@ -293,12 +293,12 @@ func TestAgentRunHooksWrapLoopAndTerminalListeners(t *testing.T) {
 	var order []string
 	agent := NewAgent(
 		WithModel(mockModel(assistantMsg("done", StopReasonStop))),
-		WithBeforeRun(func(_ context.Context, run BeforeRunContext) (AgentSnapshot, error) {
+		WithBeforeRun(func(_ context.Context, run BeforeRunContext) error {
 			order = append(order, "before_run")
 			if run.Kind != RunKindPrompt || len(run.Input) != 1 || run.Input[0].TextContent() != "question" {
 				t.Fatalf("BeforeRun context = %#v", run)
 			}
-			return run.Snapshot, nil
+			return nil
 		}),
 		WithAfterRun(func(_ context.Context, run AfterRunContext) error {
 			order = append(order, "after_run")

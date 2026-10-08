@@ -13,13 +13,15 @@ type steeringContext struct {
 	compact func() ContextCommitResult
 }
 
-func (m steeringContext) Transform(_ context.Context, msgs []AgentMessage) ([]AgentMessage, error) {
+func (m steeringContext) Transform(_ context.Context, input TransformContext) ([]AgentMessage, error) {
+	msgs := input.Messages
 	return m.project(msgs).Messages, nil
 }
-func (m steeringContext) Compact(_ context.Context, msgs []AgentMessage, _ CompactReason) (ContextCommitResult, error) {
+func (m steeringContext) Compact(_ context.Context, input TransformContext, _ CompactReason) (ContextCommitResult, error) {
 	return m.compact(), nil
 }
-func (m steeringContext) RecoverOverflow(_ context.Context, msgs []AgentMessage, _ error) (ContextRecoveryResult, error) {
+func (m steeringContext) RecoverOverflow(_ context.Context, input TransformContext, _ error) (ContextRecoveryResult, error) {
+	msgs := input.Messages
 	return m.recover(msgs), nil
 }
 

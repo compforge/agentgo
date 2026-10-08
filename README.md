@@ -8,6 +8,7 @@ AgentGo evolved from [AgentCore](https://github.com/voocel/agentcore) and now de
 
 ## What it provides
 
+- Extensible artifacts alongside messages: share material through run hooks, tools, and middleware, with application-defined prompt rendering.
 - A message-native Agent Loop: applications keep `AgentMessage`; model-level `Message` exists only at the call boundary.
 - A single event stream for model output, tools, context projection and compaction, retries, and completion.
 - One execution coordinate across middleware and events for model, tool, and compaction work.
@@ -74,9 +75,17 @@ AgentMessage
     ─commit─▶ AgentMessage history
 ```
 
+`Artifact` represents application-owned material independently of the transcript. Implement its `ID()` and `Kind()` methods with your own payload type, then use the runtime-provided `Artifacts` capability to add, get, list, replace, or delete values. IDs are unique within a manager; kinds and content remain application-defined.
+
+Callers still supply messages. AgentGo creates and owns the manager. A `WithBeforeRun` hook can extract initial artifacts through `run.Artifacts`; turn hooks and model/tool middleware receive the same capability. A `context.Transformer` receives `TransformContext{Messages, Artifacts}` to choose how material enters each request—for example, one expansion with references at later occurrences. AgentGo supplies the mechanism; extraction, message associations, rendering, and persistence timing belong to the application. Material survives consecutive runs and message compaction; `AgentState.Artifacts` carries its values through snapshots and codec-based restoration. The [offline artifact example](examples/artifacts) demonstrates the complete flow without an API key:
+
+```bash
+go run ./examples/artifacts
+```
+
 `ContextItemProvider` lets an application message expose identifiable information without changing its model rendering. Before each model call, `EventContextProjected` reports the inventory from the actual projected context. `ContextItem` and `ContextDemand` share `ContextKey`; applications and evaluators own all label meanings and demand-extraction rules.
 
-`AgentState` is the Loop-owned execution state. A stateful `Agent` exposes `AgentSnapshot`, which adds steering and follow-up input already accepted by the Agent but not yet handed to the Loop. Both are codec-aware without being tied to storage or transport. `agentgo.NewCodec` registers AgentGo's built-in state types; applications register their own concrete `AgentMessage` types with one stable type ID. Fields opt in through `codec` tags, while custom handlers cover special wire representations. Hosts can use the same encoded snapshot for persistence, process handoff, or future RPC protocols.
+`AgentState` is the Loop-owned execution state. A stateful `Agent` exposes `AgentSnapshot`, which adds steering and follow-up input already accepted by the Agent but not yet handed to the Loop. Both are codec-aware without being tied to storage or transport. `agentgo.NewCodec` registers AgentGo's built-in state types; applications register their own concrete `AgentMessage` and `Artifact` types with one stable type ID. Fields opt in through `codec` tags, while custom handlers cover special wire representations. Hosts can use the same encoded snapshot for persistence, process handoff, or future RPC protocols.
 
 ```go
 stateCodec, _ := agentgo.NewCodec(
@@ -88,7 +97,7 @@ _ = snapshotStore.Save(ctx, data)
 
 restored := agentgo.NewAgent(
     agentgo.WithModel(model),
-    agentgo.WithBeforeRun(func(ctx context.Context, run agentgo.BeforeRunContext) (agentgo.AgentSnapshot, error) {
+    agentgo.WithSnapshotLoader(func(ctx context.Context, run agentgo.SnapshotLoadContext) (agentgo.AgentSnapshot, error) {
         data, err := snapshotStore.Load(ctx)
         if err != nil {
             return agentgo.AgentSnapshot{}, err
@@ -110,7 +119,7 @@ restored := agentgo.NewAgent(
 _ = restored.Continue(ctx)
 ```
 
-`BeforeRun` runs synchronously before a stateful `Agent` starts its Loop and may replace the complete snapshot. A load error rejects the run before it is accepted, so a later `Continue` can retry. `AfterRun` observes the final projected snapshot outside the Loop and before terminal listeners; adapters commonly package these hooks together so callers only configure the adapter and call `Continue`.
+`WithSnapshotLoader` recovers the baseline before `BeforeRun` initializes its materials. `BeforeRun` returns only an error and receives an isolated material collection populated from the recovered snapshot. Successful preparation publishes messages, queues and materials together; loading or initialization failure leaves the accepted state unchanged, so a later `Continue` can retry. `AfterRun` observes the completed run outside the Loop and before terminal listeners. Recovery adapters can pair a snapshot loader with `AfterRun` persistence.
 
 `Execution` gives expensive or externally visible work one run-scoped identity. A retry keeps the same `ID` and increments `Attempt`; `ModelExecution` and `ToolExecution` carry that coordinate through middleware and the Event stream. Internal summary calls are child executions of compaction, so hosts can correlate or replay known outcomes without AgentGo depending on a ledger or tracing model.
 
@@ -120,11 +129,12 @@ _ = restored.Continue(ctx)
 |------|----------|
 | Model provider | `ChatModel` |
 | Application message | `AgentMessage` |
+| Application material | `Artifact` / `ArtifactManager` |
 | Tool capability | `Tool` and optional tool interfaces |
 | Tool authorization | `ToolGate` |
 | Context projection and recovery | `ContextManager` |
 | Compaction policy | `context.Compactor` |
-| Stateful Agent restoration and finalization | `AgentSnapshot` / `WithBeforeRun` / `WithAfterRun` |
+| Stateful Agent restoration and finalization | `AgentSnapshot` / `WithSnapshotLoader` / `WithBeforeRun` / `WithAfterRun` |
 | Turn preparation and state observation | `WithBeforeTurn` / `WithAfterTurn` |
 | Model execution interception | `WithModelMiddlewares` |
 | Tool execution interception | `WithToolMiddlewares` |

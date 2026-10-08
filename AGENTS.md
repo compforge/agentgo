@@ -13,7 +13,7 @@ Event、调度与多 Agent 的通用执行能力，但不内建具体业务流�
 
 ```text
 agentgo/
-├── *.go          Agent / AgentLoop、AgentMessage / Message、Tool、Event、Context 契约及调度入口
+├── *.go          Agent / AgentLoop、AgentMessage / Message、Artifact、Tool、Event、Context 契约及调度入口
 ├── codec/        通用 tagged value、类型注册与 JSON 编解码
 ├── context/      默认 ContextEngine、可替换 Compactor、投影、压缩、summary 与 overflow recovery
 ├── llm/          模型 Provider 适配；核心包不依赖具体 LLM SDK
@@ -30,7 +30,10 @@ agentgo/
 
 1. **Message-native 边界不可反转**：Loop、Context、Event 和持久化使用 `AgentMessage`；
    `ToMessage` 是唯一模型协议转换边界，compaction 必须保留 `Raw`。
-2. **Kernel 记录事实，不解释业务**：ContextItem / ContextDemand 共享身份协议，但 kind、representation、
+2. **Kernel 记录事实，不解释业务**：Artifact 与 AgentMessage 并列，ArtifactManager 由运行时创建并通过扩展点参数提供；
+   业务通过 Run / Turn Hook、Middleware 和 Transformer 决定提取、消息关联与呈现策略；
+   材料值进入 AgentState / Snapshot，消息压缩不隐式清空材料。
+   ContextItem / ContextDemand 共享身份协议，但 kind、representation、
    signal、提取器和评分含义归应用；权限、终止和 Context 策略均通过扩展点注入。
 3. **Event stream 是统一观测面**：模型、工具、Context 投影/压缩及结束状态都从 Event 输出；新增运行
    能力时优先补完整事实事件，而不是让 UI、日志或 Harness 猜内部状态。
@@ -40,7 +43,7 @@ agentgo/
    可选能力表达；Go 改动提交前运行 `go test ./...` 与 `go build ./...`。
 6. **编码机制不绑定存储或传输策略**：`codec` 提供通用 tagged value、类型注册和编解码机制；
    `AgentState` 是 Loop state，`AgentSnapshot` 聚合 stateful Agent 已接受但未消费的 queue；stateful
-   Agent 的 `BeforeRun` / `AfterRun` 位于 Loop 外层，供宿主组合装载与保存，裸 `AgentLoop` 不提供同名
+   Agent 的 `SnapshotLoader` / `BeforeRun` / `AfterRun` 位于 Loop 外层，分别承载恢复、初始化与收尾；恢复与初始化成功后统一提交准备态，裸 `AgentLoop` 不提供同名
    hook。持久化、进程交接、RPC 与进入 Agent 前的 durable inbox 均由宿主负责。
 7. **版本随公开契约演进**：`VERSION` 表达仓库当前发布版本；公开 API、可观察行为或依赖基线变化时，
    在同一 PR 中按语义版本同步升级，避免代码能力与可识别版本脱节。
@@ -50,6 +53,6 @@ agentgo/
 ## References
 
 - `README.md` / `README_CN.md` —— 产品定位、能力与最短使用路径
-- `docs/kernel.md` —— Message-native 内核、ContextItem / ContextDemand 与轨迹驱动优化
+- `docs/kernel.md` —— Message-native 内核、Artifact、ContextItem / ContextDemand 与轨迹驱动优化
 - `doc.go` —— Go Package 总览
 - `examples/` —— 可运行示例

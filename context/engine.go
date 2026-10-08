@@ -212,8 +212,9 @@ func (e *ContextEngine) Snapshot() *agentgo.ContextSnapshot {
 // compactThreshold prepares an explicit baseline rewrite under pressure. Includes a circuit breaker: after maxFailures consecutive
 // compression errors, threshold compaction skips one cycle, reports the skipped state, then
 // re-arms itself in a half-open state so later calls can retry compression.
-func (e *ContextEngine) compactThreshold(ctx context.Context, msgs []agentgo.AgentMessage) (agentgo.ContextCommitResult, error) {
-	view, err := e.Transform(ctx, msgs)
+func (e *ContextEngine) compactThreshold(ctx context.Context, input agentgo.TransformContext) (agentgo.ContextCommitResult, error) {
+	msgs := input.Messages
+	view, err := e.Transform(ctx, input)
 	if err != nil {
 		return agentgo.ContextCommitResult{}, err
 	}
@@ -283,9 +284,10 @@ func (e *ContextEngine) compactThreshold(ctx context.Context, msgs []agentgo.Age
 // Compact performs a forced rewrite suitable for explicit committed actions
 // such as /compact. The caller should replace its runtime baseline with the
 // returned Messages when Changed is true.
-func (e *ContextEngine) Compact(ctx context.Context, msgs []agentgo.AgentMessage, reason agentgo.CompactReason) (agentgo.ContextCommitResult, error) {
+func (e *ContextEngine) Compact(ctx context.Context, input agentgo.TransformContext, reason agentgo.CompactReason) (agentgo.ContextCommitResult, error) {
+	msgs := input.Messages
 	if reason == agentgo.CompactReasonThreshold {
-		return e.compactThreshold(ctx, msgs)
+		return e.compactThreshold(ctx, input)
 	}
 	e.Sync(msgs)
 	r, err := e.apply(ctx, msgs, true)
@@ -306,7 +308,8 @@ func (e *ContextEngine) Compact(ctx context.Context, msgs []agentgo.AgentMessage
 // RecoverOverflow performs a forced rewrite after a provider reports context
 // overflow. When ShouldCommit is true, CommitMessages should become the new
 // runtime baseline before retrying.
-func (e *ContextEngine) RecoverOverflow(ctx context.Context, msgs []agentgo.AgentMessage, _ error) (agentgo.ContextRecoveryResult, error) {
+func (e *ContextEngine) RecoverOverflow(ctx context.Context, input agentgo.TransformContext, _ error) (agentgo.ContextRecoveryResult, error) {
+	msgs := input.Messages
 	e.Sync(msgs)
 	r, err := e.apply(ctx, msgs, true)
 	if err != nil {

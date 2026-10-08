@@ -7,7 +7,8 @@ import (
 
 // Snapshot returns the stateful Agent's state and accepted input queues from
 // one critical section. Its portable message slices are safe for the caller to
-// encode or retain.
+// encode or retain. Artifact slices are copied; their application-owned payloads
+// are shared, so mutate them through replacement or application synchronization.
 func (a *Agent) Snapshot() AgentSnapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -23,7 +24,7 @@ func (a *Agent) snapshotLocked() AgentSnapshot {
 }
 
 // SetSnapshot directly replaces the portable state and accepted input queues
-// of an idle Agent. Normal recovery should return a snapshot from BeforeRun so
+// of an idle Agent. Normal recovery may use WithSnapshotLoader so
 // Continue can restore it automatically. Hold the lifecycle first with
 // HoldRuns when replacing a snapshot around live runs.
 func (a *Agent) SetSnapshot(snapshot AgentSnapshot) error {
@@ -34,30 +35,54 @@ func (a *Agent) SetSnapshot(snapshot AgentSnapshot) error {
 	if a.isRunning {
 		return fmt.Errorf("cannot set snapshot: %w", ErrAlreadyRunning)
 	}
+	values, err := artifactValues(snapshot.State.Artifacts)
+	if err != nil {
+		return fmt.Errorf("restore artifacts: %w", err)
+	}
+	a.artifacts.replace(values)
 	a.applySnapshotLocked(snapshot)
 	return nil
 }
 
-// prepareRun must run with runMu held. BeforeRun runs without a.mu so adapters
-// may perform storage I/O without blocking state observation; runMu keeps the
-// admission snapshot stable until the returned baseline is installed.
+// prepareRun must run with runMu held. Storage I/O and initialization run
+// without a.mu; observers keep seeing the accepted baseline until the prepared
+// messages, queues and material collection can be installed together.
 func (a *Agent) prepareRun(ctx context.Context, kind RunKind, input []AgentMessage) error {
 	a.mu.Lock()
-	hook := a.beforeRun
-	if hook == nil {
+	loader, hook := a.snapshotLoader, a.beforeRun
+	if loader == nil && hook == nil {
 		a.mu.Unlock()
 		return nil
 	}
-	run := BeforeRunContext{
-		Kind:     kind,
-		Snapshot: a.snapshotLocked(),
-		Input:    copyMessages(input),
-	}
+	snapshot := a.snapshotLocked()
 	a.mu.Unlock()
 
-	snapshot, err := callBeforeRun(ctx, hook, run)
+	if loader != nil {
+		loaded, err := callSnapshotLoader(ctx, loader, SnapshotLoadContext{Kind: kind, Snapshot: snapshot})
+		if err != nil {
+			return fmt.Errorf("load snapshot: %w", err)
+		}
+		snapshot = loaded
+	}
+	values, err := artifactValues(snapshot.State.Artifacts)
 	if err != nil {
-		return fmt.Errorf("before run: %w", err)
+		return fmt.Errorf("restore artifacts: %w", err)
+	}
+	// Only the staged manager is exposed to initialization. There is no replay
+	// of operations against a different baseline, and rejected CRUD never leaks
+	// through State or Snapshot. Payloads keep their documented shared semantics.
+	prepared := newArtifactManager()
+	prepared.replace(values)
+	if hook != nil {
+		err := callBeforeRun(ctx, hook, BeforeRunContext{
+			Artifacts: prepared,
+			Kind:      kind,
+			Snapshot:  snapshot,
+			Input:     copyMessages(input),
+		})
+		if err != nil {
+			return fmt.Errorf("before run: %w", err)
+		}
 	}
 
 	a.mu.Lock()
@@ -68,11 +93,21 @@ func (a *Agent) prepareRun(ctx context.Context, kind RunKind, input []AgentMessa
 	if a.isRunning {
 		return ErrAlreadyRunning
 	}
+	a.artifacts = prepared
 	a.applySnapshotLocked(snapshot)
 	return nil
 }
 
-func callBeforeRun(ctx context.Context, hook BeforeRunHook, run BeforeRunContext) (snapshot AgentSnapshot, err error) {
+func callSnapshotLoader(ctx context.Context, loader SnapshotLoader, run SnapshotLoadContext) (snapshot AgentSnapshot, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("panic: %v", recovered)
+		}
+	}()
+	return loader(ctx, run)
+}
+
+func callBeforeRun(ctx context.Context, hook BeforeRunHook, run BeforeRunContext) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("panic: %v", recovered)

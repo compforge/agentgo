@@ -16,6 +16,44 @@ AgentGo 原生支持**轨迹驱动的 Loop 优化**：Event stream 记录实际�
 轨迹，再把结论反馈给 Prompt、Tool surface 或 Execution mechanism。内核负责让事实稳定、可关联，
 不负责给出具体优化答案。
 
+## AgentMessage 与 Artifact
+
+Agent Loop 会接收文件、工具结果等材料，并在运行中产生和更新材料。消息记录对话中的发生顺序，
+`Artifact` 表达这些材料的独立身份；二者是并列概念。应用可以扩展具体 Artifact 类型，一个材料可以
+关联多条消息，一条消息也可以涉及多个材料，材料还可以独立于消息存在。
+
+`ArtifactManager` 提供 CRUD，保证一个 Manager 内 ID 唯一。ID 与 Kind 的含义、材料内容及消息关联
+归业务所有。AgentGo 创建并持有 Manager，通过各扩展点的 `Artifacts` 字段提供能力。扩展实现使用
+本次调用提供的能力，不自行创建或缓存 Manager，因此同一个 Transformer 可以复用于不同 Agent。
+内存实现支持并发访问；业务对象不深拷贝，共享内容应通过替换或由应用同步更新。
+
+同一 Agent 的连续 Run 共用材料；turn 推进、重试、消息替换和 compaction 不会隐式删除材料。
+`AgentState.Artifacts` 保存材料值，随 Snapshot 编码和恢复，具体类型由应用注册到 codec；整个
+Snapshot 替换同时替换消息与材料。宿主决定存储位置及持久化时机。
+裸 AgentLoop 根据 InitialState 建立独立 Manager，并通过状态事件交付材料值；新建 Agent 和子 Loop
+默认隔离，即使调用方复用标准 context.Context，也不会继承父级材料管理器。
+
+初始化输入仍是 AgentMessage 列表。stateful Agent 先通过 `SnapshotLoader` 加载基线，再向
+`BeforeRun` 提供恢复后的 Snapshot、新增 Input 与独立的材料准备态。Hook 只返回错误，CRUD 始终
+针对这同一份恢复基线；该 Hook 每次准备 Run 执行一次，不随模型重试或 turn 推进重复执行。
+准备成功后一次性提交消息、队列与材料，运行中的扩展点共用该材料集合；失败则丢弃准备态。
+准备期间 `State()` / `Snapshot()` 仍只观察已接受的状态。业务材料对象保持共享，不回滚原地修改，
+需要拒绝时保留内容的业务应通过替换值更新材料。
+裸 AgentLoop 调用方可通过 InitialState 提供材料值，或在 BeforeTurn 等扩展点登记初始消息中的材料。
+
+Run / Turn Hook、Model / Tool Middleware 通过具名的 `Artifacts` 字段访问所属运行时的能力。
+ContextManager 的转换、压缩和恢复入口统一接收 `TransformContext`，将材料能力传至各 Transformer；
+标准 context.Context 保留取消、超时与内部调用链传播职责，业务无需通过隐式 key 查找 Manager。
+
+业务 Transformer 结合输入消息和 ArtifactManager 构造请求视图。登记信息使业务能够实现内容去重、
+引用、摘要等策略；AgentGo 不替业务决定哪些材料应该进入 prompt。供本次转换使用的材料必须在
+Transformer 执行前登记，位于转换之后的 ModelMiddleware 更新只能影响后续转换。
+
+材料库存与模型可见内容是不同事实：删除材料不会删除历史消息，更新材料也不会改写过去的模型请求。
+去重等覆盖状态应根据每次请求的实际消息重新计算，避免 compaction 删除早先的内容后只剩悬空引用。
+Transformer 对相同的消息与材料状态应产生确定且幂等的结果，并保留 Raw 和工具调用配对。
+`ContextItem` 则继续描述实际投影出的信息，由业务决定是否将 Artifact 映射为该观测协议。
+
 ## 可编码状态与执行边界
 
 一次 stateful Agent Run 包含一次 AgentLoop 调用，Loop 包含多个 turn，一个 turn 包含一次逻辑模型调用
@@ -32,7 +70,7 @@ stateful `Agent` 在 Loop 之外还持有 steering / follow-up queue：输入一
 `codec` 包提供通用的 tagged value、稳定类型身份与 JSON 编解码；`AgentState`、`AgentSnapshot` 通过字段
 tag 声明自己的 portable projection，应用再注册自定义 `AgentMessage` 的具体类型。宿主可以在
 携带 `State` 的 `EventTurnEnd` 已投影后调用 `Agent.Snapshot()` 保存 turn 边界，也可以直接使用 `AfterRunContext.Snapshot`
-保存终态。恢复 adapter 通过 `WithBeforeRun` 在 Loop 启动前返回完整 Snapshot；装载错误会拒绝本次 Run，
+保存终态。恢复 adapter 通过 `WithSnapshotLoader` 在初始化之前加载完整 Snapshot；装载错误会拒绝本次 Run，
 后续 `Continue` 可以重试。`AfterRun` 在 Loop 完全结束、最终状态已经投影后执行，并先于终态 listener。
 `SetSnapshot` 只保留为低层状态操作，不是正常恢复流程必需的用户编排步骤。进入 AgentGo 之前的 durable
 inbox 仍由宿主负责，Snapshot 只承诺覆盖 Agent 已经接受的输入。
