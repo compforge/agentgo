@@ -6,6 +6,7 @@ import "context"
 // TurnIndex is one-based. Context is a snapshot; mutating it does not change
 // the running loop.
 type BeforeTurnContext struct {
+	Artifacts ArtifactManager // Runtime-owned material; do not retain beyond the callback.
 	TurnIndex int
 	Context   AgentContext
 }
@@ -14,6 +15,7 @@ type BeforeTurnContext struct {
 // response that ends the run with an error or abort reason. Context includes
 // the assistant message and all tool results from that turn.
 type AfterTurnContext struct {
+	Artifacts   ArtifactManager // Runtime-owned material; do not retain beyond the callback.
 	TurnIndex   int
 	Message     AgentMessage
 	ToolResults []ToolResult

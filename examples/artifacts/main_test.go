@@ -16,20 +16,24 @@ func (retryError) Retryable() bool           { return true }
 func (retryError) RetryAfter() time.Duration { return time.Millisecond }
 
 func TestArtifactRunLifecycle(t *testing.T) {
-	artifacts := agentgo.NewArtifactManager()
 	model := &demoModel{}
 	beforeCalls, attempts := 0, 0
 	var runErr error
-	options := append(artifactOptions(artifacts),
+	options := append(artifactOptions(),
 		agentgo.WithModel(model),
 		agentgo.WithMaxRetries(1),
 		agentgo.WithBeforeRun(func(ctx context.Context, run agentgo.BeforeRunContext) (agentgo.AgentSnapshot, error) {
 			beforeCalls++
-			return registerInitial(artifacts)(ctx, run)
+			if beforeCalls == 2 {
+				if err := run.Artifacts.AddArtifact(fileArtifact{Path: "main.go", Content: "updated source"}, true); err != nil {
+					return run.Snapshot, err
+				}
+			}
+			return registerInitial(ctx, run)
 		}),
 		agentgo.WithModelMiddlewares(func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
 			attempts++
-			if _, ok := artifacts.GetArtifact("main.go"); !ok {
+			if _, ok := execution.Artifacts.GetArtifact("main.go"); !ok {
 				t.Error("initial artifact missing before model middleware")
 			}
 			if attempts == 1 {
@@ -56,11 +60,16 @@ func TestArtifactRunLifecycle(t *testing.T) {
 			t.Errorf("request %d did not expand source exactly once", i)
 		}
 	}
-	report, ok := artifacts.GetArtifact("report.md")
-	if !ok {
+	var report fileArtifact
+	for _, value := range agent.State().Artifacts {
+		if value.ID() == "report.md" {
+			report = value.(fileArtifact)
+		}
+	}
+	if report.Path == "" {
 		t.Fatal("tool middleware did not register report")
 	}
-	if countContent(model.requests[1], report.(fileArtifact).Content) != 1 {
+	if countContent(model.requests[1], report.Content) != 1 {
 		t.Fatal("tool artifact absent from next prompt")
 	}
 	last := model.requests[1][len(model.requests[1])-1]
@@ -75,11 +84,8 @@ func TestArtifactRunLifecycle(t *testing.T) {
 		}
 	}
 	// A later Run invokes the hook again, but historical source cannot overwrite
-	// an explicitly replaced artifact retained by the host.
+	// an explicitly replaced artifact retained by the runtime.
 	updated := fileArtifact{Path: original.Path, Content: "updated source"}
-	if err := artifacts.AddArtifact(updated, true); err != nil {
-		t.Fatal(err)
-	}
 	if err := agent.Prompt(t.Context(), "Review again."); err != nil {
 		t.Fatal(err)
 	}
@@ -101,35 +107,47 @@ func countContent(messages []agentgo.Message, text string) int {
 }
 
 func TestArtifactTransformRebuildsRequestCoverage(t *testing.T) {
-	artifacts := agentgo.NewArtifactManager()
-	file := fileArtifact{Path: "a.go", Content: "original source"}
-	if err := artifacts.AddArtifact(file, false); err != nil {
+	// Exercise a reusable transformer using the capability supplied by AgentGo.
+	agent := agentgo.NewAgent(agentgo.WithModel(&demoModel{}), agentgo.WithMaxTurns(1),
+		agentgo.WithBeforeRun(func(ctx context.Context, run agentgo.BeforeRunContext) (agentgo.AgentSnapshot, error) {
+			file := fileArtifact{Path: "a.go", Content: "original source"}
+			if err := run.Artifacts.AddArtifact(file, false); err != nil {
+				return run.Snapshot, err
+			}
+			transformer := fileTransformer()
+			input := agentgo.TransformContext{Artifacts: run.Artifacts, Messages: []agentgo.AgentMessage{userFile(file), userFile(file)}}
+			view, err := transformer.Transform(ctx, input)
+			if err != nil {
+				return run.Snapshot, err
+			}
+			again, err := transformer.Transform(ctx, agentgo.TransformContext{Artifacts: run.Artifacts, Messages: view})
+			if err != nil {
+				return run.Snapshot, err
+			}
+			for i := range view {
+				if again[i].TextContent() != view[i].TextContent() || view[i].Raw().(fileMessage).File != file {
+					t.Error("transform lost idempotence or Raw")
+				}
+			}
+			surviving, err := transformer.Transform(ctx, agentgo.TransformContext{Artifacts: run.Artifacts, Messages: view[1:]})
+			if err != nil {
+				return run.Snapshot, err
+			}
+			if !strings.Contains(surviving[0].TextContent(), file.Content) {
+				t.Error("coverage was not rebuilt")
+			}
+			run.Artifacts.DeleteArtifact(file.ID())
+			without, err := transformer.Transform(ctx, input)
+			if err != nil {
+				return run.Snapshot, err
+			}
+			if without[0].TextContent() != input.Messages[0].TextContent() {
+				t.Error("missing artifact should leave source unchanged")
+			}
+			return run.Snapshot, nil
+		}))
+	if err := agent.Prompt(t.Context(), "check"); err != nil {
 		t.Fatal(err)
 	}
-	transformer := fileTransformer(artifacts)
-	input := []agentgo.AgentMessage{userFile(file), userFile(file)}
-	view, err := transformer.Transform(t.Context(), input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	again, err := transformer.Transform(t.Context(), view)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := range view {
-		if again[i].TextContent() != view[i].TextContent() || view[i].Raw().(fileMessage).File != file {
-			t.Fatal("transform lost idempotence or Raw")
-		}
-	}
-	// Simulate compaction removing the first occurrence: the surviving message
-	// must contain the artifact again, even though the old view was a reference.
-	surviving, err := transformer.Transform(t.Context(), view[1:])
-	if err != nil || !strings.Contains(surviving[0].TextContent(), file.Content) {
-		t.Fatalf("coverage was not rebuilt: %v", err)
-	}
-	artifacts.DeleteArtifact(file.ID())
-	without, err := transformer.Transform(t.Context(), input)
-	if err != nil || without[0].TextContent() != input[0].TextContent() {
-		t.Fatal("missing artifact should leave source message unchanged")
-	}
+	agent.WaitForIdle()
 }

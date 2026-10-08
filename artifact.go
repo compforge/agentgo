@@ -20,9 +20,11 @@ type Artifact interface {
 var ErrArtifactExists = errors.New("artifact already exists")
 
 // ArtifactManager manages material independently of AgentMessage history.
-// Hosts choose its lifetime and inject the same instance into run hooks, tools,
-// middleware, and context transformers. Message associations and prompt policy
-// belong to those application components.
+// AgentGo owns its lifetime and provides it in hook, middleware, and transform
+// inputs. Use the capability during the callback rather than retaining it.
+// Message associations and prompt policy belong to application components.
+// Values are shared, not deep-copied: publish replacements or synchronize any
+// in-place mutation. IDs must remain stable while registered.
 type ArtifactManager interface {
 	// AddArtifact registers a non-nil artifact. If its ID already exists,
 	// overwrite replaces the entire value, including its concrete type and Kind;
@@ -35,21 +37,24 @@ type ArtifactManager interface {
 	DeleteArtifact(id string) bool
 }
 
-// NewArtifactManager returns an empty, concurrency-safe in-memory manager.
-// Values are stored and returned as supplied, without deep copying. Applications
-// must synchronize mutations of their payloads, or publish replacement values
-// with AddArtifact instead. Manager contents are not part of AgentSnapshot;
-// hosts own persistence and reconstruction.
-func NewArtifactManager() ArtifactManager {
+// newArtifactManager creates the runtime-owned material collection. Payloads
+// are retained as supplied; applications publish replacements or synchronize
+// mutations of their own concrete values.
+func newArtifactManager() *memoryArtifactManager {
 	return &memoryArtifactManager{artifacts: make(map[string]Artifact)}
 }
 
 type memoryArtifactManager struct {
 	mu        sync.RWMutex
 	artifacts map[string]Artifact
+	// Non-nil only during BeforeRun admission; nil values record deletions.
+	changes map[string]Artifact
 }
 
 func (m *memoryArtifactManager) AddArtifact(artifact Artifact, overwrite bool) error {
+	if artifact == nil {
+		return fmt.Errorf("artifact must not be nil")
+	}
 	id := artifact.ID()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -57,6 +62,9 @@ func (m *memoryArtifactManager) AddArtifact(artifact Artifact, overwrite bool) e
 		return fmt.Errorf("%w: %q", ErrArtifactExists, id)
 	}
 	m.artifacts[id] = artifact
+	if m.changes != nil {
+		m.changes[id] = artifact
+	}
 	return nil
 }
 
@@ -87,5 +95,55 @@ func (m *memoryArtifactManager) DeleteArtifact(id string) bool {
 	defer m.mu.Unlock()
 	_, exists := m.artifacts[id]
 	delete(m.artifacts, id)
+	if m.changes != nil {
+		m.changes[id] = nil
+	}
 	return exists
+}
+
+// artifactValues validates an entire restore before any live state changes.
+func artifactValues(values []Artifact) (map[string]Artifact, error) {
+	manager := newArtifactManager()
+	for _, value := range values {
+		if err := manager.AddArtifact(value, false); err != nil {
+			return nil, err
+		}
+	}
+	return manager.artifacts, nil
+}
+
+func (m *memoryArtifactManager) replace(values map[string]Artifact) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.artifacts = values
+	m.changes = nil
+}
+
+// beginAdmission makes membership changes provisional until the hook's returned
+// snapshot is accepted. Payload objects are not cloned or rolled back.
+func (m *memoryArtifactManager) beginAdmission() map[string]Artifact {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	before := make(map[string]Artifact, len(m.artifacts))
+	for id, value := range m.artifacts {
+		before[id] = value
+	}
+	m.changes = make(map[string]Artifact)
+	return before
+}
+
+// finishAdmission overlays explicit hook operations onto the restored baseline.
+// Tracking deletions, even of absent IDs, prevents restored values from reappearing.
+func (m *memoryArtifactManager) finishAdmission(base map[string]Artifact) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, value := range m.changes {
+		if value == nil {
+			delete(base, id)
+		} else {
+			base[id] = value
+		}
+	}
+	m.artifacts = base
+	m.changes = nil
 }

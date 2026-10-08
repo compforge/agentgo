@@ -14,11 +14,12 @@ type RunProgress struct {
 }
 
 // AgentState is the Loop-owned execution state. Codec tags define its portable
-// projection; model, tools, hooks, streams and in-flight calls remain
+// projection, including application Artifact values; model, tools, hooks, streams and in-flight calls remain
 // process-local and are rebound or recreated by the host.
 type AgentState struct {
 	SystemPrompt     string
 	Messages         []AgentMessage `codec:"messages"`
+	Artifacts        []Artifact     `codec:"artifacts,omitempty"`
 	Tools            []Tool
 	IsRunning        bool
 	StreamMessage    AgentMessage

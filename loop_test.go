@@ -1826,18 +1826,19 @@ type projectionCommitManager struct {
 	recovery   ContextRecoveryResult
 }
 
-func (m projectionCommitManager) Transform(ctx context.Context, msgs []AgentMessage) ([]AgentMessage, error) {
+func (m projectionCommitManager) Transform(ctx context.Context, input TransformContext) ([]AgentMessage, error) {
+	msgs := input.Messages
 	if m.projection.Messages != nil {
 		return m.projection.Messages, nil
 	}
 	return msgs, nil
 }
 
-func (m projectionCommitManager) Compact(ctx context.Context, msgs []AgentMessage, reason CompactReason) (ContextCommitResult, error) {
+func (m projectionCommitManager) Compact(ctx context.Context, input TransformContext, reason CompactReason) (ContextCommitResult, error) {
 	return m.projection, nil
 }
 
-func (m projectionCommitManager) RecoverOverflow(ctx context.Context, msgs []AgentMessage, cause error) (ContextRecoveryResult, error) {
+func (m projectionCommitManager) RecoverOverflow(ctx context.Context, input TransformContext, cause error) (ContextRecoveryResult, error) {
 	return m.recovery, nil
 }
 

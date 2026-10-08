@@ -9,7 +9,7 @@ const (
 )
 
 // NewCodec constructs a codec with AgentGo's portable state types already
-// registered. Applications add their own concrete AgentMessage types through
+// registered. Applications add their own concrete AgentMessage and Artifact types through
 // codec.Type or codec.WithHandler.
 func NewCodec(options ...codec.Option) (codec.Codec, error) {
 	builtins := []codec.Option{

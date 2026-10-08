@@ -1,4 +1,4 @@
-package agentgo_test
+package agentgo
 
 import (
 	"errors"
@@ -6,8 +6,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-
-	"github.com/compforge/agentgo"
 )
 
 type textArtifact struct {
@@ -26,13 +24,13 @@ func (a numericArtifact) ID() string   { return a.id }
 func (a numericArtifact) Kind() string { return "number" }
 
 func TestArtifactManagerIdentityAndReplacement(t *testing.T) {
-	manager := agentgo.NewArtifactManager()
+	manager := newArtifactManager()
 	original := textArtifact{"shared", "file", "original"}
 	if err := manager.AddArtifact(original, false); err != nil {
 		t.Fatal(err)
 	}
 	replacement := numericArtifact{"shared", 42}
-	if err := manager.AddArtifact(replacement, false); !errors.Is(err, agentgo.ErrArtifactExists) {
+	if err := manager.AddArtifact(replacement, false); !errors.Is(err, ErrArtifactExists) {
 		t.Fatalf("duplicate ID with different kind: %v", err)
 	}
 	if got, _ := manager.GetArtifact("shared"); got != original {
@@ -45,7 +43,7 @@ func TestArtifactManagerIdentityAndReplacement(t *testing.T) {
 		t.Fatalf("replacement: %v, %v", got, ok)
 	}
 	// Identity is scoped to the manager, not a global registry.
-	if err := agentgo.NewArtifactManager().AddArtifact(original, false); err != nil {
+	if err := newArtifactManager().AddArtifact(original, false); err != nil {
 		t.Fatal(err)
 	}
 	if !manager.DeleteArtifact("shared") || manager.DeleteArtifact("shared") {
@@ -60,7 +58,7 @@ func TestArtifactManagerIdentityAndReplacement(t *testing.T) {
 }
 
 func TestArtifactManagerListIsStableAndIndependent(t *testing.T) {
-	manager := agentgo.NewArtifactManager()
+	manager := newArtifactManager()
 	for _, id := range []string{"z", "a", "m"} {
 		if err := manager.AddArtifact(textArtifact{id, "custom", id}, true); err != nil {
 			t.Fatal(err)
@@ -79,7 +77,7 @@ func TestArtifactManagerListIsStableAndIndependent(t *testing.T) {
 }
 
 func TestArtifactManagerConcurrentAccess(t *testing.T) {
-	manager := agentgo.NewArtifactManager()
+	manager := newArtifactManager()
 	var inserted atomic.Int32
 	var wg sync.WaitGroup
 	for i := range 32 {
@@ -88,7 +86,7 @@ func TestArtifactManagerConcurrentAccess(t *testing.T) {
 			switch {
 			case err == nil:
 				inserted.Add(1)
-			case errors.Is(err, agentgo.ErrArtifactExists):
+			case errors.Is(err, ErrArtifactExists):
 			default:
 				t.Errorf("add: %v", err)
 			}

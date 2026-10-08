@@ -15,6 +15,7 @@ func (a *Agent) buildConfig(continuing bool) LoopConfig {
 	initialState.Progress = activateRunProgress(initialState.Progress, continuing)
 
 	return LoopConfig{
+		artifacts:                a.artifacts,
 		Model:                    a.model,
 		MaxTurns:                 a.maxTurns,
 		MaxRetries:               a.maxRetries,
@@ -207,10 +208,11 @@ func (a *Agent) consumeAgentEnd(runCtx context.Context, kind RunKind, ev Event) 
 			summary = *ev.Summary
 		}
 		if err := callAfterRun(context.WithoutCancel(runCtx), hook, AfterRunContext{
-			Kind:     kind,
-			Snapshot: snapshot,
-			Summary:  summary,
-			Err:      ev.Err,
+			Kind:      kind,
+			Artifacts: a.artifacts,
+			Snapshot:  snapshot,
+			Summary:   summary,
+			Err:       ev.Err,
 		}); err != nil {
 			hookErr = fmt.Errorf("after run: %w", err)
 			ev.Err = errors.Join(ev.Err, hookErr)
@@ -222,9 +224,10 @@ func (a *Agent) consumeAgentEnd(runCtx context.Context, kind RunKind, ev Event) 
 	a.mu.Lock()
 	if hookErr != nil {
 		a.lastError = ev.Err.Error()
-		finalState := a.stateLocked()
-		ev.State = &finalState
 	}
+	// AfterRun may update material; terminal observers receive the resulting state.
+	finalState := a.stateLocked()
+	ev.State = &finalState
 	listeners := make([]func(Event), len(a.listeners))
 	copy(listeners, a.listeners)
 	a.mu.Unlock()

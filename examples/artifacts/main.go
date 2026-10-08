@@ -44,30 +44,28 @@ func (m fileView) ToMessage() (agentgo.Message, bool) {
 	return message, ok
 }
 
-func registerInitial(artifacts agentgo.ArtifactManager) agentgo.BeforeRunHook {
-	return func(_ context.Context, run agentgo.BeforeRunContext) (agentgo.AgentSnapshot, error) {
-		for _, messages := range [][]agentgo.AgentMessage{run.Snapshot.State.Messages, run.Input} {
-			for _, message := range messages {
-				file, ok := message.Raw().(fileMessage)
-				if !ok {
-					continue
-				}
-				// This example treats history as a seed. It must not overwrite
-				// material that a tool has subsequently updated in the manager.
-				if _, exists := artifacts.GetArtifact(file.File.ID()); exists {
-					continue
-				}
-				if err := artifacts.AddArtifact(file.File, false); err != nil {
-					return agentgo.AgentSnapshot{}, err
-				}
+func registerInitial(_ context.Context, run agentgo.BeforeRunContext) (agentgo.AgentSnapshot, error) {
+	for _, messages := range [][]agentgo.AgentMessage{run.Snapshot.State.Messages, run.Input} {
+		for _, message := range messages {
+			file, ok := message.Raw().(fileMessage)
+			if !ok {
+				continue
+			}
+			// Historical content seeds missing material; tools may have updated it.
+			if _, exists := run.Artifacts.GetArtifact(file.File.ID()); exists {
+				continue
+			}
+			if err := run.Artifacts.AddArtifact(file.File, false); err != nil {
+				return agentgo.AgentSnapshot{}, err
 			}
 		}
-		return run.Snapshot, nil
 	}
+	return run.Snapshot, nil
 }
 
-func fileTransformer(artifacts agentgo.ArtifactManager) agentcontext.Transformer {
-	return agentcontext.TransformFunc(func(_ context.Context, messages []agentgo.AgentMessage) ([]agentgo.AgentMessage, error) {
+func fileTransformer() agentcontext.Transformer {
+	return agentcontext.TransformFunc(func(_ context.Context, input agentgo.TransformContext) ([]agentgo.AgentMessage, error) {
+		messages := input.Messages
 		// Coverage belongs to this request. Compaction may remove the earlier
 		// occurrence, so never use a permanent "already shown" flag on Artifact.
 		seen := make(map[string]bool)
@@ -77,7 +75,7 @@ func fileTransformer(artifacts agentgo.ArtifactManager) agentcontext.Transformer
 			if !ok {
 				continue
 			}
-			artifact, exists := artifacts.GetArtifact(source.File.ID())
+			artifact, exists := input.Artifacts.GetArtifact(source.File.ID())
 			if !exists {
 				continue
 			}
@@ -96,7 +94,7 @@ func fileTransformer(artifacts agentgo.ArtifactManager) agentcontext.Transformer
 	})
 }
 
-func artifactOptions(artifacts agentgo.ArtifactManager) []agentgo.AgentOption {
+func artifactOptions() []agentgo.AgentOption {
 	tool := agentgo.NewFuncTool("load_report", "Load the review report", map[string]any{
 		"type": "object", "properties": map[string]any{},
 	}, func(context.Context, json.RawMessage) (json.RawMessage, error) {
@@ -111,14 +109,14 @@ func artifactOptions(artifacts agentgo.ArtifactManager) []agentgo.AgentOption {
 		if err := json.Unmarshal(result.Content, &file); err != nil {
 			return result, err
 		}
-		if err := artifacts.AddArtifact(file, true); err != nil {
+		if err := execution.Artifacts.AddArtifact(file, true); err != nil {
 			return result, err
 		}
 		result.Details = file
 		return result, nil
 	}
 	return []agentgo.AgentOption{
-		agentgo.WithBeforeRun(registerInitial(artifacts)),
+		agentgo.WithBeforeRun(registerInitial),
 		agentgo.WithTools(tool),
 		agentgo.WithToolMiddlewares(registerResult),
 		agentgo.WithToolResultMessageFactory(func(call agentgo.ToolCall, result agentgo.ToolResult) agentgo.AgentMessage {
@@ -133,15 +131,14 @@ func artifactOptions(artifacts agentgo.ArtifactManager) []agentgo.AgentOption {
 		}),
 		agentgo.WithContextManager(agentcontext.NewEngine(agentcontext.EngineConfig{
 			ContextWindow: 32000,
-			Transformers:  []agentcontext.Transformer{fileTransformer(artifacts)},
+			Transformers:  []agentcontext.Transformer{fileTransformer()},
 		})),
 	}
 }
 
 func main() {
-	artifacts := agentgo.NewArtifactManager()
 	model := &demoModel{}
-	options := append(artifactOptions(artifacts), agentgo.WithModel(model))
+	options := append(artifactOptions(), agentgo.WithModel(model))
 	agent := agentgo.NewAgent(options...)
 	agent.Subscribe(func(event agentgo.Event) {
 		if event.Type == agentgo.EventError {
@@ -160,5 +157,5 @@ func main() {
 			fmt.Printf("  %s: %s\n", message.Role, message.TextContent())
 		}
 	}
-	fmt.Printf("Registered artifacts: %d\n", len(artifacts.ListArtifacts()))
+	fmt.Printf("Registered artifacts: %d\n", len(agent.State().Artifacts))
 }

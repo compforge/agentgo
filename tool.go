@@ -352,6 +352,7 @@ func toolInterruptBehavior(tool Tool, args json.RawMessage) InterruptBehavior {
 // must preserve Execution and the call's ID and Name. AgentLoop uses Call.ID as
 // Execution.ID so protocol and execution events share one tool-call identity.
 type ToolExecution struct {
+	Artifacts ArtifactManager // Runtime-owned material; do not retain beyond the callback.
 	Execution
 	Call ToolCall
 }

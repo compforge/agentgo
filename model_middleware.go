@@ -10,6 +10,7 @@ import (
 // recovery of the same turn. Request and Options may be adjusted by
 // middleware; the embedded Execution coordinate must be preserved.
 type ModelExecution struct {
+	Artifacts ArtifactManager // Runtime-owned material; do not retain beyond the callback.
 	Execution
 	Request LLMRequest
 	Options []CallOption
@@ -35,13 +36,15 @@ type ModelMiddleware func(context.Context, ModelExecution, ModelExecuteFunc) (Mo
 
 type modelExecutionRuntime struct {
 	middlewares []ModelMiddleware
+	artifacts   ArtifactManager
 	emit        func(Event)
 }
 
 type modelExecutionRuntimeKey struct{}
 
-func withModelExecutionRuntime(ctx context.Context, middlewares []ModelMiddleware, emit func(Event)) context.Context {
+func withModelExecutionRuntime(ctx context.Context, middlewares []ModelMiddleware, emit func(Event), artifacts ArtifactManager) context.Context {
 	runtime := modelExecutionRuntime{
+		artifacts:   artifacts,
 		middlewares: append([]ModelMiddleware(nil), middlewares...),
 		emit:        emit,
 	}
@@ -58,6 +61,9 @@ func withModelExecutionRuntime(ctx context.Context, middlewares []ModelMiddlewar
 // the runtime and event sink have the lifetime of the enclosing AgentLoop.
 func ExecuteModel(ctx context.Context, execution ModelExecution, next ModelExecuteFunc) (result ModelResult, err error) {
 	runtime, _ := ctx.Value(modelExecutionRuntimeKey{}).(modelExecutionRuntime)
+	if runtime.artifacts != nil {
+		execution.Artifacts = runtime.artifacts
+	}
 	if parent, ok := ExecutionFromContext(ctx); ok && execution.ParentID == "" && parent.ID != execution.ID {
 		execution.ParentID = parent.ID
 	}

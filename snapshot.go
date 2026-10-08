@@ -7,7 +7,8 @@ import (
 
 // Snapshot returns the stateful Agent's state and accepted input queues from
 // one critical section. Its portable message slices are safe for the caller to
-// encode or retain.
+// encode or retain. Artifact slices are copied; their application-owned payloads
+// are shared, so mutate them through replacement or application synchronization.
 func (a *Agent) Snapshot() AgentSnapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -34,6 +35,11 @@ func (a *Agent) SetSnapshot(snapshot AgentSnapshot) error {
 	if a.isRunning {
 		return fmt.Errorf("cannot set snapshot: %w", ErrAlreadyRunning)
 	}
+	values, err := artifactValues(snapshot.State.Artifacts)
+	if err != nil {
+		return fmt.Errorf("restore artifacts: %w", err)
+	}
+	a.artifacts.replace(values)
 	a.applySnapshotLocked(snapshot)
 	return nil
 }
@@ -48,10 +54,18 @@ func (a *Agent) prepareRun(ctx context.Context, kind RunKind, input []AgentMessa
 		a.mu.Unlock()
 		return nil
 	}
+	before := a.artifacts.beginAdmission()
+	accepted := false
+	defer func() {
+		if !accepted {
+			a.artifacts.replace(before)
+		}
+	}()
 	run := BeforeRunContext{
-		Kind:     kind,
-		Snapshot: a.snapshotLocked(),
-		Input:    copyMessages(input),
+		Artifacts: a.artifacts,
+		Kind:      kind,
+		Snapshot:  a.snapshotLocked(),
+		Input:     copyMessages(input),
 	}
 	a.mu.Unlock()
 
@@ -68,6 +82,12 @@ func (a *Agent) prepareRun(ctx context.Context, kind RunKind, input []AgentMessa
 	if a.isRunning {
 		return ErrAlreadyRunning
 	}
+	values, err := artifactValues(snapshot.State.Artifacts)
+	if err != nil {
+		return fmt.Errorf("restore artifacts: %w", err)
+	}
+	a.artifacts.finishAdmission(values)
+	accepted = true
 	a.applySnapshotLocked(snapshot)
 	return nil
 }

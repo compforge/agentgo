@@ -22,6 +22,7 @@ func executeToolCalls(ctx context.Context, turnIndex int, tools []Tool, calls []
 // execution pipeline. A middleware can return a known ToolResult without
 // invoking next, so replay never reaches gates or external side effects.
 func executeSingleToolCall(ctx context.Context, tools []Tool, execution ToolExecution, config LoopConfig, failCount int, sink eventSink) (result ToolResult) {
+	execution.Artifacts = config.artifacts
 	ctx = ContextWithExecution(ctx, execution.Execution)
 	disposition := ToolShortCircuited
 	var executionErr error

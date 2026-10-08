@@ -32,9 +32,10 @@
 // [Tool], [AgentMessage], [Artifact], and [Message]. AgentMessage is the application
 // transcript type; Message is the model protocol type produced only at the
 // call boundary. Artifact identifies application-owned material independently of
-// messages. [NewArtifactManager] provides in-memory CRUD; hosts share it with
-// run hooks, tools, middleware, and context transformers through dependency
-// injection. Applications own extraction, associations, rendering, and storage.
+// messages. AgentGo owns the [ArtifactManager] and supplies it through hook,
+// middleware, and [TransformContext] inputs. [AgentState.Artifacts] carries its
+// values through snapshots; applications register their concrete types with the
+// codec and own extraction, associations, rendering, and storage timing.
 // [AgentState] describes Loop-owned execution state, while
 // [AgentSnapshot] adds input accepted into a stateful Agent's steering and
 // follow-up queues. [WithBeforeRun] and [WithAfterRun] let an adapter restore

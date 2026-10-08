@@ -19,8 +19,9 @@ type SystemBlock struct {
 
 // AgentContext holds the immutable context for a single agent loop invocation.
 type AgentContext struct {
-	SystemPrompt string        // single-string system prompt (legacy)
-	SystemBlocks []SystemBlock // multi-block system prompt with cache control (takes precedence)
+	artifacts    *memoryArtifactManager // Bound by the runtime, never inherited from a caller.
+	SystemPrompt string                 // single-string system prompt (legacy)
+	SystemBlocks []SystemBlock          // multi-block system prompt with cache control (takes precedence)
 	Messages     []AgentMessage
 	Tools        []Tool
 }
@@ -50,6 +51,7 @@ type ToolSpec struct {
 
 // LoopConfig configures the agent loop.
 type LoopConfig struct {
+	artifacts     *memoryArtifactManager // Stateful Agent reuses its manager; bare loops create one.
 	Model         ChatModel
 	MaxTurns      int           // safety limit, default 100
 	MaxRetries    int           // LLM call retry limit for retryable errors, default 3

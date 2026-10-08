@@ -23,13 +23,25 @@ Agent Loop 会接收文件、工具结果等材料，并在运行中产生和更
 关联多条消息，一条消息也可以涉及多个材料，材料还可以独立于消息存在。
 
 `ArtifactManager` 提供 CRUD，保证一个 Manager 内 ID 唯一。ID 与 Kind 的含义、材料内容及消息关联
-归业务所有。覆盖操作整体替换该 ID 的值；宿主选择 Manager 的生命周期，并拥有持久化与恢复策略。
-内存实现支持并发访问，但不深拷贝业务对象，因此共享内容应通过替换或由应用同步更新。
+归业务所有。AgentGo 创建并持有 Manager，通过各扩展点的 `Artifacts` 字段提供能力。扩展实现使用
+本次调用提供的能力，不自行创建或缓存 Manager，因此同一个 Transformer 可以复用于不同 Agent。
+内存实现支持并发访问；业务对象不深拷贝，共享内容应通过替换或由应用同步更新。
+
+同一 Agent 的连续 Run 共用材料；turn 推进、重试、消息替换和 compaction 不会隐式删除材料。
+`AgentState.Artifacts` 保存材料值，随 Snapshot 编码和恢复，具体类型由应用注册到 codec；整个
+Snapshot 替换同时替换消息与材料。宿主决定存储位置及持久化时机。
+裸 AgentLoop 根据 InitialState 建立独立 Manager，并通过状态事件交付材料值；新建 Agent 和子 Loop
+默认隔离，即使调用方复用标准 context.Context，也不会继承父级材料管理器。
 
 初始化输入仍是 AgentMessage 列表。业务在 stateful Agent 的 `BeforeRun` 中读取已有 Snapshot 与新增
-Input，登记初始材料；该 Hook 在启动 Loop 前执行一次，不随模型重试或 turn 推进重复执行。若同一
-Hook 还要恢复 Snapshot，应先完成恢复，再从将要生效的消息基线中提取材料。裸 AgentLoop 的调用方
-在调用前完成相应准备。运行中的 Tool、Middleware 等通过注入的同一个 Manager 继续维护材料。
+Input，登记初始材料；该 Hook 在启动 Loop 前执行一次，不随模型重试或 turn 推进重复执行。Hook 中
+的 Manager 反映当前工作集合；返回的 Snapshot 是恢复基线，本次 Hook 显式新增、覆盖和删除的 ID
+优先于恢复值，避免安装快照时丢失刚登记的材料。拒绝 Run 时回滚集合操作，不回滚业务对象的原地修改。
+裸 AgentLoop 调用方可通过 InitialState 提供材料值，或在 BeforeTurn 等扩展点登记初始消息中的材料。
+
+Run / Turn Hook、Model / Tool Middleware 通过具名的 `Artifacts` 字段访问所属运行时的能力。
+ContextManager 的转换、压缩和恢复入口统一接收 `TransformContext`，将材料能力传至各 Transformer；
+标准 context.Context 保留取消、超时与内部调用链传播职责，业务无需通过隐式 key 查找 Manager。
 
 业务 Transformer 结合输入消息和 ArtifactManager 构造请求视图。登记信息使业务能够实现内容去重、
 引用、摘要等策略；AgentGo 不替业务决定哪些材料应该进入 prompt。供本次转换使用的材料必须在

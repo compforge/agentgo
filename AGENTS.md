@@ -30,8 +30,9 @@ agentgo/
 
 1. **Message-native 边界不可反转**：Loop、Context、Event 和持久化使用 `AgentMessage`；
    `ToMessage` 是唯一模型协议转换边界，compaction 必须保留 `Raw`。
-2. **Kernel 记录事实，不解释业务**：Artifact 与 AgentMessage 并列，材料管理通过 ArtifactManager 提供；
-   业务通过 Run Hook、Tool、Middleware 和 Transformer 决定提取、消息关联与呈现策略。
+2. **Kernel 记录事实，不解释业务**：Artifact 与 AgentMessage 并列，ArtifactManager 由运行时创建并通过扩展点参数提供；
+   业务通过 Run / Turn Hook、Middleware 和 Transformer 决定提取、消息关联与呈现策略；
+   材料值进入 AgentState / Snapshot，消息压缩不隐式清空材料。
    ContextItem / ContextDemand 共享身份协议，但 kind、representation、
    signal、提取器和评分含义归应用；权限、终止和 Context 策略均通过扩展点注入。
 3. **Event stream 是统一观测面**：模型、工具、Context 投影/压缩及结束状态都从 Event 输出；新增运行

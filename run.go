@@ -14,18 +14,20 @@ const (
 // BeforeRunContext describes a stateful Agent before it accepts a run. Input
 // contains the new prompt or injected messages that have not entered Snapshot.
 type BeforeRunContext struct {
-	Kind     RunKind
-	Snapshot AgentSnapshot
-	Input    []AgentMessage
+	Artifacts ArtifactManager // Runtime-owned material; do not retain beyond the callback.
+	Kind      RunKind
+	Snapshot  AgentSnapshot
+	Input     []AgentMessage
 }
 
 // AfterRunContext describes a stateful Agent after its Loop state has been
 // projected and before terminal listeners may start another run.
 type AfterRunContext struct {
-	Kind     RunKind
-	Snapshot AgentSnapshot
-	Summary  RunSummary
-	Err      error
+	Artifacts ArtifactManager // Runtime-owned material; do not retain beyond the callback.
+	Kind      RunKind
+	Snapshot  AgentSnapshot
+	Summary   RunSummary
+	Err       error
 }
 
 // BeforeRunHook runs synchronously before a stateful Agent accepts a run. The
@@ -33,6 +35,11 @@ type AfterRunContext struct {
 // run, so Prompt or Continue returns that error directly. Agent lifecycle and
 // queue mutations are serialized while the hook runs; use the supplied
 // snapshot instead of re-entering those mutating methods on the same Agent.
+// The returned snapshot is the restore baseline; successful AddArtifact calls
+// and DeleteArtifact calls made through Artifacts take precedence over that
+// baseline. Rejected admission rolls back membership changes, not mutations of
+// application-owned payloads. Manager reads during the hook reflect the current
+// working collection, not a snapshot that the hook has yet to return.
 type BeforeRunHook func(context.Context, BeforeRunContext) (AgentSnapshot, error)
 
 // AfterRunHook runs once for every accepted stateful Agent run, including
