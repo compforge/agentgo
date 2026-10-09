@@ -42,7 +42,8 @@ func NewToolResultCompactor(cfg ToolResultMicrocompactConfig) *ToolResultCompact
 	return &ToolResultCompactor{cfg: cfg}
 }
 
-func (s *ToolResultCompactor) Compact(_ context.Context, messages []agentgo.AgentMessage, expect float64) ([]agentgo.AgentMessage, error) {
+func (s *ToolResultCompactor) Compact(_ context.Context, input agentgo.TransformContext, expect float64) ([]agentgo.AgentMessage, error) {
+	messages := input.Messages
 	if len(messages) == 0 || expect >= 1 {
 		return messages, nil
 	}

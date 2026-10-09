@@ -397,8 +397,14 @@ func TestArtifactCompactionRuntime(t *testing.T) {
 					return run.Artifacts.AddArtifact(runtimeArtifact{"material", "kept"}, false)
 				}),
 				agentgo.WithModelMiddlewares(func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
-					if execution.Artifacts != manager {
-						t.Error("summary/model middleware lost material capability")
+					if _, ok := execution.Artifacts.GetArtifact("material"); !ok {
+						t.Error("summary/model middleware lost material")
+					}
+					if execution.ParentID != "" && execution.Artifacts == manager {
+						t.Error("summary must use staged material")
+					}
+					if execution.ParentID == "" && execution.Artifacts != manager {
+						t.Error("conversation lost runtime manager")
 					}
 					if execution.ParentID != "" {
 						summaryCalls++
@@ -417,7 +423,7 @@ func TestArtifactCompactionRuntime(t *testing.T) {
 			if agent.State().Error != "" {
 				t.Fatal(agent.State().Error)
 			}
-			if summaryCalls == 0 || transforms < 2 {
+			if summaryCalls != 1 || transforms != modelCalls {
 				t.Fatalf("summary=%d transforms=%d", summaryCalls, transforms)
 			}
 			if got := artifactMap(agent.State().Artifacts); got["material"] != "kept" {

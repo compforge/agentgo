@@ -38,7 +38,7 @@ func TestTransformRunsBelowThresholdAndRetainsRaw(t *testing.T) {
 	}
 }
 
-func TestThresholdUsesTransformedBudgetButCommitsOnlyCompaction(t *testing.T) {
+func TestThresholdUsesBaselineIndependentlyOfTransform(t *testing.T) {
 	compactor := &recordingCompactor{result: []agentgo.AgentMessage{agentgo.UserMsg("compact baseline")}}
 	transform := TransformFunc(func(_ context.Context, input agentgo.TransformContext) ([]agentgo.AgentMessage, error) {
 		messages := input.Messages
@@ -48,8 +48,8 @@ func TestThresholdUsesTransformedBudgetButCommitsOnlyCompaction(t *testing.T) {
 	engine := NewEngine(EngineConfig{ContextWindow: 1000, ReserveTokens: 100, Compactor: compactor, Transformers: []Transformer{transform}})
 	input := []agentgo.AgentMessage{agentgo.UserMsg(strings.Repeat("raw ", 2000))}
 	result, err := engine.Compact(t.Context(), agentgo.TransformContext{Messages: input}, agentgo.CompactReasonThreshold)
-	if err != nil || result.Changed || len(compactor.expects) != 0 {
-		t.Fatalf("unnecessary compaction: %+v %v", result, err)
+	if err != nil || !result.Changed || len(compactor.expects) != 1 {
+		t.Fatalf("baseline compaction: %+v %v", result, err)
 	}
 	engine.SetContextWindow(1)
 	engine.SetReserveTokens(1)
@@ -60,5 +60,26 @@ func TestThresholdUsesTransformedBudgetButCommitsOnlyCompaction(t *testing.T) {
 	view, err := engine.Transform(t.Context(), agentgo.TransformContext{Messages: result.Messages})
 	if err != nil || view[0].TextContent() != "request view" || view[0].Raw().TextContent() != "compact baseline" {
 		t.Fatal("post-compaction view not rebuilt")
+	}
+}
+
+func TestTransformExpansionDoesNotTriggerCompaction(t *testing.T) {
+	calls := 0
+	compactor := &recordingCompactor{}
+	engine := NewEngine(EngineConfig{ContextWindow: 1000, ReserveTokens: 100, Compactor: compactor,
+		Transformers: []Transformer{TransformFunc(func(_ context.Context, input agentgo.TransformContext) ([]agentgo.AgentMessage, error) {
+			calls++
+			return []agentgo.AgentMessage{newProjectedMessage(input.Messages[0], agentgo.UserMsg(strings.Repeat("expanded ", 1000)))}, nil
+		})},
+	})
+	input := []agentgo.AgentMessage{agentgo.UserMsg("reference")}
+	engine.Sync(input)
+	result, err := engine.Compact(t.Context(), agentgo.TransformContext{Messages: input}, agentgo.CompactReasonThreshold)
+	if err != nil || result.Changed || calls != 0 || len(compactor.expects) != 0 {
+		t.Fatalf("compact coupled to transformer: %+v %v calls=%d", result, err, calls)
+	}
+	view, err := engine.Transform(t.Context(), agentgo.TransformContext{Messages: input})
+	if err != nil || calls != 1 || EstimateTotal(view) <= 1000 || engine.Snapshot().BaselineUsage.Tokens != EstimateTotal(input) {
+		t.Fatalf("expansion changed baseline: %v %+v", err, engine.Snapshot())
 	}
 }

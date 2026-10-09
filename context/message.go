@@ -9,17 +9,17 @@ import (
 // ContextSummary is a compacted context summary message. It remains a domain
 // message in context and lowers itself only when a model request is built.
 type ContextSummary struct {
-	Summary       string
-	TokensBefore  int
-	ReadFiles     []string
-	ModifiedFiles []string
+	Summary       string   `codec:"summary"`
+	TokensBefore  int      `codec:"tokens_before"`
+	ReadFiles     []string `codec:"read_files"`
+	ModifiedFiles []string `codec:"modified_files"`
 	// RawMessages keeps the source transcript available to the application
 	// while ToMessage exposes only Summary to the model.
-	RawMessages []agentgo.AgentMessage
-	Compacted   int
-	Kept        int
-	SplitTurn   bool
-	Timestamp   time.Time
+	RawMessages []agentgo.AgentMessage `codec:"raw_messages"`
+	Compacted   int                    `codec:"compacted"`
+	Kept        int                    `codec:"kept"`
+	SplitTurn   bool                   `codec:"split_turn"`
+	Timestamp   time.Time              `codec:"timestamp"`
 }
 
 func (c ContextSummary) GetRole() agentgo.Role   { return agentgo.RoleUser }

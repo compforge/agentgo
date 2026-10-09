@@ -69,7 +69,8 @@ func main() {
 
 ```text
 AgentMessage
-    ─ContextManager / Compactor─▶ projected AgentMessage
+    ─Compact + accept─▶ baseline AgentMessage
+    ─Transformer─▶ request AgentMessage
     ─ToMessage─▶ model Message
     ─Model / Tool─▶ Event stream
     ─commit─▶ AgentMessage history
@@ -86,6 +87,8 @@ go run ./examples/artifacts
 `ContextItemProvider` lets an application message expose identifiable information without changing its model rendering. Before each model call, `EventContextProjected` reports the inventory from the actual projected context. `ContextItem` and `ContextDemand` share `ContextKey`; applications and evaluators own all label meanings and demand-extraction rules.
 
 `AgentState` is the Loop-owned execution state. A stateful `Agent` exposes `AgentSnapshot`, which adds steering and follow-up input already accepted by the Agent but not yet handed to the Loop. Both are codec-aware without being tied to storage or transport. `agentgo.NewCodec` registers AgentGo's built-in state types; applications register their own concrete `AgentMessage` and `Artifact` types with one stable type ID. Fields opt in through `codec` tags, while custom handlers cover special wire representations. Hosts can use the same encoded snapshot for persistence, process handoff, or future RPC protocols.
+
+When using `agentgo/context` compaction, add `context.CodecOptions()` to the codec configuration to preserve compacted views, Raw, and invalidated usage. Both Compactor and Transformer receive messages and artifacts: compaction maintains the baseline; transformation builds each request view independently of budget.
 
 ```go
 stateCodec, _ := agentgo.NewCodec(
@@ -120,6 +123,8 @@ _ = restored.Continue(ctx)
 ```
 
 `WithSnapshotLoader` recovers the baseline before `BeforeRun` initializes its materials. `BeforeRun` returns only an error and receives an isolated material collection populated from the recovered snapshot. Successful preparation publishes messages, queues and materials together; loading or initialization failure leaves the accepted state unchanged, so a later `Continue` can retry. `AfterRun` observes the completed run outside the Loop and before terminal listeners. Recovery adapters can pair a snapshot loader with `AfterRun` persistence.
+
+Hook State / Snapshot values describe callback entry. `AfterTurn` artifact writes enter the following turn checkpoint; `AfterRun` writes enter the terminal event. If finalization updates artifacts, persist `agent.Snapshot()` from a terminal listener to include those updates.
 
 `Execution` gives expensive or externally visible work one run-scoped identity. A retry keeps the same `ID` and increments `Attempt`; `ModelExecution` and `ToolExecution` carry that coordinate through middleware and the Event stream. Internal summary calls are child executions of compaction, so hosts can correlate or replay known outcomes without AgentGo depending on a ledger or tracing model.
 

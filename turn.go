@@ -1,6 +1,9 @@
 package agentgo
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // BeforeTurnContext describes the runtime immediately before one model call.
 // TurnIndex is one-based. Context is a snapshot; mutating it does not change
@@ -13,7 +16,8 @@ type BeforeTurnContext struct {
 
 // AfterTurnContext describes one committed model/tool turn, including a model
 // response that ends the run with an error or abort reason. Context includes
-// the assistant message and all tool results from that turn.
+// the assistant message and all tool results from that turn. State is the hook
+// entry snapshot; artifact writes appear in the subsequent EventTurnEnd.State.
 type AfterTurnContext struct {
 	Artifacts   ArtifactManager // Runtime-owned material; do not retain beyond the callback.
 	TurnIndex   int
@@ -32,7 +36,8 @@ type BeforeTurnHook func(context.Context, BeforeTurnContext) ([]AgentMessage, er
 // whether and how to advance. State therefore reflects a complete turn
 // boundary. It is not a finally hook: preparation/provider/commit failures do
 // not call it. Their incomplete turn_end event carries Err without a State.
-// Returning an error stops the run after the committed turn_end event.
+// Writes are included in EventTurnEnd.State before publication. Returning an
+// error or panicking stops the run after publishing that completed checkpoint.
 type AfterTurnHook func(context.Context, AfterTurnContext) error
 
 func snapshotAgentContext(current *AgentContext) AgentContext {
@@ -42,4 +47,13 @@ func snapshotAgentContext(current *AgentContext) AgentContext {
 		Messages:     copyMessages(current.Messages),
 		Tools:        append([]Tool(nil), current.Tools...),
 	}
+}
+
+func callAfterTurn(ctx context.Context, hook AfterTurnHook, turn AfterTurnContext) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("panic: %v", recovered)
+		}
+	}()
+	return hook(ctx, turn)
 }

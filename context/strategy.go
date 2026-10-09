@@ -8,10 +8,16 @@ import (
 
 // Compactor is the only extension point for context reduction. AgentGo ships
 // a default policy; applications may replace it directly. expect is the
-// desired output ratio relative to the current model view: 1 means no change
-// and 0 asks for the strongest reduction the compactor can provide.
+// desired output ratio relative to input.Messages: 1 means no reduction
+// and 0 asks for the strongest reduction the compactor can provide. Policies
+// may summarize, archive to host-owned files, and replace or register artifacts.
+// AgentLoop supplies a staged ArtifactManager shared by every chain stage;
+// messages and CRUD changes publish together only after successful acceptance.
+// Values remain shared: replace them instead of mutating payloads in place.
+// External files are host-owned side effects and are not rolled back by AgentGo.
+// Direct callers own staging and acceptance outside the Loop.
 type Compactor interface {
-	Compact(ctx context.Context, messages []agentgo.AgentMessage, expect float64) ([]agentgo.AgentMessage, error)
+	Compact(ctx context.Context, input agentgo.TransformContext, expect float64) ([]agentgo.AgentMessage, error)
 }
 
 type compactorChain struct {
@@ -29,7 +35,8 @@ func Chain(compactors ...Compactor) Compactor {
 	return &compactorChain{compactors: append([]Compactor(nil), compactors...)}
 }
 
-func (c *compactorChain) Compact(ctx context.Context, messages []agentgo.AgentMessage, expect float64) ([]agentgo.AgentMessage, error) {
+func (c *compactorChain) Compact(ctx context.Context, input agentgo.TransformContext, expect float64) ([]agentgo.AgentMessage, error) {
+	messages := input.Messages
 	view := copyMessages(messages)
 	target := int(float64(EstimateTotal(view)) * clampRatio(expect))
 	for _, compactor := range c.compactors {
@@ -41,7 +48,7 @@ func (c *compactorChain) Compact(ctx context.Context, messages []agentgo.AgentMe
 		if current > 0 {
 			stageExpect = float64(target) / float64(current)
 		}
-		next, err := compactor.Compact(ctx, view, clampRatio(stageExpect))
+		next, err := compactor.Compact(ctx, agentgo.TransformContext{Messages: view, Artifacts: input.Artifacts}, clampRatio(stageExpect))
 		if err != nil {
 			return nil, err
 		}

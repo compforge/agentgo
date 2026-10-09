@@ -69,7 +69,8 @@ func main() {
 
 ```text
 AgentMessage
-    ─ContextManager / Compactor─▶ projected AgentMessage
+    ─Compact + accept─▶ baseline AgentMessage
+    ─Transformer─▶ request AgentMessage
     ─ToMessage─▶ model Message
     ─Model / Tool─▶ Event stream
     ─commit─▶ AgentMessage history
@@ -86,6 +87,8 @@ go run ./examples/artifacts
 应用消息可通过 `ContextItemProvider` 暴露有稳定身份的信息，而不改变模型渲染。每次模型调用前，`EventContextProjected` 会报告实际投影后的 Context 清单。`ContextItem` 与 `ContextDemand` 共享 `ContextKey`；标签含义及 Demand 提取规则由应用和 Evaluator 负责。
 
 `AgentState` 是 Loop 自己拥有的执行状态。对于 stateful `Agent`，`AgentSnapshot` 还会聚合已经被 Agent 接受、但尚未交给 Loop 的 steering 和 follow-up 输入。两者都感知 codec，但不绑定存储或传输方式。`agentgo.NewCodec` 会注册 AgentGo 内置状态类型；应用只需用一个稳定 TypeID 注册自己的具体 `AgentMessage` 和 `Artifact` 类型。字段通过 `codec` tag 主动参与编码，特殊 wire 表示则使用自定义 Handler。同一份编码快照可用于持久化、进程交接或未来的 RPC 协议。
+
+使用 `agentgo/context` 的压缩策略时，将 `context.CodecOptions()` 加入 codec 配置，以保留压缩表示、Raw 和 usage 失效状态。Compact 和 Transformer 均可访问 messages 与 artifacts：前者维护长期基线，后者在每次模型请求前构造视图，与预算无关。
 
 ```go
 stateCodec, _ := agentgo.NewCodec(
@@ -120,6 +123,8 @@ _ = restored.Continue(ctx)
 ```
 
 `WithSnapshotLoader` 先恢复基线，再由 `BeforeRun` 初始化材料。`BeforeRun` 只返回错误，其材料集合独立于正式状态，并已包含恢复的数据。准备成功后，消息、队列与材料一起提交；加载或初始化失败则保留原有状态，后续 `Continue` 可以重试。`AfterRun` 在 Loop 之外观察完成的 Run，且先于终态 listener。恢复 adapter 可组合 SnapshotLoader 与 `AfterRun` 持久化。
+
+Hook 参数中的 State / Snapshot 是回调入口快照。`AfterTurn` 写入的材料进入随后的 turn checkpoint；`AfterRun` 写入的材料进入终态事件。若收尾 Hook 会修改材料，需在终态 listener 中读取 `agent.Snapshot()` 保存最终状态。
 
 `Execution` 为昂贵或对外可见的动作提供一次 Run 内稳定的身份。同一逻辑调用重试时保持 `ID` 不变并递增 `Attempt`；`ModelExecution` 与 `ToolExecution` 把该坐标贯穿 Middleware 和 Event stream。内部 summary 是 compaction 的子 Execution，宿主因此可以关联动作或复用已知结果，而 AgentGo 无需绑定 Ledger 或 Trace 的数据模型。
 

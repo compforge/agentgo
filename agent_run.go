@@ -24,11 +24,15 @@ func (a *Agent) buildConfig(continuing bool) LoopConfig {
 		InitialState:             initialState,
 		ContextManager:           a.contextManager,
 		ToolResultMessageFactory: a.toolResultFactory,
-		CommitContext: func(msgs []AgentMessage, usage *ContextUsage) error {
+		CommitContext: func(result ContextCommitResult) error {
+			values, err := artifactValues(result.Artifacts)
+			if err != nil {
+				return err
+			}
 			a.mu.Lock()
 			defer a.mu.Unlock()
-			a.messages = copyMessages(msgs)
-			a.syncContextManagerLocked()
+			a.messages = copyMessages(result.Messages)
+			a.artifacts.replace(values)
 			return nil
 		},
 		CommitMessage: a.messageCommitter,
@@ -125,7 +129,6 @@ func (a *Agent) consumeLoop(runCtx context.Context, kind RunKind, events <-chan 
 			a.streamMessage = nil
 			if ev.Message != nil {
 				a.messages = append(a.messages, ev.Message)
-				a.syncContextManagerLocked()
 				// Accumulate usage from assistant messages
 				if msg, ok := ev.Message.(Message); ok && msg.Usage != nil {
 					a.totalUsage.Add(msg.Usage)
@@ -260,7 +263,6 @@ func (a *Agent) applyLoopStateLocked(state AgentState) {
 	a.messages = copyMessages(state.Messages)
 	a.totalUsage = state.TotalUsage
 	a.runProgress = cloneRunProgress(state.Progress)
-	a.syncContextManagerLocked()
 }
 
 func (a *Agent) syncContextManagerLocked() {

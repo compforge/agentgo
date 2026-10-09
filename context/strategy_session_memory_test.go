@@ -42,7 +42,7 @@ func TestSessionMemoryCompactorNoopWhenNoSeed(t *testing.T) {
 		KeepRecentTokens: 1000,
 	})
 	msgs := sessionMemoryConvo()
-	out, err := s.Compact(context.Background(), msgs, 0.25)
+	out, err := s.Compact(context.Background(), agentgo.TransformContext{Messages: msgs}, 0.25)
 	if err != nil {
 		t.Fatalf("apply err: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestSessionMemoryCompactorNoopAtFullRatio(t *testing.T) {
 		KeepRecentTokens: 1000,
 	})
 	msgs := sessionMemoryConvo()
-	_, err := s.Compact(context.Background(), msgs, 1)
+	_, err := s.Compact(context.Background(), agentgo.TransformContext{Messages: msgs}, 1)
 	if err != nil {
 		t.Fatalf("apply err: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestSessionMemoryCompactorAppliesSeedWithoutLLM(t *testing.T) {
 		KeepRecentTokens: 200,
 	})
 	msgs := sessionMemoryConvo()
-	out, err := s.Compact(context.Background(), msgs, 0.25)
+	out, err := s.Compact(context.Background(), agentgo.TransformContext{Messages: msgs}, 0.25)
 	if err != nil {
 		t.Fatalf("apply err: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestSessionMemoryCompactorTruncatesOversizedSeed(t *testing.T) {
 		MaxSeedRunes:     1000,
 	})
 	msgs := sessionMemoryConvo()
-	out, err := s.Compact(context.Background(), msgs, 0.25)
+	out, err := s.Compact(context.Background(), agentgo.TransformContext{Messages: msgs}, 0.25)
 	if err != nil {
 		t.Fatalf("apply err: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestSessionMemoryCompactorSeedErrorFallsThrough(t *testing.T) {
 		KeepRecentTokens: 200,
 	})
 	msgs := sessionMemoryConvo()
-	out, err := s.Compact(context.Background(), msgs, 0.25)
+	out, err := s.Compact(context.Background(), agentgo.TransformContext{Messages: msgs}, 0.25)
 	if err != nil {
 		t.Fatalf("errors from SeedFn must not bubble up: %v", err)
 	}

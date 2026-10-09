@@ -57,7 +57,7 @@ func TestMessageCompactionUsesMessageOwnedStages(t *testing.T) {
 	original := stagedMessage{contents: []string{full, outline, reference}}
 	compactor := NewMessageCompactor()
 
-	view, err := compactor.Compact(t.Context(), []agentgo.AgentMessage{original}, 0.05)
+	view, err := compactor.Compact(t.Context(), agentgo.TransformContext{Messages: []agentgo.AgentMessage{original}}, 0.05)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestMessageCompactionIgnoresNonShrinkingStep(t *testing.T) {
 	message := stagedMessage{contents: []string{"short", "a longer replacement"}}
 	compactor := NewMessageCompactor()
 
-	view, err := compactor.Compact(t.Context(), []agentgo.AgentMessage{message}, 0)
+	view, err := compactor.Compact(t.Context(), agentgo.TransformContext{Messages: []agentgo.AgentMessage{message}}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestMessageCompactorUsesNewestFirstWithinPriority(t *testing.T) {
 	}
 	compactor := NewMessageCompactor()
 
-	view, err := compactor.Compact(t.Context(), messages, 0.75)
+	view, err := compactor.Compact(t.Context(), agentgo.TransformContext{Messages: messages}, 0.75)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestMessageCompactorExhaustsLowerPriorityFirst(t *testing.T) {
 	}
 	compactor := NewMessageCompactor()
 
-	view, err := compactor.Compact(t.Context(), messages, 0.6)
+	view, err := compactor.Compact(t.Context(), agentgo.TransformContext{Messages: messages}, 0.6)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestMessageCompactorPriorityOverridesRecency(t *testing.T) {
 	}
 	compactor := NewMessageCompactor()
 
-	view, err := compactor.Compact(t.Context(), messages, 0.75)
+	view, err := compactor.Compact(t.Context(), agentgo.TransformContext{Messages: messages}, 0.75)
 	if err != nil {
 		t.Fatal(err)
 	}

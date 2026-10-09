@@ -298,7 +298,8 @@ func TestCallLLM_CommitsProjectedContextWhenRequested(t *testing.T) {
 			}
 			return &LLMResponse{Message: assistantMsg("ok", StopReasonStop)}, nil
 		}),
-		CommitContext: func(msgs []AgentMessage, usage *ContextUsage) error {
+		CommitContext: func(result ContextCommitResult) error {
+			msgs := result.Messages
 			committed = copyMessages(msgs)
 			return nil
 		},
@@ -317,7 +318,7 @@ func TestCallLLM_CommitsProjectedContextWhenRequested(t *testing.T) {
 	}
 	close(events)
 	gotEvents := collectEvents(events)
-	wantPrefix := []EventType{EventContextPrepareStart, EventContextPrepareEnd, EventContextCompacted, EventContextProjected}
+	wantPrefix := []EventType{EventContextPrepareStart, EventContextPrepareEnd, EventContextCompacted, EventContextPrepareStart, EventContextPrepareEnd, EventContextProjected}
 	for i, want := range wantPrefix {
 		if len(gotEvents) <= i || gotEvents[i].Type != want {
 			t.Fatalf("event %d = %+v, want preparation then compaction before model events", i, gotEvents)
@@ -348,7 +349,8 @@ func TestCallLLMWithRetry_EmitsOverflowCompaction(t *testing.T) {
 	manager := projectionCommitManager{
 		projection: ContextCommitResult{Messages: []AgentMessage{UserMsg("compact")}},
 		recovery: ContextRecoveryResult{
-			View: []AgentMessage{UserMsg("compact")},
+			View:           []AgentMessage{UserMsg("compact")},
+			CommitMessages: []AgentMessage{UserMsg("compact")}, ShouldCommit: true,
 			Compaction: &CompactionInfo{
 				Reason: CompactReasonOverflow, Committed: true,
 				TokensBefore: 200, TokensAfter: 20,

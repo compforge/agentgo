@@ -29,19 +29,19 @@ func TestSteeringDuringCompactionReachesNextCall(t *testing.T) {
 	for _, mode := range []string{"committed", "transient", "overflow", "commit_failure"} {
 		t.Run(mode, func(t *testing.T) {
 			var queued []AgentMessage
-			projected := false
-			var compacted ContextCommitResult
 			manager := steeringContext{
-				compact: func() ContextCommitResult { return compacted },
-				project: func(msgs []AgentMessage) ContextCommitResult {
-					if mode == "overflow" || projected {
-						return ContextCommitResult{Messages: msgs}
+				compact: func() ContextCommitResult {
+					if mode == "overflow" {
+						return ContextCommitResult{}
 					}
-					projected = true
 					queued = []AgentMessage{UserMsg("focus on tests")}
-					view := []AgentMessage{UserMsg("summary")}
-					compacted = ContextCommitResult{Messages: view, Changed: mode != "transient"}
-					return ContextCommitResult{Messages: view}
+					return ContextCommitResult{Messages: []AgentMessage{UserMsg("summary")}, Changed: mode != "transient"}
+				},
+				project: func(msgs []AgentMessage) ContextCommitResult {
+					if mode == "transient" {
+						return ContextCommitResult{Messages: append([]AgentMessage{UserMsg("summary")}, msgs[1:]...)}
+					}
+					return ContextCommitResult{Messages: msgs}
 				},
 				recover: func([]AgentMessage) ContextRecoveryResult {
 					queued = []AgentMessage{UserMsg("focus on tests")}
@@ -142,5 +142,45 @@ func TestToolCallDeltaRetainsIdentityInLoopEvents(t *testing.T) {
 	}
 	if len(ids) != 4 || ids[0] != "a" || ids[1] != "b" || ids[2] != "a" || ids[3] != "b" {
 		t.Fatalf("delta identities=%v", ids)
+	}
+}
+
+func TestOverflowRetryViewRemainsSeparateFromBaseline(t *testing.T) {
+	for _, commit := range []bool{false, true} {
+		var queued []AgentMessage
+		compacts, transforms, models := 0, 0, 0
+		manager := steeringContext{
+			compact: func() ContextCommitResult { compacts++; return ContextCommitResult{} },
+			project: func(messages []AgentMessage) ContextCommitResult {
+				transforms++
+				return ContextCommitResult{Messages: messages}
+			},
+			recover: func([]AgentMessage) ContextRecoveryResult {
+				queued = []AgentMessage{UserMsg("late")}
+				return ContextRecoveryResult{View: []AgentMessage{UserMsg("retry view")}, CommitMessages: []AgentMessage{UserMsg("accepted baseline")}, ShouldCommit: commit}
+			},
+		}
+		events := runTestLoop(t, []AgentMessage{UserMsg("original baseline")}, AgentContext{}, LoopConfig{
+			ContextManager:      manager,
+			GetSteeringMessages: func() []AgentMessage { pending := queued; queued = nil; return pending },
+			Model: sequentialModel(func(_ int, req *LLMRequest) (*LLMResponse, error) {
+				models++
+				if models == 1 {
+					return nil, ErrContextOverflow
+				}
+				if len(req.Messages) != 2 || req.Messages[0].TextContent() != "retry view" || req.Messages[1].TextContent() != "late" {
+					t.Errorf("retry request=%+v", req.Messages)
+				}
+				return &LLMResponse{Message: assistantMsg("done", StopReasonStop)}, nil
+			}),
+		})
+		end, _ := findEvent(events, EventAgentEnd)
+		want := "original baseline"
+		if commit {
+			want = "accepted baseline"
+		}
+		if compacts != 1 || transforms != 2 || models != 2 || end.State == nil || len(end.State.Messages) != 3 || end.State.Messages[0].TextContent() != want || end.State.Messages[1].TextContent() != "late" {
+			t.Fatalf("commit=%v compacts=%d transforms=%d models=%d state=%+v", commit, compacts, transforms, models, end.State)
+		}
 	}
 }

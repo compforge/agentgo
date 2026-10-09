@@ -19,7 +19,7 @@ AgentGo 原生支持**轨迹驱动的 Loop 优化**：Event stream 记录实际�
 ## AgentMessage 与 Artifact
 
 Agent Loop 会接收文件、工具结果等材料，并在运行中产生和更新材料。消息记录对话中的发生顺序，
-`Artifact` 表达这些材料的独立身份；二者是并列概念。应用可以扩展具体 Artifact 类型，一个材料可以
+`Artifact` 表达具有独立身份的应用数据，既可保存中间或最终产物，也可维护其他业务数据；它与消息是并列概念。应用可以扩展具体 Artifact 类型，一个材料可以
 关联多条消息，一条消息也可以涉及多个材料，材料还可以独立于消息存在。
 
 `ArtifactManager` 提供 CRUD，保证一个 Manager 内 ID 唯一。ID 与 Kind 的含义、材料内容及消息关联
@@ -42,7 +42,7 @@ Snapshot 替换同时替换消息与材料。宿主决定存储位置及持久�
 裸 AgentLoop 调用方可通过 InitialState 提供材料值，或在 BeforeTurn 等扩展点登记初始消息中的材料。
 
 Run / Turn Hook、Model / Tool Middleware 通过具名的 `Artifacts` 字段访问所属运行时的能力。
-ContextManager 的转换、压缩和恢复入口统一接收 `TransformContext`，将材料能力传至各 Transformer；
+ContextManager 的转换、压缩和恢复入口统一接收 `TransformContext`，将材料能力传至 Transformer 和 Compactor；
 标准 context.Context 保留取消、超时与内部调用链传播职责，业务无需通过隐式 key 查找 Manager。
 
 业务 Transformer 结合输入消息和 ArtifactManager 构造请求视图。登记信息使业务能够实现内容去重、
@@ -51,7 +51,7 @@ Transformer 执行前登记，位于转换之后的 ModelMiddleware 更新只能
 
 材料库存与模型可见内容是不同事实：删除材料不会删除历史消息，更新材料也不会改写过去的模型请求。
 去重等覆盖状态应根据每次请求的实际消息重新计算，避免 compaction 删除早先的内容后只剩悬空引用。
-Transformer 对相同的消息与材料状态应产生确定且幂等的结果，并保留 Raw 和工具调用配对。
+Transformer 基于完整消息与材料状态构造确定的请求视图，并保留 Raw 和工具调用配对。
 `ContextItem` 则继续描述实际投影出的信息，由业务决定是否将 Artifact 映射为该观测协议。
 
 ## 可编码状态与执行边界
@@ -68,9 +68,15 @@ stateful `Agent` 在 Loop 之外还持有 steering / follow-up queue：输入一
 的时点聚合，而不是新的运行时 owner，也不改变 `AgentState` 的 Loop 边界。
 
 `codec` 包提供通用的 tagged value、稳定类型身份与 JSON 编解码；`AgentState`、`AgentSnapshot` 通过字段
-tag 声明自己的 portable projection，应用再注册自定义 `AgentMessage` 的具体类型。宿主可以在
-携带 `State` 的 `EventTurnEnd` 已投影后调用 `Agent.Snapshot()` 保存 turn 边界，也可以直接使用 `AfterRunContext.Snapshot`
-保存终态。恢复 adapter 通过 `WithSnapshotLoader` 在初始化之前加载完整 Snapshot；装载错误会拒绝本次 Run，
+tag 声明自己的 portable projection，应用再注册自定义消息和材料类型。使用 context 包的压缩策略时，
+将 `context.CodecOptions()` 加入 `agentgo.NewCodec`，统一注册摘要、投影和 usage 失效包装；
+当前表示、嵌套原始消息与失效状态一起恢复，避免恢复后重新展开内容或使用旧的 token 校准。
+
+`AfterTurn` 的 State 与 `AfterRun` 的 Snapshot 都是进入回调时的观察值。Hook 可以继续维护材料，
+运行时在 Hook 返回后重新捕获状态：`EventTurnEnd.State` 包含该 turn 的 Hook 写入，终态 listener
+收到的 State 和此时的 `Agent.Snapshot()` 包含 AfterRun 写入。保存 Hook 入口 Snapshot 只保存入口状态；
+需要保存包含收尾写入的最终状态时，应在终态 listener 中读取 Snapshot。
+恢复 adapter 通过 `WithSnapshotLoader` 在初始化之前加载完整 Snapshot；装载错误会拒绝本次 Run，
 后续 `Continue` 可以重试。`AfterRun` 在 Loop 完全结束、最终状态已经投影后执行，并先于终态 listener。
 `SetSnapshot` 只保留为低层状态操作，不是正常恢复流程必需的用户编排步骤。进入 AgentGo 之前的 durable
 inbox 仍由宿主负责，Snapshot 只承诺覆盖 Agent 已经接受的输入。
@@ -107,7 +113,7 @@ Middleware 按注册顺序由外向内执行，可修改请求、派生 context 
 | `model_exec_start` / `model_exec_end` | 每次物理模型尝试，包含 Middleware；重试保持逻辑 ID，递增 Attempt。内部 summary 和工具中的模型调用也使用此路径。 |
 | `tool_queued` → `tool_exec_start` / `tool_exec_end` | 区分调度等待与执行管线。执行管线包含 Middleware、参数校验、预览和授权；结束时的 `Disposition` 区分实际调用、前置拒绝、Middleware 短路和跳过。 |
 | `tool_invoke_start` / `tool_invoke_end` | 仅覆盖 `Tool.Execute` / `ExecuteContent`，起始事件携带授权后实参。拒绝、短路和跳过不产生调用事件。 |
-| `context_prepare_start` / `context_prepare_end` | 覆盖 `ContextManager.Transform` 或 `RecoverOverflow`，包括不压缩、失败的情况；`ContextOperation` 区分方法。结束表示方法返回，后续提交成功与否仍由提交路径负责。 |
+| `context_prepare_start` / `context_prepare_end` | 覆盖 `ContextManager.Compact`、`Transform` 或 `RecoverOverflow`，包括不压缩、失败的情况；`ContextOperation` 区分方法。结束表示方法返回，后续提交成功与否仍由提交路径负责。 |
 | `retry` 与 `retry_wait_start` / `retry_wait_end` | 前者报告重试计划；后者记录实际退避等待，包括取消提前结束。overflow recovery 本身不退避，不产生等待事件。 |
 
 `AfterTurn` 是提交边界回调，不是 finally；它失败时已提交的 turn 仍有效，Run 随后报告错误。
@@ -193,17 +199,20 @@ AgentGo 可以逐步增加支持轨迹分析的稳定事件和协议，但不吸
 
 ## 请求视图转换与基线压缩
 
-Loop 持续维护 `[]AgentMessage`。每次模型请求准备阶段调用 `ContextManager.Transform`，
-返回本次视图；默认 ContextEngine 顺序执行 `Transformers`，即使低于压缩阈值也运行。
-转换必须保持 raw、调用配对与输入不变，并可重复执行。文件范围、版本或检索去重策略归应用。
+Loop 持续维护已接受的 messages 与 artifacts。每个逻辑模型调用先按基线触发压缩，接受压缩结果，
+再接收压缩期间到达的 steering 输入，最后执行一次 Transformer 并经 ToMessage 构造模型请求。
+Transformer 拥有全局视角，可以扩大、缩小、重排或更新消息；它不承担预算判断，返回值只用于本次请求。
+ToMessage 保持无参、无副作用；具体文件范围、版本与检索去重策略归应用。
 
-`Compact(CompactReasonThreshold)` 根据转换后视图判断是否需要压缩，但只返回独立的基线改写，
-不提交临时转换结果。Loop 使用原有 CommitContext 路径接受改写，再基于新基线重新 Transform。
-手动压缩和 RecoverOverflow 保留各自结果与提交契约；Transform 不生成摘要，也不递归压缩。
-晚到的 steering 输入在提交后再经过轻量 Transform，不重复触发摘要。ToMessage 保持无参、无副作用，
-实际请求转换只发生在模型边界；估算器也可调用它检查当前表示。
+Compact 负责维护长期基线。Compactor 同时接收消息和材料能力，可生成摘要、将长内容转存到宿主文件、
+登记材料并用引用替换历史。默认引擎根据基线估算和阈值决定是否调用压缩策略，Chain 各阶段共享同一份
+材料准备态。Loop 将候选消息与完整材料集合交给 CommitContext，接受成功后统一发布；失败丢弃候选。
+成功的材料 CRUD 即使没有改写消息，也需要接受；未发生材料 CRUD 且消息未改写则不提交。
+材料对象仍共享，准备态只隔离 CRUD，应通过替换值更新内容。宿主文件的失败清理由宿主负责。
+直接调用 ContextEngine 的宿主自行负责准备态和接受边界，并在接受后调用 Sync。
 
-API 迁移：Project 与 ContextProjection 已移除，改用返回消息列表的 Transform；
-CommitOnProject 移除，达到阈值的压缩通过显式 Compact 结果提交；OnProject/SetProjectHook 改为
-OnCompact/SetCompactHook。已有 context_projected 事件与 context_prepare 的 project wire 值继续保留，
-它们描述执行事实，不要求跟随方法机械重命名。
+ContextEngine 的压缩回调报告候选，Committed 为 false；Loop 只在接受后发布已提交的 context_compacted。
+Sync 记录已接受的基线；Transform 和候选准备只改变视图观察，异步事件消费不反向更新引擎基线。
+普通模型重试使用已接受的基线重新转换请求，不重复压缩。provider overflow 单独触发一次恢复并重试，
+提交型恢复更新基线，非提交型恢复只提供重试视图；同一逻辑调用保持 Execution ID，Attempt 递增。
+摘要内部模型调用经过 ExecuteModel 和模型 Middleware，使用同一材料准备态，不递归进入会话准备流程。

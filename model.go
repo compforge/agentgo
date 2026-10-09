@@ -77,10 +77,11 @@ type LoopConfig struct {
 	// projection must preserve the tool role and tool_call_id pairing.
 	ToolResultMessageFactory func(ToolCall, ToolResult) AgentMessage
 
-	// CommitContext replaces the runtime message baseline after an explicit
-	// committed compaction, a committed projection rewrite, or committed
-	// overflow recovery.
-	CommitContext func(msgs []AgentMessage, usage *ContextUsage) error
+	// CommitContext durably accepts a compaction candidate before publication.
+	// The result contains both Messages and the complete staged Artifacts collection.
+	// Returning an error rejects both and stops the run. The callback must atomically
+	// persist them if durable atomicity is required; external files remain host-owned.
+	CommitContext func(ContextCommitResult) error
 
 	// CommitMessage durably records a message before it enters runtime context.
 	// Returning an error stops the run; tools requested by that message are not

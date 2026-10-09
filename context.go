@@ -11,7 +11,8 @@ const (
 	CompactReasonThreshold CompactReason = "threshold"
 )
 
-// CompactionInfo describes one completed context compaction transaction.
+// CompactionInfo describes a context rewrite. Committed becomes true only
+// after the runtime accepts its messages and staged artifacts.
 // It reports the aggregate effect of the configured compactor; individual
 // strategies remain an implementation detail. A nil Compaction means no
 // compaction changed the context.
@@ -33,7 +34,7 @@ type CompactionInfo struct {
 // /context. BaselineUsage always reflects the caller's current runtime message
 // baseline. Usage reports the active view currently remembered by the manager,
 // which may be the baseline runtime messages, a projected prompt view, or a
-// recovered/committed view depending on the most recent operation.
+// candidate/recovered view depending on the most recent operation.
 type ContextSnapshot struct {
 	Items              []ContextItem
 	BaselineUsage      *ContextUsage
@@ -51,11 +52,14 @@ type ContextSnapshot struct {
 	LastSplitTurn      bool
 }
 
-// ContextCommitResult is the result of an explicit committed rewrite.
+// ContextCommitResult describes an explicit baseline rewrite candidate.
 // The returned Messages should replace the runtime baseline when Changed is
-// true, for example after a manual /compact command.
+// true, for example after a manual /compact command. AgentLoop also accepts
+// successful artifact-only changes, retaining the original message baseline.
 type ContextCommitResult struct {
-	Messages       []AgentMessage
+	Messages []AgentMessage
+	// Artifacts is the complete staged collection supplied by the loop to CommitContext.
+	Artifacts      []Artifact
 	Usage          *ContextUsage
 	Changed        bool
 	Compaction     *CompactionInfo
@@ -84,6 +88,9 @@ type ContextRecoveryResult struct {
 // TransformContext carries the messages to project and their runtime's material
 // capability. Direct context-engine users may omit Artifacts when their policies
 // do not use material. AgentGo supplies it on all runtime-owned context calls.
+// Compact/RecoverOverflow receive an isolated CRUD collection; Transform receives
+// accepted runtime artifacts. Message and artifact payloads are shared values:
+// replace them rather than mutate in place. Callers outside AgentLoop own staging.
 type TransformContext struct {
 	Artifacts ArtifactManager
 	Messages  []AgentMessage
@@ -95,7 +102,7 @@ type TransformContext struct {
 // The manager deliberately distinguishes between transient prompt projection
 // and explicit baseline rewrites:
 //   - Transform builds a prompt view for one LLM call without committing it.
-//   - Compact performs an explicit committed rewrite such as /compact.
+//   - Compact prepares an explicit baseline rewrite such as /compact.
 //   - RecoverOverflow produces a retryable prompt view after context overflow
 //     and may optionally return a new committed baseline.
 //   - Sync updates the manager with the current runtime baseline after
@@ -105,18 +112,19 @@ type TransformContext struct {
 //     debugging and UI surfaces.
 type ContextManager interface {
 	// Transform builds the model view without mutating messages or committing
-	// history. It runs even below the compaction threshold and must be idempotent.
+	// history. It may expand, shrink, or rewrite the view independently of budget.
 	Transform(ctx context.Context, input TransformContext) ([]AgentMessage, error)
 
 	// Compact returns an explicit baseline rewrite. Threshold requests must be
-	// no-ops when the transformed view fits the configured budget. The caller is
+	// no-ops when the baseline fits the configured budget. The caller is
 	// responsible for replacing its runtime baseline with the returned Messages
 	// when Changed is true.
 	Compact(ctx context.Context, input TransformContext, reason CompactReason) (ContextCommitResult, error)
 
 	// RecoverOverflow produces a retryable view after a provider reports
 	// context overflow. When ShouldCommit is true, CommitMessages should replace
-	// the runtime baseline before continuing.
+	// the runtime baseline before continuing and staged artifact changes are accepted.
+	// Otherwise View is request-local and staged CRUD changes are discarded.
 	RecoverOverflow(ctx context.Context, input TransformContext, cause error) (ContextRecoveryResult, error)
 
 	// Sync tells the manager what the current runtime baseline is after restore,
