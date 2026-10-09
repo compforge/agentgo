@@ -36,6 +36,10 @@
 // middleware, and [TransformContext] inputs. [AgentState.Artifacts] carries its
 // values through snapshots; applications register their concrete types with the
 // codec and own extraction, associations, rendering, and storage timing.
+// Compaction stages messages and artifact CRUD for acceptance together; a final
+// Transform builds each request view independently of compaction budgets.
+// Users of agentgo/context add context.CodecOptions() to [NewCodec] to persist
+// summary and projection representations, including their original messages.
 // [AgentState] describes Loop-owned execution state, while
 // [AgentSnapshot] adds input accepted into a stateful Agent's steering and
 // follow-up queues. [WithSnapshotLoader] and [WithAfterRun] let an adapter restore

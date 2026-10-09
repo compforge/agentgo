@@ -6,9 +6,20 @@ import (
 	"time"
 )
 
-// Preparation is observed at the ContextManager boundary, not inferred from a
-// successful compaction notification: projection can fail or leave history intact.
-func prepareContext(ctx context.Context, manager ContextManager, execution Execution, input TransformContext, sink eventSink) (view []AgentMessage, compacted ContextCommitResult, err error) {
+// compactContext prepares a candidate; only acceptContext may publish it.
+func compactContext(ctx context.Context, manager ContextManager, execution Execution, input TransformContext, sink eventSink) (result ContextCommitResult, err error) {
+	sink.emit(Event{Type: EventContextPrepareStart, Execution: executionRef(execution), ContextOperation: ContextCompact})
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("compact context panicked: %v", recovered)
+		}
+		sink.emit(Event{Type: EventContextPrepareEnd, Execution: executionRef(execution), ContextOperation: ContextCompact, Err: err})
+	}()
+	return manager.Compact(ctx, input, CompactReasonThreshold)
+}
+
+// transformContextView runs once against the accepted baseline for this request.
+func transformContextView(ctx context.Context, manager ContextManager, execution Execution, input TransformContext, sink eventSink) (view []AgentMessage, err error) {
 	sink.emit(Event{Type: EventContextPrepareStart, Execution: executionRef(execution), ContextOperation: ContextTransform})
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -16,29 +27,7 @@ func prepareContext(ctx context.Context, manager ContextManager, execution Execu
 		}
 		sink.emit(Event{Type: EventContextPrepareEnd, Execution: executionRef(execution), ContextOperation: ContextTransform, Err: err})
 	}()
-	view, err = manager.Transform(ctx, input)
-	if err != nil {
-		return
-	}
-	// The manager owns its threshold; the loop owns durable baseline submission.
-	compacted, err = manager.Compact(ctx, input, CompactReasonThreshold)
-	if err != nil {
-		return
-	}
-	if compacted.Changed {
-		view, err = manager.Transform(ctx, TransformContext{Messages: compacted.Messages, Artifacts: input.Artifacts})
-	}
-	return
-}
-
-// transformContextView repeats only the cheap view stage after late steering.
-func transformContextView(ctx context.Context, manager ContextManager, input TransformContext) (view []AgentMessage, err error) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("transform context panicked: %v", recovered)
-		}
-	}()
-	return manager.Transform(ctx, input)
+	return manager.Transform(ContextWithExecution(ctx, execution), input)
 }
 
 func recoverContext(ctx context.Context, manager ContextManager, execution Execution, input TransformContext, cause error, sink eventSink) (recovery ContextRecoveryResult, err error) {

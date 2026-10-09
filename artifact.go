@@ -8,7 +8,8 @@ import (
 )
 
 // Artifact is application-owned material with an identity independent of the
-// message transcript. Applications define concrete payloads and the meaning of
+// message transcript. It can hold intermediate/final products or other named
+// application data. Applications define concrete payloads and the meaning of
 // ID and Kind; AgentGo does not extract, render, or version them.
 // ID must remain stable while the artifact is registered.
 type Artifact interface {
@@ -47,6 +48,7 @@ func newArtifactManager() *memoryArtifactManager {
 type memoryArtifactManager struct {
 	mu        sync.RWMutex
 	artifacts map[string]Artifact
+	changed   bool
 }
 
 func (m *memoryArtifactManager) AddArtifact(artifact Artifact, overwrite bool) error {
@@ -60,6 +62,7 @@ func (m *memoryArtifactManager) AddArtifact(artifact Artifact, overwrite bool) e
 		return fmt.Errorf("%w: %q", ErrArtifactExists, id)
 	}
 	m.artifacts[id] = artifact
+	m.changed = true
 	return nil
 }
 
@@ -90,6 +93,7 @@ func (m *memoryArtifactManager) DeleteArtifact(id string) bool {
 	defer m.mu.Unlock()
 	_, exists := m.artifacts[id]
 	delete(m.artifacts, id)
+	m.changed = m.changed || exists
 	return exists
 }
 

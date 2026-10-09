@@ -62,7 +62,8 @@ func (s *SummaryCompactor) keepRecentTokens(target int) int {
 	return min(maxKeepRecentTokens, max(minKeepRecentTokens, target/4))
 }
 
-func (s *SummaryCompactor) Compact(ctx context.Context, messages []agentgo.AgentMessage, expect float64) ([]agentgo.AgentMessage, error) {
+func (s *SummaryCompactor) Compact(ctx context.Context, input agentgo.TransformContext, expect float64) ([]agentgo.AgentMessage, error) {
+	messages := input.Messages
 	if expect >= 1 {
 		return messages, nil
 	}

@@ -36,7 +36,8 @@ type BeforeRunContext struct {
 }
 
 // AfterRunContext describes a stateful Agent after its Loop state has been
-// projected and before terminal listeners may start another run.
+// projected and before terminal listeners may start another run. Snapshot is
+// the hook entry state; writes appear in the terminal event and Agent.Snapshot().
 type AfterRunContext struct {
 	Artifacts ArtifactManager // Runtime-owned material; do not retain beyond the callback.
 	Kind      RunKind

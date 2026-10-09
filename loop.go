@@ -94,6 +94,10 @@ func startAgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentC
 			return
 		}
 
+		if config.ContextManager != nil {
+			config.ContextManager.Sync(currentCtx.Messages)
+		}
+
 		startState := snapshotRunState(state, &currentCtx)
 		sink.emit(Event{Type: EventAgentStart, State: &startState})
 
@@ -173,6 +177,9 @@ func commitMessage(currentCtx *AgentContext, newMessages *[]AgentMessage, config
 		}
 	}
 	currentCtx.Messages = append(currentCtx.Messages, msg)
+	if config.ContextManager != nil {
+		config.ContextManager.Sync(currentCtx.Messages)
+	}
 	*newMessages = append(*newMessages, msg)
 	if config.OnMessage != nil {
 		config.OnMessage(msg)
@@ -281,19 +288,20 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 		state.Progress.ToolErrors = summaryState.toolErrors
 		state.Progress.ConsecutiveToolErrors = cloneStringIntMap(toolErrors)
 		turnState := snapshotRunState(*state, currentCtx)
-		sink.emit(Event{Type: EventTurnEnd, TurnIndex: turnIndex, Message: message, ToolResults: append([]ToolResult(nil), results...), State: &turnState})
-		if config.AfterTurn == nil {
-			return true
+		var hookErr error
+		if config.AfterTurn != nil {
+			hookErr = callAfterTurn(ctx, config.AfterTurn, AfterTurnContext{
+				Artifacts: config.artifacts, TurnIndex: turnIndex, Message: message,
+				ToolResults: append([]ToolResult(nil), results...),
+				Context:     snapshotAgentContext(currentCtx), State: turnState,
+			})
 		}
-		if err := config.AfterTurn(ctx, AfterTurnContext{
-			Artifacts:   config.artifacts,
-			TurnIndex:   turnIndex,
-			Message:     message,
-			ToolResults: append([]ToolResult(nil), results...),
-			Context:     snapshotAgentContext(currentCtx),
-			State:       turnState,
-		}); err != nil {
-			sink.emitError(fmt.Errorf("after turn %d: %w", turnIndex, err), buildSummary(turnCount, EndReasonError))
+		// The completed turn and accepted hook writes form one resumable checkpoint.
+		// Even a hook error must not erase model/tool facts that already completed.
+		turnState = snapshotRunState(*state, currentCtx)
+		sink.emit(Event{Type: EventTurnEnd, TurnIndex: turnIndex, Message: message, ToolResults: append([]ToolResult(nil), results...), State: &turnState})
+		if hookErr != nil {
+			sink.emitError(fmt.Errorf("after turn %d: %w", turnIndex, hookErr), buildSummary(turnCount, EndReasonError))
 			return false
 		}
 		return true

@@ -65,7 +65,8 @@ func (s *SessionMemoryCompactor) SetSeedFn(fn func() (string, error)) {
 // Compact replaces history older than KeepRecentTokens with a ContextSummary
 // whose body is the seed text. When no seed is available it returns the view
 // unchanged, allowing a downstream SummaryCompactor to run.
-func (s *SessionMemoryCompactor) Compact(ctx context.Context, messages []agentgo.AgentMessage, expect float64) ([]agentgo.AgentMessage, error) {
+func (s *SessionMemoryCompactor) Compact(ctx context.Context, input agentgo.TransformContext, expect float64) ([]agentgo.AgentMessage, error) {
+	messages := input.Messages
 	if expect >= 1 {
 		return messages, nil
 	}

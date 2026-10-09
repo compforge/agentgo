@@ -12,7 +12,7 @@ import (
 
 type failingCompactor struct{ callCount int }
 
-func (c *failingCompactor) Compact(context.Context, []agentgo.AgentMessage, float64) ([]agentgo.AgentMessage, error) {
+func (c *failingCompactor) Compact(context.Context, agentgo.TransformContext, float64) ([]agentgo.AgentMessage, error) {
 	c.callCount++
 	return nil, fmt.Errorf("simulated failure")
 }
@@ -22,7 +22,8 @@ type recordingCompactor struct {
 	result  []agentgo.AgentMessage
 }
 
-func (c *recordingCompactor) Compact(_ context.Context, messages []agentgo.AgentMessage, expect float64) ([]agentgo.AgentMessage, error) {
+func (c *recordingCompactor) Compact(_ context.Context, input agentgo.TransformContext, expect float64) ([]agentgo.AgentMessage, error) {
+	messages := input.Messages
 	c.expects = append(c.expects, expect)
 	if c.result != nil {
 		return copyMessages(c.result), nil
@@ -35,7 +36,7 @@ type replacingCompactor struct {
 	calls int
 }
 
-func (c *replacingCompactor) Compact(_ context.Context, _ []agentgo.AgentMessage, _ float64) ([]agentgo.AgentMessage, error) {
+func (c *replacingCompactor) Compact(_ context.Context, _ agentgo.TransformContext, _ float64) ([]agentgo.AgentMessage, error) {
 	c.calls++
 	return []agentgo.AgentMessage{agentgo.UserMsg(c.text)}, nil
 }
@@ -55,14 +56,14 @@ func TestCompactorChainStopsAtRequestedRatio(t *testing.T) {
 	chain := Chain(first, second)
 	input := []agentgo.AgentMessage{agentgo.UserMsg(strings.Repeat("x", 4000))}
 
-	if _, err := chain.Compact(t.Context(), input, 0.6); err != nil {
+	if _, err := chain.Compact(t.Context(), agentgo.TransformContext{Messages: input}, 0.6); err != nil {
 		t.Fatal(err)
 	}
 	if first.calls != 1 || second.calls != 0 {
 		t.Fatalf("calls = (%d, %d), want (1, 0)", first.calls, second.calls)
 	}
 
-	if _, err := chain.Compact(t.Context(), input, 0.25); err != nil {
+	if _, err := chain.Compact(t.Context(), agentgo.TransformContext{Messages: input}, 0.25); err != nil {
 		t.Fatal(err)
 	}
 	if first.calls != 2 || second.calls != 1 {
@@ -76,6 +77,7 @@ func TestContextEngineProjectUsesAggregateRatioAndTracksUsage(t *testing.T) {
 		agentgo.UserMsg(strings.Repeat("a", 800)),
 		agentgo.UserMsg("recent"),
 	}
+	engine.Sync(msgs)
 	rawFirst := msgs[0].TextContent()
 
 	proj, err := engine.Compact(t.Context(), agentgo.TransformContext{Messages: msgs}, agentgo.CompactReasonThreshold)
@@ -88,7 +90,7 @@ func TestContextEngineProjectUsesAggregateRatioAndTracksUsage(t *testing.T) {
 	if proj.Compaction == nil {
 		t.Fatal("expected compaction details")
 	}
-	if got := proj.Compaction; got.Reason != agentgo.CompactReasonThreshold || !got.Committed || got.TokensAfter >= got.TokensBefore || got.MessagesBefore != 2 || got.MessagesAfter != 2 || got.Summarized {
+	if got := proj.Compaction; got.Reason != agentgo.CompactReasonThreshold || got.Committed || got.TokensAfter >= got.TokensBefore || got.MessagesBefore != 2 || got.MessagesAfter != 2 || got.Summarized {
 		t.Fatalf("unexpected compaction details: %+v", got)
 	}
 	if msgs[0].TextContent() != rawFirst {
@@ -123,7 +125,7 @@ func TestContextEngineProjectCanCommitCompactedMessages(t *testing.T) {
 	if !proj.Changed || len(proj.Messages) != len(proj.Messages) {
 		t.Fatalf("projection did not request a matching commit: %+v", proj)
 	}
-	if proj.Compaction == nil || !proj.Compaction.Committed {
+	if proj.Compaction == nil || proj.Compaction.Committed {
 		t.Fatalf("expected committed compaction details: %+v", proj.Compaction)
 	}
 	if proj.Messages[0].Raw().TextContent() != msgs[0].TextContent() {
@@ -177,7 +179,7 @@ func TestContextEngineForcedCompactionReportsReason(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if manual.Compaction == nil || manual.Compaction.Reason != agentgo.CompactReasonManual || !manual.Compaction.Committed {
+	if manual.Compaction == nil || manual.Compaction.Reason != agentgo.CompactReasonManual || manual.Compaction.Committed {
 		t.Fatalf("unexpected manual compaction details: %+v", manual.Compaction)
 	}
 
@@ -186,7 +188,7 @@ func TestContextEngineForcedCompactionReportsReason(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovery.Compaction == nil || recovery.Compaction.Reason != agentgo.CompactReasonOverflow || !recovery.Compaction.Committed {
+	if recovery.Compaction == nil || recovery.Compaction.Reason != agentgo.CompactReasonOverflow || recovery.Compaction.Committed {
 		t.Fatalf("unexpected recovery compaction details: %+v", recovery.Compaction)
 	}
 }
@@ -246,7 +248,7 @@ func TestSummaryCompactorKeepsCompactedRecentView(t *testing.T) {
 		recent,
 	}
 
-	out, err := compactor.Compact(t.Context(), messages, 0)
+	out, err := compactor.Compact(t.Context(), agentgo.TransformContext{Messages: messages}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +287,7 @@ func TestSummaryCompactorSeesRawToolEvidence(t *testing.T) {
 		agentgo.ToolResultMsg("tc2", []byte(`"recent"`), false),
 		agentgo.UserMsg("keep"),
 	}
-	if _, err := compactor.Compact(t.Context(), msgs, 0); err != nil {
+	if _, err := compactor.Compact(t.Context(), agentgo.TransformContext{Messages: msgs}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if sawPlaceholder || !sawRaw {
@@ -321,7 +323,7 @@ func TestToolResultCompactorDeduplicatesIdenticalCalls(t *testing.T) {
 
 	t.Run("identical", func(t *testing.T) {
 		msgs := build(6, func(int) string { return `{"chapter":119}` })
-		out, err := compactor.Compact(t.Context(), msgs, 0)
+		out, err := compactor.Compact(t.Context(), agentgo.TransformContext{Messages: msgs}, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -335,7 +337,7 @@ func TestToolResultCompactorDeduplicatesIdenticalCalls(t *testing.T) {
 
 	t.Run("distinct", func(t *testing.T) {
 		msgs := build(6, func(i int) string { return fmt.Sprintf(`{"chapter":%d}`, i) })
-		out, err := compactor.Compact(t.Context(), msgs, 0)
+		out, err := compactor.Compact(t.Context(), agentgo.TransformContext{Messages: msgs}, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -352,7 +354,7 @@ func TestContextEngineSnapshotAndSync(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := engine.Snapshot()
-	if snapshot == nil || snapshot.Scope != "projected" || !snapshot.LastChanged || snapshot.TrimmedTextBlocks == 0 {
+	if snapshot == nil || snapshot.Scope != "candidate" || !snapshot.LastChanged || snapshot.TrimmedTextBlocks == 0 {
 		t.Fatalf("unexpected projected snapshot: %+v", snapshot)
 	}
 	engine.Sync(msgs)

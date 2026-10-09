@@ -10,6 +10,7 @@ package context
 
 import (
 	"context"
+	"reflect"
 	"sync"
 
 	"github.com/compforge/agentgo"
@@ -24,7 +25,7 @@ const (
 )
 
 // EngineConfig configures ContextEngine. ContextWindow and Compactor are the
-// only required capabilities for automatic projection.
+// only required capabilities for automatic compaction.
 type EngineConfig struct {
 	// ContextWindow is the model's maximum supported context window.
 	ContextWindow int
@@ -32,7 +33,7 @@ type EngineConfig struct {
 	// conservative default is used.
 	ReserveTokens int
 	// Compactor owns the complete reduction policy. The engine only computes
-	// the aggregate target ratio and validates the resulting size.
+	// the target ratio from the accepted baseline. The policy owns the rewrite.
 	Compactor Compactor
 	// Transformers build the request view on every call, independently of pressure.
 	Transformers []Transformer
@@ -46,8 +47,8 @@ type EngineConfig struct {
 	MaxConsecutiveFailures int
 }
 
-// RewriteEvent reports a projection or recovery rewrite that actually changed
-// the active view. Info is populated when the rewrite produced a summary.
+// RewriteEvent reports a prepared rewrite candidate. Committed is false: only
+// the runtime can accept it and emit context_compacted. Info describes a summary.
 type RewriteEvent struct {
 	Reason       string
 	Changed      bool
@@ -55,10 +56,7 @@ type RewriteEvent struct {
 	TokensBefore int
 	TokensAfter  int
 	Info         *SummaryInfo
-	// View is what the rewrite produced. Carried on the event because the hook
-	// fires before the loop installs a committed view: a host that reacts to
-	// Committed by reading the agent's messages would still see the old
-	// baseline.
+	// View is the candidate; the runtime baseline has not changed yet.
 	View []agentgo.AgentMessage
 	// Failures is set when Reason == "circuit_breaker": the consecutive failure
 	// count that triggered the bypass.
@@ -214,12 +212,8 @@ func (e *ContextEngine) Snapshot() *agentgo.ContextSnapshot {
 // re-arms itself in a half-open state so later calls can retry compression.
 func (e *ContextEngine) compactThreshold(ctx context.Context, input agentgo.TransformContext) (agentgo.ContextCommitResult, error) {
 	msgs := input.Messages
-	view, err := e.Transform(ctx, input)
-	if err != nil {
-		return agentgo.ContextCommitResult{}, err
-	}
-	if e.cfg.ContextWindow <= 0 || e.estimateUsage(view).Tokens <= e.threshold(e.cfg.ContextWindow) {
-		return agentgo.ContextCommitResult{Messages: msgs, Usage: ptrUsage(e.estimateUsage(view))}, nil
+	if e.cfg.ContextWindow <= 0 || e.estimateUsage(msgs).Tokens <= e.threshold(e.cfg.ContextWindow) {
+		return agentgo.ContextCommitResult{Messages: msgs, Usage: ptrUsage(e.estimateUsage(msgs))}, nil
 	}
 
 	// Circuit breaker: skip compression after too many consecutive failures.
@@ -252,7 +246,7 @@ func (e *ContextEngine) compactThreshold(ctx context.Context, input agentgo.Tran
 		return agentgo.ContextCommitResult{Messages: msgs, Usage: usage}, nil
 	}
 
-	r, err := e.apply(ctx, msgs, false)
+	r, err := e.apply(ctx, input, false)
 	if err != nil {
 		e.mu.Lock()
 		e.consecutiveFailures++
@@ -266,7 +260,7 @@ func (e *ContextEngine) compactThreshold(ctx context.Context, input agentgo.Tran
 		e.consecutiveFailures = 0
 		e.mu.Unlock()
 	}
-	compaction := newCompactionInfo(agentgo.CompactReasonThreshold, true, msgs, r)
+	compaction := newCompactionInfo(agentgo.CompactReasonThreshold, false, msgs, r)
 	if r.Changed && e.cfg.OnCompact != nil {
 		e.cfg.OnCompact(RewriteEvent{
 			Reason:       string(compaction.Reason),
@@ -289,8 +283,7 @@ func (e *ContextEngine) Compact(ctx context.Context, input agentgo.TransformCont
 	if reason == agentgo.CompactReasonThreshold {
 		return e.compactThreshold(ctx, input)
 	}
-	e.Sync(msgs)
-	r, err := e.apply(ctx, msgs, true)
+	r, err := e.apply(ctx, input, true)
 	if err != nil {
 		return agentgo.ContextCommitResult{}, err
 	}
@@ -298,7 +291,7 @@ func (e *ContextEngine) Compact(ctx context.Context, input agentgo.TransformCont
 		Messages:       r.View,
 		Usage:          r.Usage,
 		Changed:        r.Changed,
-		Compaction:     newCompactionInfo(reason, true, msgs, r),
+		Compaction:     newCompactionInfo(reason, false, msgs, r),
 		CompactedCount: infoValueInt(r.Info, func(i *SummaryInfo) int { return i.CompactedCount }),
 		KeptCount:      infoValueInt(r.Info, func(i *SummaryInfo) int { return i.KeptCount }),
 		SplitTurn:      infoValueBool(r.Info, func(i *SummaryInfo) bool { return i.IsSplitTurn }),
@@ -310,8 +303,7 @@ func (e *ContextEngine) Compact(ctx context.Context, input agentgo.TransformCont
 // runtime baseline before retrying.
 func (e *ContextEngine) RecoverOverflow(ctx context.Context, input agentgo.TransformContext, _ error) (agentgo.ContextRecoveryResult, error) {
 	msgs := input.Messages
-	e.Sync(msgs)
-	r, err := e.apply(ctx, msgs, true)
+	r, err := e.apply(ctx, input, true)
 	if err != nil {
 		return agentgo.ContextRecoveryResult{}, err
 	}
@@ -322,7 +314,7 @@ func (e *ContextEngine) RecoverOverflow(ctx context.Context, input agentgo.Trans
 		e.consecutiveFailures = 0
 		e.mu.Unlock()
 	}
-	compaction := newCompactionInfo(agentgo.CompactReasonOverflow, true, msgs, r)
+	compaction := newCompactionInfo(agentgo.CompactReasonOverflow, false, msgs, r)
 	if r.Changed && e.cfg.OnRecover != nil {
 		e.cfg.OnRecover(RewriteEvent{
 			Reason:       string(compaction.Reason),
@@ -369,12 +361,13 @@ func newCompactionInfo(reason agentgo.CompactReason, committed bool, before []ag
 	}
 }
 
-func (e *ContextEngine) apply(ctx context.Context, msgs []agentgo.AgentMessage, force bool) (applyResult, error) {
+func (e *ContextEngine) apply(ctx context.Context, input agentgo.TransformContext, force bool) (applyResult, error) {
+	msgs := input.Messages
 	view := copyMessages(msgs)
 	before := EstimateContextTokens(view).Tokens
 	if e.cfg.Compactor == nil {
 		usage := ptrUsage(e.estimateUsage(view))
-		e.setLastState(view, usage, scopeFor(force), false, nil)
+		e.setLastState(view, usage, "candidate", false, nil)
 		return applyResult{View: view, Usage: usage}, nil
 	}
 
@@ -384,19 +377,19 @@ func (e *ContextEngine) apply(ctx context.Context, msgs []agentgo.AgentMessage, 
 		threshold := e.threshold(window)
 		if window <= 0 || before <= threshold {
 			usage := ptrUsage(e.estimateUsage(view))
-			e.setLastState(view, usage, scopeFor(false), false, nil)
+			e.setLastState(view, usage, "candidate", false, nil)
 			return applyResult{View: view, Usage: usage}, nil
 		}
 		expect = float64(threshold) / float64(before)
 	}
 
-	next, err := e.cfg.Compactor.Compact(ctx, view, clampRatio(expect))
+	next, err := e.cfg.Compactor.Compact(ctx, agentgo.TransformContext{Messages: view, Artifacts: input.Artifacts}, clampRatio(expect))
 	if err != nil {
 		return applyResult{}, err
 	}
-	// Compare both views with the same estimator: old API usage no longer
-	// measures a rewritten prefix, and a no-op must not erase valid calibration.
-	changed := EstimateTotal(next) < EstimateTotal(view)
+	// A compactor can replace content with an equally sized reference. Message
+	// equality detects that rewrite while true no-ops retain valid calibration.
+	changed := !reflect.DeepEqual(next, msgs)
 	if changed {
 		next = InvalidateUsage(next)
 	} else {
@@ -404,7 +397,7 @@ func (e *ContextEngine) apply(ctx context.Context, msgs []agentgo.AgentMessage, 
 	}
 	info := summaryInfoFromView(next)
 	usage := ptrUsage(e.estimateUsage(next))
-	e.setLastState(next, usage, scopeFor(force), changed, info)
+	e.setLastState(next, usage, "candidate", changed, info)
 	return applyResult{View: next, Usage: usage, Changed: changed, Info: info}, nil
 }
 
@@ -460,13 +453,6 @@ func (e *ContextEngine) estimateUsage(msgs []agentgo.AgentMessage) agentgo.Conte
 
 func ptrUsage(usage agentgo.ContextUsage) *agentgo.ContextUsage {
 	return &usage
-}
-
-func scopeFor(force bool) string {
-	if force {
-		return "committed"
-	}
-	return "projected"
 }
 
 func infoValueInt(info *SummaryInfo, getter func(*SummaryInfo) int) int {

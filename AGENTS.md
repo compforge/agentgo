@@ -32,13 +32,14 @@ agentgo/
    `ToMessage` 是唯一模型协议转换边界，compaction 必须保留 `Raw`。
 2. **Kernel 记录事实，不解释业务**：Artifact 与 AgentMessage 并列，ArtifactManager 由运行时创建并通过扩展点参数提供；
    业务通过 Run / Turn Hook、Middleware 和 Transformer 决定提取、消息关联与呈现策略；
-   材料值进入 AgentState / Snapshot，消息压缩不隐式清空材料。
+   材料值可承载产物及应用自定义数据，进入 AgentState / Snapshot；压缩可显式维护材料。
    ContextItem / ContextDemand 共享身份协议，但 kind、representation、
    signal、提取器和评分含义归应用；权限、终止和 Context 策略均通过扩展点注入。
 3. **Event stream 是统一观测面**：模型、工具、Context 投影/压缩及结束状态都从 Event 输出；新增运行
    能力时优先补完整事实事件，而不是让 UI、日志或 Harness 猜内部状态。
 4. **Context 投影与提交分离**：单次模型调用的 transient projection 不应悄悄覆盖运行基线；只有显式
-   commit/recovery 契约可以替换历史，并报告可观察的 compaction 事实。
+   commit/recovery 契约可以替换历史；压缩候选的消息和材料一起接受后才报告已提交事实。
+   Transformer 在最终模型请求前执行一次，可扩大、缩小或调整消息，与压缩预算无关。
 5. **公开 API 保持克制**：新增接口前先确认是否能作为现有 AgentMessage、Event、Tool 或 Context
    可选能力表达；Go 改动提交前运行 `go test ./...` 与 `go build ./...`。
 6. **编码机制不绑定存储或传输策略**：`codec` 提供通用 tagged value、类型注册和编解码机制；

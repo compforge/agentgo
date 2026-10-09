@@ -46,7 +46,8 @@ func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopCo
 		lastInfo = info
 
 		var commitErr *steeringCommitError
-		if errors.As(err, &commitErr) {
+		var preparationErr *contextPreparationError
+		if errors.As(err, &commitErr) || errors.As(err, &preparationErr) {
 			return Message{}, info, err
 		}
 
@@ -113,24 +114,24 @@ func recoverOverflow(ctx context.Context, agentCtx *AgentContext, config LoopCon
 	})
 
 	compactExecution := newCompactExecution(turnIndex, CompactReasonOverflow, 1)
-	recoveryCtx := ContextWithExecution(ctx, compactExecution)
-	recovery, err := recoverContext(recoveryCtx, config.ContextManager, compactExecution, TransformContext{Messages: agentCtx.Messages, Artifacts: config.artifacts}, originalErr, sink)
+	recoveryCtx, staged := stageContext(ContextWithExecution(ctx, compactExecution), config.artifacts)
+	recovery, err := recoverContext(recoveryCtx, config.ContextManager, compactExecution, TransformContext{Messages: copyMessages(agentCtx.Messages), Artifacts: staged}, originalErr, sink)
 	if err != nil {
 		return Message{}, llmCallInfo{Execution: failedExecution}, &ContextOverflowError{Cause: fmt.Errorf("compaction failed: %w", err)}
 	}
 	if len(recovery.View) == 0 {
 		return Message{}, llmCallInfo{Execution: failedExecution}, &ContextOverflowError{Cause: errors.New("compaction returned empty prompt view")}
 	}
-	agentCtx.Messages = recovery.View
-	if recovery.ShouldCommit && len(recovery.CommitMessages) > 0 && config.CommitContext != nil {
-		if err := config.CommitContext(recovery.CommitMessages, recovery.Usage); err != nil {
-			return Message{}, llmCallInfo{}, &ContextOverflowError{Cause: fmt.Errorf("commit failed: %w", err)}
+	// A transient recovery view belongs only to this retry. It cannot overwrite
+	// history, even when steering is accepted before the retried model call.
+	retryView := recovery.View
+	if recovery.ShouldCommit {
+		result := ContextCommitResult{Messages: recovery.CommitMessages, Usage: recovery.Usage, Changed: true, Compaction: recovery.Compaction}
+		if err := acceptContext(agentCtx, config, result, staged, compactExecution, sink); err != nil {
+			return Message{}, llmCallInfo{Execution: failedExecution}, err
 		}
 	}
-	if recovery.Compaction != nil {
-		sink.emit(Event{Type: EventContextCompacted, Execution: executionRef(compactExecution), Compaction: recovery.Compaction})
-	}
-	return callLLM(ctx, agentCtx, config, turnIndex, attempt, sink, steer)
+	return callLLMView(ctx, agentCtx, config, turnIndex, attempt, sink, steer, retryView)
 }
 
 // retryDelay calculates the wait duration using exponential backoff.
@@ -154,6 +155,10 @@ func retryDelay(err error, attempt int) time.Duration {
 
 // callLLM applies the two-stage pipeline and calls the model.
 func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, turnIndex, attempt int, sink eventSink, steer func() ([]AgentMessage, error)) (Message, llmCallInfo, error) {
+	return callLLMView(ctx, agentCtx, config, turnIndex, attempt, sink, steer, nil)
+}
+
+func callLLMView(ctx context.Context, agentCtx *AgentContext, config LoopConfig, turnIndex, attempt int, sink eventSink, steer func() ([]AgentMessage, error), retryView []AgentMessage) (Message, llmCallInfo, error) {
 	execution := newModelExecution(turnIndex, attempt)
 	if parent, ok := ExecutionFromContext(ctx); ok && parent.ID != execution.ID {
 		execution.ParentID = parent.ID
@@ -161,45 +166,43 @@ func callLLM(ctx context.Context, agentCtx *AgentContext, config LoopConfig, tur
 	info := llmCallInfo{Execution: execution.Execution}
 	messages := agentCtx.Messages
 
-	// Stage 1: ContextManager / TransformContext
-	if config.ContextManager != nil {
-		compactExecution := newCompactExecution(turnIndex, CompactReasonThreshold, attempt)
-		projectionCtx := ContextWithExecution(ctx, compactExecution)
-		view, compacted, err := prepareContext(projectionCtx, config.ContextManager, compactExecution, TransformContext{Messages: messages, Artifacts: config.artifacts}, sink)
+	// Compact once per logical call. Ordinary retries reuse accepted state;
+	// overflow recovery has already run its own bounded compaction attempt.
+	if config.ContextManager != nil && attempt == 1 {
+		compactExecution := newCompactExecution(turnIndex, CompactReasonThreshold, 1)
+		compactCtx, staged := stageContext(ContextWithExecution(ctx, compactExecution), config.artifacts)
+		compacted, err := compactContext(compactCtx, config.ContextManager, compactExecution, TransformContext{Messages: copyMessages(messages), Artifacts: staged}, sink)
 		if err != nil {
-			return Message{}, info, fmt.Errorf("transform context: %w", err)
+			return Message{}, info, &contextPreparationError{cause: err}
 		}
-		if compacted.Changed {
-			if config.CommitContext != nil {
-				if err := config.CommitContext(compacted.Messages, compacted.Usage); err != nil {
-					return Message{}, info, fmt.Errorf("transform context commit failed: %w", err)
-				}
-			}
-			agentCtx.Messages = copyMessages(compacted.Messages)
-			messages = copyMessages(compacted.Messages)
-		}
-		messages = view
-		if compacted.Compaction != nil {
-			sink.emit(Event{Type: EventContextCompacted, Execution: executionRef(compactExecution), Compaction: compacted.Compaction})
+		if err := acceptContext(agentCtx, config, compacted, staged, compactExecution, sink); err != nil {
+			return Message{}, info, err
 		}
 	}
-	// Keep steering in both the durable baseline and this request's projected
-	// view; committing input must not turn a transient projection into history.
+	messages = copyMessages(agentCtx.Messages)
+	if retryView != nil {
+		messages = copyMessages(retryView)
+	}
+	// Drain input arriving during compaction before the single final transform.
 	if steer != nil {
 		pending, err := steer()
 		if err != nil {
 			return Message{}, info, &steeringCommitError{cause: err}
 		}
-		if len(pending) > 0 {
-			messages = append(copyMessages(messages), pending...)
-			if config.ContextManager != nil {
-				messages, err = transformContextView(ctx, config.ContextManager, TransformContext{Messages: messages, Artifacts: config.artifacts})
-				if err != nil {
-					return Message{}, info, err
-				}
-			}
+		if retryView != nil {
+			messages = append(messages, pending...)
+		} else {
+			messages = copyMessages(agentCtx.Messages)
 		}
 	}
+	if config.ContextManager != nil {
+		var err error
+		messages, err = transformContextView(ctx, config.ContextManager, execution.Execution, TransformContext{Messages: messages, Artifacts: config.artifacts}, sink)
+		if err != nil {
+			return Message{}, info, &contextPreparationError{cause: err}
+		}
+	}
+
 	sink.emit(Event{Type: EventContextProjected, Execution: executionRef(execution.Execution), ContextItems: CollectContextItems(messages)})
 
 	// Stage 2: AgentMessage[] → Message[] + repair tool-call / tool-result

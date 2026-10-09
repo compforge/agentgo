@@ -45,7 +45,8 @@ func TestContextUsageIgnoresEmptyOrFailedCalibration(t *testing.T) {
 
 type removePrefix struct{}
 
-func (removePrefix) Compact(_ context.Context, messages []agentgo.AgentMessage, _ float64) ([]agentgo.AgentMessage, error) {
+func (removePrefix) Compact(_ context.Context, input agentgo.TransformContext, _ float64) ([]agentgo.AgentMessage, error) {
+	messages := input.Messages
 	return messages[1:], nil
 }
 
