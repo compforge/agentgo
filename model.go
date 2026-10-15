@@ -17,7 +17,8 @@ type SystemBlock struct {
 	CacheControl string `json:"cache_control,omitempty"` // e.g. "ephemeral"
 }
 
-// AgentContext holds the immutable context for a single agent loop invocation.
+// AgentContext holds the conversation and request settings used by the loop.
+// A stateful Agent refreshes request settings at each turn boundary.
 type AgentContext struct {
 	artifacts    *memoryArtifactManager // Bound by the runtime, never inherited from a caller.
 	SystemPrompt string                 // single-string system prompt (legacy)
@@ -51,12 +52,14 @@ type ToolSpec struct {
 
 // LoopConfig configures the agent loop.
 type LoopConfig struct {
-	artifacts     *memoryArtifactManager // Stateful Agent reuses its manager; bare loops create one.
-	Model         ChatModel
-	MaxTurns      int           // safety limit, default 100
-	MaxRetries    int           // LLM call retry limit for retryable errors, default 3
-	MaxToolErrors int           // consecutive tool failure threshold per tool, 0 = unlimited
-	ThinkingLevel ThinkingLevel // reasoning depth
+	artifacts *memoryArtifactManager // Stateful Agent reuses its manager; bare loops create one.
+	// Only the stateful Agent refreshes settings; direct loops use their supplied config.
+	refreshTurnSettings func(*AgentContext, *LoopConfig)
+	Model               ChatModel
+	MaxTurns            int           // safety limit, default 100
+	MaxRetries          int           // LLM call retry limit for retryable errors, default 3
+	MaxToolErrors       int           // consecutive tool failure threshold per tool, 0 = unlimited
+	ThinkingLevel       ThinkingLevel // reasoning depth
 
 	// Turn hooks execute once around each logical model/tool turn.
 	BeforeTurn BeforeTurnHook
@@ -426,7 +429,12 @@ const (
 	StreamEventError StreamEventType = "error"
 )
 
-// StreamEvent is a streaming event from the LLM.
+// StreamEvent is a streaming event from the LLM. Published payloads are read-only.
+// Producers must not mutate reachable message content after sending an event.
+//
+// +spec=`Each stream event retains its published message while generation continues`
+// +case:id=stream_snapshot,desc=`Retain early events and read while the stream advances`,expect=`Stable payloads without data races`
+// +link=component://docs/kernel.md
 type StreamEvent struct {
 	Type         StreamEventType
 	ContentIndex int     // which content block is being updated
