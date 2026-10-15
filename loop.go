@@ -145,6 +145,7 @@ func bindRunState(state AgentState, current *AgentContext) AgentState {
 }
 
 func snapshotRunState(state AgentState, current *AgentContext) AgentState {
+	state.SystemPrompt = current.SystemPrompt
 	state.Messages = copyMessages(current.Messages)
 	if current.artifacts != nil {
 		state.Artifacts = current.artifacts.ListArtifacts()
@@ -373,6 +374,9 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 		}
 		if !runBeforeTurn(turnCount + 1) {
 			return
+		}
+		if config.refreshTurnSettings != nil {
+			config.refreshTurnSettings(currentCtx, &config)
 		}
 		// Call LLM with retry (streaming: events emitted inside callLLM)
 		assistantMsg, callInfo, err := callLLMWithRetry(ctx, currentCtx, config, turnCount+1, sink, steer)

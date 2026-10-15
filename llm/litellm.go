@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/compforge/agentgo"
+	"github.com/compforge/agentgo/internal/streaming"
 	"github.com/voocel/litellm"
 	"github.com/voocel/litellm/provider/anthropic"
 	"github.com/voocel/litellm/provider/bedrock"
@@ -346,18 +347,18 @@ func (l *LiteLLMAdapter) GenerateStream(ctx context.Context, messages []agentgo.
 				if thinkIdx < 0 {
 					partial.Content = append(partial.Content, agentgo.ThinkingBlock(""))
 					thinkIdx = len(partial.Content) - 1
-					eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventThinkingStart, ContentIndex: thinkIdx, Message: partial}
+					eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventThinkingStart, ContentIndex: thinkIdx, Message: streaming.Snapshot(partial)}
 				}
 				partial.Content[thinkIdx].Thinking += e.Text
-				eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventThinkingDelta, ContentIndex: thinkIdx, Delta: e.Text, Message: partial}
+				eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventThinkingDelta, ContentIndex: thinkIdx, Delta: e.Text, Message: streaming.Snapshot(partial)}
 			case litellm.ContentDelta:
 				if textIdx < 0 {
 					partial.Content = append(partial.Content, agentgo.TextBlock(""))
 					textIdx = len(partial.Content) - 1
-					eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventTextStart, ContentIndex: textIdx, Message: partial}
+					eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventTextStart, ContentIndex: textIdx, Message: streaming.Snapshot(partial)}
 				}
 				partial.Content[textIdx].Text += e.Text
-				eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventTextDelta, ContentIndex: textIdx, Delta: e.Text, Message: partial}
+				eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventTextDelta, ContentIndex: textIdx, Delta: e.Text, Message: streaming.Snapshot(partial)}
 			case litellm.RefusalDelta:
 				if e.Text == "" {
 					return nil
@@ -365,7 +366,7 @@ func (l *LiteLLMAdapter) GenerateStream(ctx context.Context, messages []agentgo.
 				if textIdx < 0 {
 					partial.Content = append(partial.Content, agentgo.TextBlock(""))
 					textIdx = len(partial.Content) - 1
-					eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventTextStart, ContentIndex: textIdx, Message: partial}
+					eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventTextStart, ContentIndex: textIdx, Message: streaming.Snapshot(partial)}
 				}
 				partial.Content[textIdx].Text += e.Text
 				if partial.Metadata == nil {
@@ -373,7 +374,7 @@ func (l *LiteLLMAdapter) GenerateStream(ctx context.Context, messages []agentgo.
 				}
 				refusal, _ := partial.Metadata["refusal"].(string)
 				partial.Metadata["refusal"] = refusal + e.Text
-				eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventTextDelta, ContentIndex: textIdx, Delta: e.Text, Message: partial}
+				eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventTextDelta, ContentIndex: textIdx, Delta: e.Text, Message: streaming.Snapshot(partial)}
 			case litellm.ToolUseStart:
 				key := toolUseEventKey(e.ID, e.ItemID, e.Index, e.OutputIndex)
 				partial.Content = append(partial.Content, agentgo.ToolCallBlock(agentgo.ToolCall{ID: e.ID, Name: e.Name, ThoughtSignature: e.Signature}))
@@ -381,7 +382,7 @@ func (l *LiteLLMAdapter) GenerateStream(ctx context.Context, messages []agentgo.
 				if key != "" {
 					toolBlockIndices[key] = idx
 				}
-				eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallStart, ToolID: e.ID, Message: partial}
+				eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallStart, ToolID: e.ID, Message: streaming.Snapshot(partial)}
 			case litellm.ToolUseDelta:
 				key := toolUseEventKey(e.ID, e.ItemID, e.Index, e.OutputIndex)
 				idx := findPendingToolCallBlock(partial.Content, toolBlockIndices, key)
@@ -407,7 +408,7 @@ func (l *LiteLLMAdapter) GenerateStream(ctx context.Context, messages []agentgo.
 				}
 				if len(e.ArgumentsDelta) > 0 {
 					toolArgs[key] = append(toolArgs[key], e.ArgumentsDelta...)
-					eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallDelta, ToolID: callID, Delta: string(e.ArgumentsDelta), Message: partial}
+					eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallDelta, ToolID: callID, Delta: string(e.ArgumentsDelta), Message: streaming.Snapshot(partial)}
 				}
 			case litellm.ToolUseDone:
 				key := toolUseEventKey(e.ID, e.ItemID, e.Index, e.OutputIndex)
@@ -427,16 +428,16 @@ func (l *LiteLLMAdapter) GenerateStream(ctx context.Context, messages []agentgo.
 					partial.Content = append(partial.Content, agentgo.ToolCallBlock(completed))
 					idx = len(partial.Content) - 1
 				}
-				eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallEnd, ToolID: completed.ID, ContentIndex: idx, Message: partial, CompletedToolCall: &completed}
+				eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallEnd, ToolID: completed.ID, ContentIndex: idx, Message: streaming.Snapshot(partial), CompletedToolCall: &completed}
 			}
 			return nil
 		})
 
 		if textIdx >= 0 {
-			eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventTextEnd, ContentIndex: textIdx, Message: partial}
+			eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventTextEnd, ContentIndex: textIdx, Message: streaming.Snapshot(partial)}
 		}
 		if thinkIdx >= 0 {
-			eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventThinkingEnd, ContentIndex: thinkIdx, Message: partial}
+			eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventThinkingEnd, ContentIndex: thinkIdx, Message: streaming.Snapshot(partial)}
 		}
 
 		if err != nil {
@@ -463,7 +464,7 @@ func (l *LiteLLMAdapter) GenerateStream(ctx context.Context, messages []agentgo.
 			partial.StopReason = mapStopReason(resp.FinishReason)
 			mergeResponseMetadata(&partial, resp)
 		}
-		eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventDone, Message: partial, StopReason: partial.StopReason}
+		eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventDone, Message: streaming.Snapshot(partial), StopReason: partial.StopReason}
 	}()
 
 	return eventChan, nil

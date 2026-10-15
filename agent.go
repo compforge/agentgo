@@ -587,7 +587,13 @@ func (a *Agent) TotalUsage() Usage {
 	return a.totalUsage
 }
 
-// SetModel changes the LLM provider. Takes effect on the next turn.
+// SetModel changes the LLM provider. Request settings are sampled after BeforeTurn
+// and retained through retries and tool execution. Updates during execution take
+// effect on the next turn; updates inside BeforeTurn apply to that turn.
+//
+// +spec=`Model, tools, system prompt, thinking and cache key form one per-turn snapshot`
+// +case:id=turn_settings,desc=`Change settings during a retrying turn`,expect=`Retries and tools retain old settings; next turn uses new settings`
+// +link=component://docs/kernel.md
 //
 // Purity contract (stable API guarantee, shared by SetThinkingLevel, SetTools,
 // SetSystemPrompt and SetSystemBlocks): a pure field assignment under the
@@ -617,7 +623,7 @@ func (a *Agent) SetContextWindow(n int) {
 	}
 }
 
-// SetSystemPrompt changes the system prompt (single-string mode).
+// SetSystemPrompt changes the system prompt (single-string mode) for the next turn.
 // Clears any multi-block system prompt set via SetSystemBlocks.
 // Purity contract: see SetModel.
 func (a *Agent) SetSystemPrompt(s string) {
@@ -627,7 +633,7 @@ func (a *Agent) SetSystemPrompt(s string) {
 	a.systemBlocks = nil
 }
 
-// SetSystemBlocks sets a multi-block system prompt with per-block cache control.
+// SetSystemBlocks sets a multi-block system prompt with per-block cache control for the next turn.
 // Takes precedence over SetSystemPrompt. Clears the single-string prompt.
 // Purity contract: see SetModel.
 func (a *Agent) SetSystemBlocks(blocks []SystemBlock) {
@@ -770,6 +776,10 @@ func (a *Agent) HasFollowUps() bool {
 // cancelled, drained, and wiped with the rest of the state; a run start
 // attempted after the drain begins fails with ErrRunsHeld instead of being
 // silently clobbered. Must not be called from an event listener (see HoldRuns).
+//
+// +spec=`Reset removes all conversation state, including artifacts, while retaining configuration`
+// +case:id=reset_artifacts,desc=`Reset an Agent restored with artifacts`,expect=`The next run cannot observe previous-session artifacts`
+// +link=component://docs/kernel.md
 func (a *Agent) Reset() {
 	release := a.HoldRuns()
 	defer release()
@@ -778,7 +788,9 @@ func (a *Agent) Reset() {
 	defer a.runMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.artifacts = newArtifactManager()
 	a.messages = nil
+	a.skipNextInitialSteeringPoll = false
 	a.steeringQ = nil
 	a.followUpQ = nil
 	a.isRunning = false

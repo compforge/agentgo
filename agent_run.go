@@ -16,6 +16,7 @@ func (a *Agent) buildConfig(continuing bool) LoopConfig {
 
 	return LoopConfig{
 		artifacts:                a.artifacts,
+		refreshTurnSettings:      a.refreshTurnSettings,
 		Model:                    a.model,
 		MaxTurns:                 a.maxTurns,
 		MaxRetries:               a.maxRetries,
@@ -65,6 +66,19 @@ func (a *Agent) buildConfig(continuing bool) LoopConfig {
 		CacheLastMessage:      a.cacheLastMessage,
 		PromptCacheKey:        a.promptCacheKey,
 	}
+}
+
+// refreshTurnSettings samples the Agent's mutable request settings after BeforeTurn.
+// The loop owns the resulting values until this model/tool turn completes.
+func (a *Agent) refreshTurnSettings(current *AgentContext, config *LoopConfig) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	config.Model = a.model
+	config.ThinkingLevel = a.thinkingLevel
+	config.PromptCacheKey = a.promptCacheKey
+	current.SystemPrompt = a.systemPrompt
+	current.SystemBlocks = append([]SystemBlock(nil), a.systemBlocks...)
+	current.Tools = append([]Tool(nil), a.tools...)
 }
 
 // consumeLoop projects loop events into the stateful Agent view. It must not

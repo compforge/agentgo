@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/compforge/agentgo"
+	"github.com/compforge/agentgo/internal/streaming"
 )
 
 // FrameType identifies a proxy stream frame.
@@ -100,25 +101,25 @@ func (p *Model) GenerateStream(ctx context.Context, messages []agentgo.Message, 
 				partial.Content[idx].Text += fr.Delta
 				if !textStarted {
 					textStarted = true
-					out <- agentgo.StreamEvent{Type: agentgo.StreamEventTextStart, ContentIndex: idx, Message: partial}
+					out <- agentgo.StreamEvent{Type: agentgo.StreamEventTextStart, ContentIndex: idx, Message: streaming.Snapshot(partial)}
 				}
-				out <- agentgo.StreamEvent{Type: agentgo.StreamEventTextDelta, ContentIndex: idx, Delta: fr.Delta, Message: partial}
+				out <- agentgo.StreamEvent{Type: agentgo.StreamEventTextDelta, ContentIndex: idx, Delta: fr.Delta, Message: streaming.Snapshot(partial)}
 
 			case FrameThinkingDelta:
 				idx := findOrCreate(&partial.Content, agentgo.ContentThinking)
 				partial.Content[idx].Thinking += fr.Delta
 				if !thinkStarted {
 					thinkStarted = true
-					out <- agentgo.StreamEvent{Type: agentgo.StreamEventThinkingStart, ContentIndex: idx, Message: partial}
+					out <- agentgo.StreamEvent{Type: agentgo.StreamEventThinkingStart, ContentIndex: idx, Message: streaming.Snapshot(partial)}
 				}
-				out <- agentgo.StreamEvent{Type: agentgo.StreamEventThinkingDelta, ContentIndex: idx, Delta: fr.Delta, Message: partial}
+				out <- agentgo.StreamEvent{Type: agentgo.StreamEventThinkingDelta, ContentIndex: idx, Delta: fr.Delta, Message: streaming.Snapshot(partial)}
 
 			case FrameToolCallStart:
 				partial.Content = append(partial.Content, agentgo.ToolCallBlock(agentgo.ToolCall{
 					ID:   fr.ToolCallID,
 					Name: fr.ToolName,
 				}))
-				out <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallStart, ToolID: fr.ToolCallID, Message: partial}
+				out <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallStart, ToolID: fr.ToolCallID, Message: streaming.Snapshot(partial)}
 
 			case FrameToolCallDelta:
 				callID := fr.ToolCallID
@@ -128,13 +129,13 @@ func (p *Model) GenerateStream(ctx context.Context, messages []agentgo.Message, 
 						callID = partial.Content[idx].ToolCall.ID
 					}
 				}
-				out <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallDelta, ToolID: callID, Delta: fr.Delta, Message: partial}
+				out <- agentgo.StreamEvent{Type: agentgo.StreamEventToolCallDelta, ToolID: callID, Delta: fr.Delta, Message: streaming.Snapshot(partial)}
 
 			case FrameDone:
 				partial.StopReason = fr.StopReason
 				partial.Usage = fr.Usage
 				partial.Timestamp = time.Now()
-				out <- agentgo.StreamEvent{Type: agentgo.StreamEventDone, Message: partial, StopReason: fr.StopReason}
+				out <- agentgo.StreamEvent{Type: agentgo.StreamEventDone, Message: streaming.Snapshot(partial), StopReason: fr.StopReason}
 
 			case FrameError:
 				msg := fr.Error

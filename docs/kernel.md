@@ -28,6 +28,7 @@ Agent Loop 会接收文件、工具结果等材料，并在运行中产生和更
 内存实现支持并发访问；业务对象不深拷贝，共享内容应通过替换或由应用同步更新。
 
 同一 Agent 的连续 Run 共用材料；turn 推进、重试、消息替换和 compaction 不会隐式删除材料。
+`Reset` 结束旧会话状态，会清理消息、队列、材料与运行进度，同时保留配置。
 `AgentState.Artifacts` 保存材料值，随 Snapshot 编码和恢复，具体类型由应用注册到 codec；整个
 Snapshot 替换同时替换消息与材料。宿主决定存储位置及持久化时机。
 裸 AgentLoop 根据 InitialState 建立独立 Manager，并通过状态事件交付材料值；新建 Agent 和子 Loop
@@ -216,3 +217,14 @@ Sync 记录已接受的基线；Transform 和候选准备只改变视图观察�
 普通模型重试使用已接受的基线重新转换请求，不重复压缩。provider overflow 单独触发一次恢复并重试，
 提交型恢复更新基线，非提交型恢复只提供重试视图；同一逻辑调用保持 Execution ID，Attempt 递增。
 摘要内部模型调用经过 ExecuteModel 和模型 Middleware，使用同一材料准备态，不递归进入会话准备流程。
+
+### Turn 配置与流式事件
+
+Stateful Agent 在 `BeforeTurn` 返回后统一读取 model、tools、system prompt/blocks、thinking 和
+prompt cache key。该配置覆盖本 turn 的模型重试和工具执行；执行期间的 setter 更新留给下一 turn。
+因此模型看到的工具定义与随后调用的工具实例一致，`BeforeTurn` 中的 setter 更新则直接用于本 turn。
+裸 `AgentLoop` 使用调用方传入的固定配置。ContextManager 和模型对象内部的可变策略仍由其各自契约管理。
+
+流式事件发布后，其消息内容保持稳定，消费者可在后续生成期间读取或保留它。内置 llm/proxy adapter
+在发送前复制可变的消息字段；Metadata 的不透明值视为只读，后续变化通过替换条目表达。
+事件消费者也应只读使用 payload，避免影响其他订阅者。
