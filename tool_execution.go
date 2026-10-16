@@ -48,7 +48,7 @@ func executeSingleToolCall(ctx context.Context, tools []Tool, execution ToolExec
 		if !result.IsError && result.ToolName == "" {
 			result.ToolName = call.Name
 		}
-		sink.emit(Event{Type: EventToolExecEnd, Execution: executionRef(execution.Execution), ToolID: call.ID, Tool: call.Name, ToolLabel: label, Result: result.Content, IsError: result.IsError, Disposition: disposition, Err: executionErr})
+		sink.emit(Event{Type: EventToolExecEnd, Execution: executionRef(execution.Execution), ToolID: call.ID, Tool: call.Name, ToolLabel: label, Result: result.Content, ToolResult: &result, IsError: result.IsError, Disposition: disposition, Err: executionErr})
 	}()
 	execute := func(ctx context.Context, execution ToolExecution) (ToolResult, error) {
 		disposition = ToolRejected
@@ -262,6 +262,7 @@ func failToolCall(sink eventSink, execution ToolExecution, label, msg string, co
 		Tool:        call.Name,
 		ToolLabel:   label,
 		Result:      result.Content,
+		ToolResult:  &result,
 		IsError:     true,
 		Disposition: ToolSkipped,
 	})

@@ -23,6 +23,9 @@ const (
 	// attempt, including internal context summarization calls.
 	EventModelExecStart EventType = "model_exec_start"
 	EventModelExecEnd   EventType = "model_exec_end"
+	// EventModelRequest carries the effective request passed to the model
+	// executor after middleware. Short-circuited calls do not emit it.
+	EventModelRequest EventType = "model_request"
 	// EventModelResponse fires after a conversation model call and any tool
 	// executions it triggered. Internal model calls such as context summaries
 	// use model_exec_start/model_exec_end without becoming conversation output.
@@ -125,6 +128,8 @@ type Event struct {
 	// Tool.Execute/ExecuteContent; execution events include middleware and gates.
 	Disposition  ToolDisposition
 	Execution    *Execution      // shared coordinate for model/tool/compaction execution facts
+	ModelRequest *LLMRequest     // for model_request; immutable after publication
+	ToolResult   *ToolResult     // for tool_exec_end, including rich content
 	Message      AgentMessage    // for message_start/update/end, turn_end
 	Delta        string          // text delta for message_update
 	DeltaKind    DeltaKind       // for message_update: what kind of delta

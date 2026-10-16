@@ -29,8 +29,8 @@ type AgentContext struct {
 
 // LLMRequest carries the inputs to a single LLM call.
 type LLMRequest struct {
-	Messages []Message
-	Tools    []ToolSpec
+	Messages []Message  `json:"messages"`
+	Tools    []ToolSpec `json:"tools,omitempty"`
 }
 
 // LLMResponse carries the result of a single LLM call.

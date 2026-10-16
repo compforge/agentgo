@@ -126,6 +126,21 @@ Event 的 `Timestamp` 在源头、进入 channel 前记录，消费者不应以�
 其间的流式输出与背压，不等同于 provider 服务端耗时。正常运行时 channel 使用背压；取消后维持既有的
 best-effort 投递，消费者需持续 drain，不能把缺失结束事件解释成成功，也不能假定所有结束事件必达。
 
+## 局部 Session 与外部观测
+
+可选的 `session` 包消费同一 Event stream，记录一个逻辑会话的模型请求/响应、工具输入/结果、
+已提交消息、上下文变化及终态。一个 Session 可以包含顺序运行的多个 Run；并发独立 Loop 各自拥有
+Session。Session ID + Run ID + Execution ID + Attempt 形成可供外部 timeline 引用的调用坐标。
+
+`model_request` 在 middleware 之后、模型 executor 之前发布实际请求；短路调用没有 executor 请求。
+`model_exec_end` 保留模型结果或错误，`tool_exec_end.ToolResult` 保留包括图片在内的完整工具结果。
+工具请求参数与授权后的实际调用参数仍分别来自 `tool_exec_start` 和 `tool_invoke_start`。
+
+Session 只负责局部记录，不知道 Unit、Review、质量判定或全局调度。外部 timeline 持有全局动作关系
+和时间信息，通过引用读取 Session 内容。没有 timeline 依赖，也不需要恢复整个业务流程才能分析记录。
+Session 不自动将 State 或流式 partial snapshot 写入文件；宿主可显式保存 checkpoint，日志和恢复状态
+保持不同语义。文件协议、接入和失败边界见 [Session](session.md)。
+
 ## ContextItem 与 ContextDemand
 
 `ContextItem` 描述模型调用前的实际 Context 中存在哪些可识别信息；`ContextDemand` 描述轨迹暴露了
