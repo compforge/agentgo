@@ -14,6 +14,7 @@ Event、调度与多 Agent 的通用执行能力，但不内建具体业务流�
 ```text
 agentgo/
 ├── *.go          Agent / AgentLoop、AgentMessage / Message、Artifact、Tool、Event、Context 契约及调度入口
+├── session/      可选的局部会话 JSONL 记录、运行引用、读取与显式 checkpoint；不拥有业务调度或全局 timeline
 ├── codec/        通用 tagged value、类型注册与 JSON 编解码
 ├── context/      默认 ContextEngine、可替换 Compactor、投影、压缩、summary 与 overflow recovery
 ├── llm/          模型 Provider 适配；核心包不依赖具体 LLM SDK
@@ -45,7 +46,7 @@ agentgo/
 6. **编码机制不绑定存储或传输策略**：`codec` 提供通用 tagged value、类型注册和编解码机制；
    `AgentState` 是 Loop state，`AgentSnapshot` 聚合 stateful Agent 已接受但未消费的 queue；stateful
    Agent 的 `SnapshotLoader` / `BeforeRun` / `AfterRun` 位于 Loop 外层，分别承载恢复、初始化与收尾；恢复与初始化成功后统一提交准备态，裸 `AgentLoop` 不提供同名
-   hook。持久化、进程交接、RPC 与进入 Agent 前的 durable inbox 均由宿主负责。
+   hook。`session` 包提供可选的文件记录与显式 checkpoint 机制；存储位置、保存策略、进程交接、RPC 与进入 Agent 前的 durable inbox 均由宿主负责。
 7. **版本随公开契约演进**：`VERSION` 表达仓库当前发布版本；公开 API、可观察行为或依赖基线变化时，
    在同一 PR 中按语义版本同步升级，避免代码能力与可识别版本脱节。
 8. **Execution 是运行坐标而非外部账本模型**：逻辑执行在一次 Run 内保持稳定 `ID`，物理重试递增
@@ -55,5 +56,6 @@ agentgo/
 
 - `README.md` / `README_CN.md` —— 产品定位、能力与最短使用路径
 - `docs/kernel.md` —— Message-native 内核、Artifact、ContextItem / ContextDemand 与轨迹驱动优化
+- `docs/session.md` —— 局部 Session 身份、调用内容记录与外部 timeline 关联
 - `doc.go` —— Go Package 总览
 - `examples/` —— 可运行示例

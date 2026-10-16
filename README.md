@@ -126,6 +126,8 @@ _ = restored.Continue(ctx)
 
 Hook State / Snapshot values describe callback entry. `AfterTurn` artifact writes enter the following turn checkpoint; `AfterRun` writes enter the terminal event. If finalization updates artifacts, persist `agent.Snapshot()` from a terminal listener to include those updates.
 
+The optional [`session`](docs/session.md) package records each logical conversation in JSONL: effective model requests, responses, tool inputs/results, context changes, and terminal facts. Run-scoped call references let an external timeline link to content without copying it. It supports explicit codec-based checkpoints but does not automatically checkpoint, resume loops, or orchestrate a business workflow.
+
 `Execution` gives expensive or externally visible work one run-scoped identity. A retry keeps the same `ID` and increments `Attempt`; `ModelExecution` and `ToolExecution` carry that coordinate through middleware and the Event stream. Internal summary calls are child executions of compaction, so hosts can correlate or replay known outcomes without AgentGo depending on a ledger or tracing model.
 
 ## Extension points

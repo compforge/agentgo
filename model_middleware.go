@@ -3,6 +3,8 @@ package agentgo
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 )
 
 // ModelExecution describes one physical model attempt. Execution.ID
@@ -59,6 +61,9 @@ func withModelExecutionRuntime(ctx context.Context, middlewares []ModelMiddlewar
 // ParentID inherits the enclosing execution. Panics become execution errors.
 // Nested calls must finish before their owning tool or context operation returns;
 // the runtime and event sink have the lifetime of the enclosing AgentLoop.
+//
+// +spec=`model_request observes the executor input after middleware; short-circuits have no executor request`
+// +link=component://docs/session.md
 func ExecuteModel(ctx context.Context, execution ModelExecution, next ModelExecuteFunc) (result ModelResult, err error) {
 	runtime, _ := ctx.Value(modelExecutionRuntimeKey{}).(modelExecutionRuntime)
 	if runtime.artifacts != nil {
@@ -80,7 +85,13 @@ func ExecuteModel(ctx context.Context, execution ModelExecution, next ModelExecu
 			runtime.emit(Event{Type: EventModelExecEnd, Execution: executionRef(execution.Execution), Message: result.Message, Err: err})
 		}
 	}()
-	execute := next
+	execute := func(ctx context.Context, call ModelExecution) (ModelResult, error) {
+		if runtime.emit != nil {
+			request := snapshotModelRequest(call.Request)
+			runtime.emit(Event{Type: EventModelRequest, Execution: executionRef(call.Execution), ModelRequest: &request})
+		}
+		return next(ctx, call)
+	}
 	if len(runtime.middlewares) > 0 {
 		execute = buildModelMiddlewareChain(execute, runtime.middlewares)
 	}
@@ -96,4 +107,37 @@ func buildModelMiddlewareChain(exec ModelExecuteFunc, middlewares []ModelMiddlew
 		}
 	}
 	return exec
+}
+
+// snapshotModelRequest detaches mutable message containers before publication.
+// Opaque metadata values and tool schemas follow the existing read-only contract.
+func snapshotModelRequest(request LLMRequest) LLMRequest {
+	request.Messages = slices.Clone(request.Messages)
+	request.Tools = slices.Clone(request.Tools)
+	for i := range request.Messages {
+		m := &request.Messages[i]
+		m.Content = slices.Clone(m.Content)
+		m.Metadata = maps.Clone(m.Metadata)
+		if m.Usage != nil {
+			usage := *m.Usage
+			if usage.Cost != nil {
+				cost := *usage.Cost
+				usage.Cost = &cost
+			}
+			m.Usage = &usage
+		}
+		for j := range m.Content {
+			b := &m.Content[j]
+			if b.ToolCall != nil {
+				call := *b.ToolCall
+				call.Args = slices.Clone(call.Args)
+				b.ToolCall = &call
+			}
+			if b.Image != nil {
+				image := *b.Image
+				b.Image = &image
+			}
+		}
+	}
+	return request
 }

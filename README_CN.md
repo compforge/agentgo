@@ -126,6 +126,8 @@ _ = restored.Continue(ctx)
 
 Hook 参数中的 State / Snapshot 是回调入口快照。`AfterTurn` 写入的材料进入随后的 turn checkpoint；`AfterRun` 写入的材料进入终态事件。若收尾 Hook 会修改材料，需在终态 listener 中读取 `agent.Snapshot()` 保存最终状态。
 
+可选的 [`session`](docs/session.md) 包按逻辑会话记录 JSONL：实际模型请求、响应、工具输入/结果、上下文变化和终态。外部 timeline 可通过 Session / Run / Execution / Attempt 引用内容，无需复制正文。它提供显式 checkpoint 保存与读取，不自动保存快照、恢复 Loop 或编排业务流程。
+
 `Execution` 为昂贵或对外可见的动作提供一次 Run 内稳定的身份。同一逻辑调用重试时保持 `ID` 不变并递增 `Attempt`；`ModelExecution` 与 `ToolExecution` 把该坐标贯穿 Middleware 和 Event stream。内部 summary 是 compaction 的子 Execution，宿主因此可以关联动作或复用已知结果，而 AgentGo 无需绑定 Ledger 或 Trace 的数据模型。
 
 ## 扩展点
