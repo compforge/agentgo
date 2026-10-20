@@ -48,6 +48,7 @@ type Record struct {
 // a full AgentState on every event. Message is a codec-encoded AgentMessage;
 // ModelRequest is the final model-facing representation, not recovery state.
 type EventData struct {
+	ModelAttempt     *agentgo.ModelAttempt       `json:"model_attempt,omitempty"`
 	ModelCall        *agentgo.ModelCallSettings  `json:"model_call,omitempty"`
 	LengthRecovery   *agentgo.LengthRecoveryInfo `json:"length_recovery,omitempty"`
 	TurnIndex        int                         `json:"turn_index,omitempty"`

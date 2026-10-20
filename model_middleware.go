@@ -135,6 +135,11 @@ func snapshotModelRequest(request LLMRequest) LLMRequest {
 				call.Args = slices.Clone(call.Args)
 				b.ToolCall = &call
 			}
+			if b.ProviderState != nil {
+				state := *b.ProviderState
+				state.Data = slices.Clone(state.Data)
+				b.ProviderState = &state
+			}
 			if b.Image != nil {
 				image := *b.Image
 				b.Image = &image

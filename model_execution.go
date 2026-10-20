@@ -70,6 +70,10 @@ func callLLMWithRetry(ctx context.Context, agentCtx *AgentContext, config LoopCo
 		// that a fresh request can recover from.
 		var pse *PartialStreamError
 		retryable := isRetryable(err) || errors.As(err, &pse)
+		var retryPolicy RetryableError
+		if errors.As(err, &retryPolicy) && !retryPolicy.Retryable() {
+			retryable = false
+		}
 		if !retryable || attempt == maxRetries+1 {
 			return Message{}, info, err
 		}

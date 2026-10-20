@@ -48,7 +48,7 @@ func (p *captureStreamProvider) Stream(_ context.Context, req *litellm.Request) 
 	events := p.events
 	if len(events) == 0 {
 		events = []litellm.Event{
-			litellm.ContentDelta{Text: "ok"},
+			litellm.BlockStart{Index: 0, Block: litellm.TextBlock{}}, litellm.TextDelta{Index: 0, Text: "ok"}, litellm.BlockEnd{Index: 0},
 			litellm.DoneEvent{FinishReason: litellm.FinishReasonStop, Provider: "capture", Model: req.Model},
 		}
 	}
@@ -126,7 +126,7 @@ func TestGenerateNormalizesMalformedToolArgumentsFromModel(t *testing.T) {
 			Model:        "m",
 			FinishReason: litellm.FinishReasonToolCall,
 			Blocks: []litellm.Block{
-				litellm.ToolUseBlock{ID: "call_bad", Name: "lookup", Arguments: json.RawMessage(`{"q":`)},
+				litellm.ToolUseBlock{ID: "call_bad", Name: "lookup", Arguments: `{"q":`},
 			},
 		}, nil
 	}
@@ -159,7 +159,6 @@ func TestGeneratePreservesRefusalMetadata(t *testing.T) {
 			Model:           "m",
 			FinishReason:    litellm.FinishReasonSafety,
 			FinishReasonRaw: "content_filter",
-			Refusal:         "I can't help.",
 			Blocks:          []litellm.Block{litellm.Text("I can't help.")},
 		}, nil
 	}
@@ -171,7 +170,7 @@ func TestGeneratePreservesRefusalMetadata(t *testing.T) {
 	if resp.Message.StopReason != agentgo.StopReasonSafety || resp.Message.TextContent() != "I can't help." {
 		t.Fatalf("stop/text = %q/%q", resp.Message.StopReason, resp.Message.TextContent())
 	}
-	if resp.Message.Metadata["refusal"] != "I can't help." || resp.Message.Metadata["finish_reason_raw"] != "content_filter" {
+	if resp.Message.Metadata["finish_reason_raw"] != "content_filter" {
 		t.Fatalf("metadata = %#v", resp.Message.Metadata)
 	}
 }
@@ -190,89 +189,18 @@ type capabilityProvider struct {
 	caps litellm.Capabilities
 }
 
-func (p *capabilityProvider) Capabilities(string) litellm.Capabilities {
+func (p *capabilityProvider) Capabilities() litellm.Capabilities {
 	return p.caps
 }
 
 func TestLiteLLMAdapterCapabilities(t *testing.T) {
-	provider := &capabilityProvider{
-		caps: litellm.Capabilities{
-			Provider: "capture",
-			Model:    "m",
-			Thinking: litellm.ThinkingCapabilities{
-				Supported:     litellm.SupportYes,
-				Disable:       litellm.SupportYes,
-				Efforts:       []string{"minimal", "high", "max", "vendor-only"},
-				BudgetTokens:  litellm.SupportPartial,
-				IncludeOutput: litellm.SupportYes,
-				Notes:         []string{"budget varies by model"},
-			},
-			Tools: litellm.ToolCapabilities{
-				Calls:               litellm.SupportYes,
-				ParallelCalls:       litellm.SupportPartial,
-				StrictSchema:        litellm.SupportYes,
-				Choice:              litellm.SupportNo,
-				MultimodalResults:   litellm.SupportUnknown,
-				RequiresAdjacency:   true,
-				RoundTripSignatures: litellm.SupportYes,
-				HostedProviderTools: litellm.SupportPartial,
-			},
-			Structured: litellm.StructuredCapabilities{
-				JSONObject: litellm.SupportYes,
-				JSONSchema: litellm.SupportYes,
-				Strict:     litellm.SupportPartial,
-				PromptOnly: true,
-			},
-			Streaming: litellm.StreamingCapabilities{
-				Supported:       litellm.SupportYes,
-				Usage:           litellm.SupportPartial,
-				ReasoningDeltas: litellm.SupportYes,
-				ToolCallDeltas:  litellm.SupportYes,
-				NativeResponses: litellm.SupportNo,
-				IdleTimeout:     litellm.SupportYes,
-			},
-			Usage: litellm.UsageCapabilities{
-				InputTokens:      litellm.SupportYes,
-				OutputTokens:     litellm.SupportYes,
-				TotalTokens:      litellm.SupportYes,
-				ReasoningTokens:  litellm.SupportPartial,
-				CacheReadTokens:  litellm.SupportYes,
-				CacheWriteTokens: litellm.SupportNo,
-			},
-		},
+	p := &capabilityProvider{caps: litellm.Capabilities{ThinkingEffort: true, DisableThinking: true}}
+	caps := NewLiteLLMAdapter("m", mustClient(t, p)).Capabilities()
+	if caps.Provider != "capture" || caps.Model != "m" || !caps.ProviderBaseline || caps.Thinking.Supported != SupportYes || caps.Thinking.Disable != SupportYes {
+		t.Fatalf("capabilities=%+v", caps)
 	}
-	model := NewLiteLLMAdapter("m", mustClient(t, provider))
-	caps := model.Capabilities()
-
-	if caps.Provider != "capture" || caps.Model != "m" {
-		t.Fatalf("identity = %s/%s, want capture/m", caps.Provider, caps.Model)
-	}
-	if !caps.ProviderBaseline {
-		t.Fatal("litellm capabilities must be marked as a provider baseline")
-	}
-	if caps.Thinking.Supported != SupportYes || caps.Thinking.Disable != SupportYes {
-		t.Fatalf("thinking support = %+v", caps.Thinking)
-	}
-	if !caps.Thinking.SupportsEffort(agentgo.ThinkingMinimal) || !caps.Thinking.SupportsEffort(agentgo.ThinkingMax) {
-		t.Fatalf("thinking efforts = %#v", caps.Thinking.Efforts)
-	}
-	if caps.Thinking.SupportsEffort(agentgo.ThinkingLevel("vendor-only")) {
-		t.Fatalf("vendor-only effort leaked into agentgo capabilities: %#v", caps.Thinking.Efforts)
-	}
-	if caps.Tools.StrictSchema != SupportYes || !caps.Tools.RequiresAdjacency {
-		t.Fatalf("tool capabilities = %+v", caps.Tools)
-	}
-	if caps.Structured.JSONSchema != SupportYes || caps.Structured.Strict != SupportPartial || !caps.Structured.PromptOnly {
-		t.Fatalf("structured capabilities = %+v", caps.Structured)
-	}
-	if caps.Streaming.Usage != SupportPartial || caps.Streaming.IdleTimeout != SupportYes {
-		t.Fatalf("streaming capabilities = %+v", caps.Streaming)
-	}
-	if caps.Usage.CacheReadTokens != SupportYes || caps.Usage.CacheWriteTokens != SupportNo {
-		t.Fatalf("usage capabilities = %+v", caps.Usage)
-	}
-	if len(caps.Thinking.Notes) != 1 || caps.Thinking.Notes[0] != "budget varies by model" {
-		t.Fatalf("thinking notes = %#v", caps.Thinking.Notes)
+	if len(caps.Thinking.Efforts) != 0 || caps.Tools.StrictSchema != SupportUnknown {
+		t.Fatal("invented model-specific capability facts")
 	}
 }
 
@@ -322,7 +250,7 @@ func TestGenerateStreamFinalizesArglessToolCall(t *testing.T) {
 				Header:     make(http.Header),
 			}, nil
 		}),
-	}, compat.Spec{Name: "mimo"})
+	})
 	if err != nil {
 		t.Fatalf("compat.New: %v", err)
 	}
@@ -373,7 +301,7 @@ func TestGenerateStreamMarksMalformedToolArgumentsInvalid(t *testing.T) {
 				Header:     make(http.Header),
 			}, nil
 		}),
-	}, compat.Spec{Name: "compat"})
+	})
 	if err != nil {
 		t.Fatalf("compat.New: %v", err)
 	}
@@ -453,11 +381,11 @@ func TestGenerateStreamNormalizesMalformedHistoricalToolArguments(t *testing.T) 
 	}
 }
 
-func TestGenerateStreamFinalMessageNormalizesToolArgumentsWithoutDoneEvent(t *testing.T) {
+func TestGenerateStreamFinalMessageNormalizesTruncatedToolArguments(t *testing.T) {
 	provider := &captureStreamProvider{
 		events: []litellm.Event{
-			litellm.ToolUseStart{ID: "call_bad", Name: "subagent"},
-			litellm.ToolUseDelta{ID: "call_bad", ArgumentsDelta: []byte(`{"agent":"writer",`)},
+			litellm.BlockStart{Index: 0, Block: litellm.ToolUseBlock{ID: "call_bad", Name: "subagent"}},
+			litellm.ToolUseDelta{Index: 0, Arguments: `{"agent":"writer",`}, litellm.BlockEnd{Index: 0},
 			litellm.DoneEvent{FinishReason: litellm.FinishReasonToolCall, Provider: "capture", Model: "m"},
 		},
 	}
@@ -494,8 +422,8 @@ func TestGenerateStreamFinalMessageNormalizesToolArgumentsWithoutDoneEvent(t *te
 
 func TestGenerateStreamPreservesRefusal(t *testing.T) {
 	provider := &captureStreamProvider{events: []litellm.Event{
-		litellm.RefusalDelta{Text: "I can't help."},
-		litellm.DoneEvent{FinishReason: litellm.FinishReasonStop, FinishReasonRaw: "completed", Provider: "capture", Model: "m"},
+		litellm.BlockStart{Index: 0, Block: litellm.TextBlock{}}, litellm.TextDelta{Index: 0, Text: "I can't help."}, litellm.BlockEnd{Index: 0},
+		litellm.DoneEvent{FinishReason: litellm.FinishReasonSafety, FinishReasonRaw: "completed", Provider: "capture", Model: "m"},
 	}}
 	model := NewLiteLLMAdapter("m", mustClient(t, provider))
 	ch, err := model.GenerateStream(context.Background(), []agentgo.Message{agentgo.UserMsg("hi")}, nil)
@@ -514,7 +442,7 @@ func TestGenerateStreamPreservesRefusal(t *testing.T) {
 	if final.StopReason != agentgo.StopReasonSafety || final.TextContent() != "I can't help." {
 		t.Fatalf("stop/text = %q/%q", final.StopReason, final.TextContent())
 	}
-	if final.Metadata["refusal"] != "I can't help." || final.Metadata["finish_reason_raw"] != "completed" {
+	if final.Metadata["finish_reason_raw"] != "completed" {
 		t.Fatalf("metadata = %#v", final.Metadata)
 	}
 }
@@ -540,7 +468,7 @@ func TestGenerateStreamAttributesInterleavedToolCallDeltas(t *testing.T) {
 				Header:     make(http.Header),
 			}, nil
 		}),
-	}, compat.Spec{Name: "mimo"})
+	})
 	if err != nil {
 		t.Fatalf("compat.New: %v", err)
 	}

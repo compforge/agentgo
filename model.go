@@ -180,8 +180,8 @@ type LoopConfig struct {
 	// PromptCacheKey, when non-empty, is attached to every LLM request as the
 	// provider's prompt-cache routing identity (e.g. OpenAI prompt_cache_key).
 	// Use one key per conversation so all requests of a session land on the
-	// same cache shard. The adapter drops the hint for providers without
-	// key-routed caching. Empty (default) sends nothing.
+	// same cache shard. The selected litellm provider validates this native hint;
+	// unsupported options return an error. Empty (default) sends nothing.
 	PromptCacheKey string
 }
 
@@ -211,6 +211,7 @@ type CallOption func(*CallConfig)
 
 // CallConfig holds per-call configuration resolved from CallOptions.
 type CallConfig struct {
+	Temperature    *float64
 	ThinkingLevel  ThinkingLevel
 	ThinkingBudget int    // max thinking tokens, 0 = use provider default
 	APIKey         string `json:"-"` // local per-call override; never serialize credentials
@@ -273,8 +274,8 @@ func WithAPIKey(key string) CallOption {
 
 // WithCallPromptCacheKey sets the prompt-cache routing identity for a single
 // LLM call. Providers with key-routed prefix caching (OpenAI prompt_cache_key)
-// route requests sharing a key to the same cache shard; the adapter drops the
-// hint for providers without support.
+// route requests sharing a key to the same cache shard. The selected provider
+// validates support; do not set this option for providers without key routing.
 func WithCallPromptCacheKey(key string) CallOption {
 	return func(c *CallConfig) { c.PromptCacheKey = key }
 }

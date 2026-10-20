@@ -38,13 +38,22 @@ const (
 
 // ContentBlock is a tagged union for message content.
 // Exactly one payload field is populated, matching the Type value.
+// ProviderState is opaque model replay data. The issuing provider alone interprets
+// it; preserve it with its content block through recording and compaction.
+type ProviderState struct {
+	Provider string          `json:"provider" codec:"provider"`
+	Model    string          `json:"model,omitempty" codec:"model,omitempty"`
+	Data     json.RawMessage `json:"data,omitempty" codec:"data,omitempty"`
+}
+
 type ContentBlock struct {
-	Type     ContentType `json:"type" codec:"type"`
-	Text     string      `json:"text,omitempty" codec:"text,omitempty"`
-	Thinking string      `json:"thinking,omitempty" codec:"thinking,omitempty"`
-	ToolCall *ToolCall   `json:"tool_call,omitempty" codec:"tool_call,omitempty"`
-	Image    *ImageData  `json:"image,omitempty" codec:"image,omitempty"`
-	ToolName string      `json:"tool_name,omitempty" codec:"tool_name,omitempty"` // tool_reference: referenced tool name
+	ProviderState *ProviderState `json:"provider_state,omitempty" codec:"provider_state,omitempty"`
+	Type          ContentType    `json:"type" codec:"type"`
+	Text          string         `json:"text,omitempty" codec:"text,omitempty"`
+	Thinking      string         `json:"thinking,omitempty" codec:"thinking,omitempty"`
+	ToolCall      *ToolCall      `json:"tool_call,omitempty" codec:"tool_call,omitempty"`
+	Image         *ImageData     `json:"image,omitempty" codec:"image,omitempty"`
+	ToolName      string         `json:"tool_name,omitempty" codec:"tool_name,omitempty"` // tool_reference: referenced tool name
 }
 
 // ImageData holds image content as base64 data or a URL.
