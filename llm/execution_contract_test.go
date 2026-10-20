@@ -3,7 +3,6 @@ package llm
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,7 +12,7 @@ import (
 	"github.com/voocel/litellm"
 )
 
-// +case:id=model_failure_evidence_pipeline,desc=`Direct and streamed calls fail with reasoning, tool content, opaque state and usage`,expect=`One execution and routed attempt are recorded; failed content never commits or invokes tools`
+// +case:id=model_failure_evidence_pipeline,desc=`Standalone and Loop streaming calls fail with reasoning, tool content, opaque state and usage`,expect=`One execution and routed attempt are recorded; failed content never commits or invokes tools`
 func TestFailedModelExecutionEvidence(t *testing.T) {
 	for _, streamed := range []bool{false, true} {
 		name := "direct"
@@ -23,28 +22,15 @@ func TestFailedModelExecutionEvidence(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			state := &litellm.ProviderState{Provider: "capture", Model: "test", Data: json.RawMessage(`{"signature":"opaque"}`)}
 			usage := litellm.Usage{InputTokens: 5, OutputTokens: 7, ReasoningTokens: 3}
-			cause := errors.New("provider stream failed")
-			var model agentgo.ChatModel
-			var request func() *litellm.Request
-			if streamed {
-				provider := &captureStreamProvider{events: []litellm.Event{
-					litellm.BlockStart{Index: 0, Block: litellm.ReasoningBlock{State: state}},
-					litellm.ReasoningDelta{Index: 0, Text: "partial reasoning"}, litellm.BlockEnd{Index: 0},
-					litellm.BlockStart{Index: 1, Block: litellm.TextBlock{}}, litellm.TextDelta{Index: 1, Text: "partial output"}, litellm.BlockEnd{Index: 1},
-					litellm.BlockStart{Index: 2, Block: litellm.ToolUseBlock{ID: "call", Name: "inspect"}}, litellm.ToolUseDelta{Index: 2, Arguments: `{}`}, litellm.BlockEnd{Index: 2},
-					litellm.UsageEvent{Usage: usage}, // EOF before Done must remain a failure.
-				}}
-				model = NewLiteLLMAdapter("test", mustClient(t, provider))
-				request = func() *litellm.Request { return provider.lastReq }
-			} else {
-				provider := &captureProvider{chatFunc: func(context.Context, *litellm.Request) (*litellm.Response, error) {
-					return &litellm.Response{Provider: "capture", Model: "test", Usage: usage, Blocks: []litellm.Block{
-						litellm.ReasoningBlock{Text: "partial reasoning", State: state}, litellm.TextBlock{Text: "partial output"}, litellm.ToolUseBlock{ID: "call", Name: "inspect", Arguments: `{}`},
-					}}, cause
-				}}
-				model = NewLiteLLMAdapter("test", mustClient(t, provider))
-				request = func() *litellm.Request { return provider.lastReq }
-			}
+			provider := &captureStreamProvider{events: []litellm.Event{
+				litellm.BlockStart{Index: 0, Block: litellm.ReasoningBlock{State: state}},
+				litellm.ReasoningDelta{Index: 0, Text: "partial reasoning"}, litellm.BlockEnd{Index: 0},
+				litellm.BlockStart{Index: 1, Block: litellm.TextBlock{}}, litellm.TextDelta{Index: 1, Text: "partial output"}, litellm.BlockEnd{Index: 1},
+				litellm.BlockStart{Index: 2, Block: litellm.ToolUseBlock{ID: "call", Name: "inspect"}}, litellm.ToolUseDelta{Index: 2, Arguments: `{}`}, litellm.BlockEnd{Index: 2},
+				litellm.UsageEvent{Usage: usage}, // EOF before Done must remain a failure.
+			}}
+			model := NewLiteLLMAdapter("test", mustClient(t, provider))
+			request := func() *litellm.Request { return provider.lastReq }
 			router, err := NewRouter([]Route{{Name: "primary", Model: model}}, RouterConfig{})
 			if err != nil {
 				t.Fatal(err)
@@ -78,17 +64,18 @@ func TestFailedModelExecutionEvidence(t *testing.T) {
 					t.Error("failed tool content executed")
 					return nil, nil
 				})
-				for event := range agentgo.AgentLoop(t.Context(), []agentgo.AgentMessage{agentgo.UserMsg("test")}, agentgo.AgentContext{Tools: []agentgo.Tool{tool}}, agentgo.LoopConfig{Model: router, MaxRetries: 3, ModelMiddlewares: []agentgo.ModelMiddleware{middleware}}) {
+				for event := range agentgo.AgentLoop(t.Context(), []agentgo.AgentMessage{agentgo.UserMsg("test")}, agentgo.AgentContext{Tools: []agentgo.Tool{tool}}, agentgo.LoopConfig{Model: router, MaxRetries: 3, ModelExecutor: agentgo.NewModelExecutor(agentgo.ModelExecutorConfig{Middlewares: []agentgo.ModelMiddleware{middleware}})}) {
 					observe(event)
 				}
 			} else {
-				ctx := agentgo.WithModelRuntime(t.Context(), []agentgo.ModelMiddleware{middleware}, observe)
+				executor := agentgo.NewModelExecutor(agentgo.ModelExecutorConfig{Middlewares: []agentgo.ModelMiddleware{middleware}, OnEvent: observe})
+				ctx := t.Context()
 				ctx = agentgo.ContextWithExecution(ctx, agentgo.Execution{ID: "host"})
-				result, err := agentgo.GenerateModel(ctx, router, agentgo.ModelExecution{
+				result, err := executor.Call(ctx, router, agentgo.ModelExecution{
 					Execution: agentgo.Execution{ID: "one-shot", Kind: agentgo.ExecutionKindModel, Attempt: 1},
 					Request:   agentgo.LLMRequest{Messages: []agentgo.Message{agentgo.UserMsg("test")}},
 				})
-				if !errors.Is(err, cause) || result.Message.TextContent() != "partial output" {
+				if err == nil || result.Message.TextContent() != "partial output" {
 					t.Fatalf("result=%+v err=%v", result, err)
 				}
 			}

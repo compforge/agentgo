@@ -3,11 +3,8 @@ package agentgo
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"maps"
 	"slices"
-	"time"
 )
 
 // ModelExecution describes one model execution attempt, which may contain
@@ -16,7 +13,7 @@ import (
 // recovery of the same turn. Request may be adjusted by
 // middleware; the embedded Execution coordinate must be preserved.
 type ModelExecution struct {
-	Artifacts ArtifactManager // Runtime-owned material; do not retain beyond the callback.
+	Artifacts ArtifactManager // Call-scoped material; do not retain beyond the call.
 	Execution
 	Request LLMRequest
 }
@@ -42,114 +39,6 @@ type ModelExecuteFunc func(context.Context, ModelExecution) (ModelResult, error)
 // adapters must handle their own recording errors without returning them.
 // Concurrent tools can invoke this middleware concurrently; keep per-call state local.
 type ModelMiddleware func(context.Context, ModelExecution, ModelExecuteFunc) (ModelResult, error)
-
-type modelExecutionRuntime struct {
-	middlewares []ModelMiddleware
-	artifacts   ArtifactManager
-	emit        func(Event)
-}
-
-type modelExecutionRuntimeKey struct{}
-
-func withModelExecutionRuntime(ctx context.Context, middlewares []ModelMiddleware, emit func(Event), artifacts ArtifactManager) context.Context {
-	runtime := modelExecutionRuntime{
-		artifacts:   artifacts,
-		middlewares: append([]ModelMiddleware(nil), middlewares...),
-		emit:        emit,
-	}
-	if emit != nil {
-		runtime.emit = func(event Event) {
-			if event.Timestamp.IsZero() {
-				event.Timestamp = time.Now()
-			}
-			emit(event)
-		}
-	}
-	return context.WithValue(ctx, modelExecutionRuntimeKey{}, runtime)
-}
-
-// WithModelRuntime installs middleware and an event observer for standalone model
-// calls. AgentLoop installs its own runtime; nested model calls inherit it.
-// Middleware and observers may run concurrently and must finish their work before
-// returning. The caller owns the observer lifetime and recording errors.
-func WithModelRuntime(ctx context.Context, middlewares []ModelMiddleware, onEvent func(Event)) context.Context {
-	return withModelExecutionRuntime(ctx, middlewares, onEvent, nil)
-}
-
-// GenerateModel executes a non-streaming call through the same middleware and
-// event path as AgentLoop. The caller supplies the execution identity and owns
-// retries. A response returned alongside an error remains diagnostic evidence.
-func GenerateModel(ctx context.Context, model ChatModel, execution ModelExecution) (ModelResult, error) {
-	return ExecuteModel(ctx, execution, func(ctx context.Context, call ModelExecution) (ModelResult, error) {
-		if model == nil {
-			return ModelResult{}, ErrNoModel
-		}
-		response, err := model.Generate(ctx, call.Request.Messages, call.Request.Tools, requestConfigOption(call.Request))
-		if response == nil {
-			if err == nil {
-				err = fmt.Errorf("model execution %s returned no response", call.ID)
-			}
-			return ModelResult{}, err
-		}
-		return ModelResult{Message: response.Message}, err
-	})
-}
-
-// ExecuteModel runs one model attempt through the runtime installed by
-// WithModelRuntime or AgentLoop. Custom streaming executors use this entry;
-// ordinary non-streaming consumers use GenerateModel. Without a runtime it
-// still establishes execution identity and catches panics, but emits no events.
-// An omitted ParentID inherits the enclosing execution. Nested calls must finish
-// before the owning operation returns. Request.Config is initialized before
-// middleware; middleware must preserve the embedded Execution coordinate.
-//
-// +spec=`Request.Config is the sole call input; model_request freezes it after middleware with credentials redacted; short-circuits have no executor request`
-// +link=component://docs/session.md
-func ExecuteModel(ctx context.Context, execution ModelExecution, next ModelExecuteFunc) (result ModelResult, err error) {
-	runtime, _ := ctx.Value(modelExecutionRuntimeKey{}).(modelExecutionRuntime)
-	if runtime.artifacts != nil {
-		execution.Artifacts = runtime.artifacts
-	}
-	if parent, ok := ExecutionFromContext(ctx); ok && execution.ParentID == "" && parent.ID != execution.ID {
-		execution.ParentID = parent.ID
-	}
-	if execution.Request.Config == nil {
-		execution.Request.Config = &CallConfig{}
-	} else {
-		config := *execution.Request.Config
-		execution.Request.Config = &config
-	}
-	ctx = ContextWithExecution(ctx, execution.Execution)
-	if runtime.emit != nil {
-		runtime.emit(Event{Type: EventModelExecStart, Execution: executionRef(execution.Execution), ModelCall: modelCallSettings(execution.Request.Config)})
-	}
-
-	var dispatched *ModelCallSettings
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			result, err = ModelResult{}, fmt.Errorf("model execution %s panicked: %v", execution.ID, recovered)
-		}
-		var partial *PartialStreamError
-		if errors.As(err, &partial) && result.Message.Role == "" && len(result.Message.Content) == 0 && result.Message.Usage == nil {
-			result.Message = partial.Partial
-		}
-		if runtime.emit != nil {
-			runtime.emit(Event{Type: EventModelExecEnd, Execution: executionRef(execution.Execution), Message: result.Message, ModelCall: dispatched, Err: err})
-		}
-	}()
-	execute := func(ctx context.Context, call ModelExecution) (ModelResult, error) {
-		dispatched = modelCallSettings(call.Request.Config)
-		if runtime.emit != nil {
-			request := snapshotModelRequest(call.Request)
-			runtime.emit(Event{Type: EventModelRequest, Execution: executionRef(call.Execution), ModelRequest: &request})
-		}
-		return next(ctx, call)
-	}
-	if len(runtime.middlewares) > 0 {
-		execute = buildModelMiddlewareChain(execute, runtime.middlewares)
-	}
-	return execute(ctx, execution)
-}
 
 func buildModelMiddlewareChain(exec ModelExecuteFunc, middlewares []ModelMiddleware) ModelExecuteFunc {
 	for i := len(middlewares) - 1; i >= 0; i-- {

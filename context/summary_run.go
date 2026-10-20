@@ -35,6 +35,8 @@ type SummaryInfo struct {
 
 // summaryRunConfig configures one summary compaction execution.
 type summaryRunConfig struct {
+	Executor         *agentgo.ModelExecutor
+	Artifacts        agentgo.ArtifactManager
 	Model            agentgo.ChatModel
 	ContextWindow    int
 	ReserveTokens    int
@@ -117,13 +119,13 @@ func runSummaryCompaction(
 			summary = "No prior history."
 		} else {
 			var err error
-			summary, err = generateSummary(ctx, cfg.Model, historyExecution, prompts, toSummarize, previousSummary, historyOpts...)
+			summary, err = generateSummary(ctx, cfg, historyExecution, prompts, toSummarize, previousSummary, historyOpts...)
 			if err != nil {
 				return nil, nil, fmt.Errorf("compaction: %w", err)
 			}
 		}
 
-		prefixSummary, err := generateTurnPrefixSummary(ctx, cfg.Model, prefixExecution, prompts, turnPrefix, prefixOpts...)
+		prefixSummary, err := generateTurnPrefixSummary(ctx, cfg, prefixExecution, prompts, turnPrefix, prefixOpts...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("compaction turn prefix: %w", err)
 		}
@@ -132,7 +134,7 @@ func runSummaryCompaction(
 		}
 	} else {
 		var err error
-		summary, err = generateSummary(ctx, cfg.Model, historyExecution, prompts, toSummarize, previousSummary, historyOpts...)
+		summary, err = generateSummary(ctx, cfg, historyExecution, prompts, toSummarize, previousSummary, historyOpts...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("compaction: %w", err)
 		}

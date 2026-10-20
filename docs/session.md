@@ -95,16 +95,19 @@ recording error rather than silently lowering away their original content.
 
 ## Standalone model calls
 
-A recording run can also scope standalone calls. Use the same runtime and event
-observer as nested model work; the host supplies IDs unique within that run.
+A recording run can also scope standalone calls. Use an explicit executor and event
+observer for model work; the host supplies IDs unique within that run.
 
 ```go
 var recordErr error
-ctx = agentgo.WithModelRuntime(ctx, middlewares, func(event agentgo.Event) {
-    // This example is sequential. Synchronize error collection for concurrent calls.
-    recordErr = errors.Join(recordErr, run.Record(event))
+executor := agentgo.NewModelExecutor(agentgo.ModelExecutorConfig{
+    Middlewares: middlewares,
+    OnEvent: func(event agentgo.Event) {
+        // Events are serialized within a call. Synchronize across concurrent calls.
+        recordErr = errors.Join(recordErr, run.Record(event))
+    },
 })
-result, callErr := agentgo.GenerateModel(ctx, model, agentgo.ModelExecution{
+result, callErr := executor.Call(ctx, model, agentgo.ModelExecution{
     Execution: agentgo.Execution{
         ID: "classify", Kind: agentgo.ExecutionKindModel, Attempt: 1,
     },
@@ -117,11 +120,26 @@ result, callErr := agentgo.GenerateModel(ctx, model, agentgo.ModelExecution{
 // Handle callErr and recordErr independently, then close the recording run.
 ```
 
-The runtime emits start, the final request after middleware, routed attempts when
+The executor always consumes `GenerateStream`, returning the final result while
+publishing transient `model_stream` events to `OnEvent`. It emits start, the final request after middleware, routed attempts when
 using a Router, and end. A middleware short-circuit omits the request and provider
-attempts. GenerateModel adds no retries and does not commit messages. Partial
+attempts. `Call` adds no retries and does not commit messages. Partial
 responses never create message_end or recovery checkpoints. Standalone completion
 is determined by model_exec_end and its error; no agent_end is manufactured.
+
+Share an executor with an Agent via `WithModelExecutor(executor)`, or set
+`LoopConfig.ModelExecutor` for a bare Loop. Context preparation receives it in
+`TransformContext.ModelExecutor`; summaries pass staged `Artifacts` explicitly.
+Tools that call models receive the executor through their own constructor or
+closure. Context carries cancellation, parent execution coordinates and internal
+run event routing, never middleware configuration. A nil executor uses the default
+policy. Shared middleware and observers must be safe for concurrent calls.
+
+When a call belongs to a Loop, its model facts also appear on that Loop's event
+stream. Record either that stream or the executor observer to avoid duplicates.
+Only the Loop's conversation call produces `message_start` / `message_update`;
+auxiliary model progress is `model_stream`. Session recording omits both forms of
+transient progress and stores completion or failure at `model_exec_end`.
 
 ## Reading and interrupted files
 

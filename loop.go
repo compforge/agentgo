@@ -56,9 +56,9 @@ func startAgentLoop(ctx context.Context, prompts []AgentMessage, agentCtx AgentC
 			config.artifacts.replace(values)
 		}
 	}
-	// The runtime belongs to the whole loop, so model calls made inside tools
-	// use the same middleware and event path as conversation and summary calls.
-	ctx = withModelExecutionRuntime(ctx, config.ModelMiddlewares, sink.emit, config.artifacts)
+	// Model facts from nested calls share the run event stream; executor policy
+	// is supplied explicitly by each caller.
+	ctx = context.WithValue(ctx, modelEventSinkKey{}, sink.emit)
 
 	go func() {
 		var newMessages []AgentMessage

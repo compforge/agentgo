@@ -118,8 +118,9 @@ func recoverOverflow(ctx context.Context, agentCtx *AgentContext, config LoopCon
 	})
 
 	compactExecution := newCompactExecution(turnIndex, CompactReasonOverflow, 1)
-	recoveryCtx, staged := stageContext(ContextWithExecution(ctx, compactExecution), config.artifacts)
-	recovery, err := recoverContext(recoveryCtx, config.ContextManager, compactExecution, TransformContext{Messages: copyMessages(agentCtx.Messages), Artifacts: staged}, originalErr, sink)
+	recoveryCtx := ContextWithExecution(ctx, compactExecution)
+	staged := stageArtifacts(config.artifacts)
+	recovery, err := recoverContext(recoveryCtx, config.ContextManager, compactExecution, TransformContext{ModelExecutor: config.ModelExecutor, Messages: copyMessages(agentCtx.Messages), Artifacts: staged}, originalErr, sink)
 	if err != nil {
 		return Message{}, llmCallInfo{Execution: failedExecution}, &ContextOverflowError{Cause: fmt.Errorf("compaction failed: %w", err)}
 	}
@@ -174,8 +175,9 @@ func callLLMView(ctx context.Context, agentCtx *AgentContext, config LoopConfig,
 	// overflow recovery has already run its own bounded compaction attempt.
 	if config.ContextManager != nil && attempt == 1 {
 		compactExecution := newCompactExecution(turnIndex, CompactReasonThreshold, 1)
-		compactCtx, staged := stageContext(ContextWithExecution(ctx, compactExecution), config.artifacts)
-		compacted, err := compactContext(compactCtx, config.ContextManager, compactExecution, TransformContext{Messages: copyMessages(messages), Artifacts: staged}, sink)
+		compactCtx := ContextWithExecution(ctx, compactExecution)
+		staged := stageArtifacts(config.artifacts)
+		compacted, err := compactContext(compactCtx, config.ContextManager, compactExecution, TransformContext{ModelExecutor: config.ModelExecutor, Messages: copyMessages(messages), Artifacts: staged}, sink)
 		if err != nil {
 			return Message{}, info, &contextPreparationError{cause: err}
 		}
@@ -201,7 +203,7 @@ func callLLMView(ctx context.Context, agentCtx *AgentContext, config LoopConfig,
 	}
 	if config.ContextManager != nil {
 		var err error
-		messages, err = transformContextView(ctx, config.ContextManager, execution.Execution, TransformContext{Messages: messages, Artifacts: config.artifacts}, sink)
+		messages, err = transformContextView(ctx, config.ContextManager, execution.Execution, TransformContext{ModelExecutor: config.ModelExecutor, Messages: messages, Artifacts: config.artifacts}, sink)
 		if err != nil {
 			return Message{}, info, &contextPreparationError{cause: err}
 		}
@@ -274,14 +276,23 @@ func callLLMView(ctx context.Context, agentCtx *AgentContext, config LoopConfig,
 
 	callConfig := ResolveCallConfig(callOpts)
 	execution.Request = LLMRequest{Messages: llmMessages, Tools: toolSpecs, Config: &callConfig}
-	execute := func(ctx context.Context, call ModelExecution) (ModelResult, error) {
-		if config.Model == nil {
-			return ModelResult{}, ErrNoModel
+	execution.Artifacts = config.artifacts
+	// Only the conversation call projects stream facts into live message events.
+	started := false
+	runEmit, _ := ctx.Value(modelEventSinkKey{}).(func(Event))
+	ctx = context.WithValue(ctx, modelEventSinkKey{}, func(event Event) {
+		if runEmit != nil {
+			runEmit(event)
 		}
-		message, callInfo, err := callLLMStream(ctx, config.Model, call, sink)
-		return ModelResult{Message: message, HasCompletedToolCalls: callInfo.HasCompletedToolCalls}, err
+		if event.Type == EventModelStream && event.Execution.ID == execution.ID {
+			emitConversationProgress(*event.ModelStream, execution.Execution, sink, &started)
+		}
+	})
+	result, err := config.ModelExecutor.Call(ctx, config.Model, execution)
+	if err == nil && !started {
+		sink.emit(Event{Type: EventMessageStart, Execution: executionRef(execution.Execution), Message: result.Message})
 	}
-	result, err := ExecuteModel(ctx, execution, execute)
+
 	info.HasCompletedToolCalls = result.HasCompletedToolCalls
 	return result.Message, info, err
 }
@@ -338,78 +349,24 @@ func markLastMessageForCache(messages []Message, cacheControl string) []Message 
 	return out
 }
 
-// callLLMStream uses GenerateStream and emits real-time events.
-// The adapter builds partial Messages with ContentBlocks and emits fine-grained StreamEvents.
-//
-// Stream init failure is surfaced as an error — there is no silent fallback to
-// non-streaming Generate, because callers (TUIs, event subscribers) typically
-// depend on stream events for live rendering, tool-call deltas, and cancellation
-// semantics. Switching execution model without notice changes the contract.
-func callLLMStream(ctx context.Context, model ChatModel, execution ModelExecution, sink eventSink) (Message, llmCallInfo, error) {
-	info := llmCallInfo{Execution: execution.Execution}
-	streamCh, err := model.GenerateStream(ctx, execution.Request.Messages, execution.Request.Tools, requestConfigOption(execution.Request))
-	if err != nil {
-		return Message{}, info, err
-	}
-
-	var (
-		started bool
-		partial Message
-	)
-
-	for ev := range streamCh {
-		switch ev.Type {
-		case StreamEventTextStart, StreamEventThinkingStart, StreamEventToolCallStart:
-			partial = ev.Message
-			if !started {
-				started = true
-				sink.emit(Event{Type: EventMessageStart, Execution: executionRef(execution.Execution), Message: partial})
-			}
-
-		case StreamEventTextDelta, StreamEventThinkingDelta, StreamEventToolCallDelta:
-			partial = ev.Message
-			if !started {
-				started = true
-				sink.emit(Event{Type: EventMessageStart, Execution: executionRef(execution.Execution), Message: partial})
-			}
-			var dk DeltaKind
-			switch ev.Type {
-			case StreamEventThinkingDelta:
-				dk = DeltaThinking
-			case StreamEventToolCallDelta:
-				dk = DeltaToolCall
-			}
-			sink.emit(Event{Type: EventMessageUpdate, Execution: executionRef(execution.Execution), Message: partial, Delta: ev.Delta, DeltaKind: dk, ToolID: ev.ToolID})
-
-		case StreamEventTextEnd, StreamEventThinkingEnd, StreamEventToolCallEnd:
-			partial = ev.Message
-			if ev.CompletedToolCall != nil {
-				info.HasCompletedToolCalls = true
-			}
-
-		case StreamEventDone:
-			finalMsg := ev.Message
-			finalMsg.Timestamp = time.Now()
-			if !started {
-				sink.emit(Event{Type: EventMessageStart, Execution: executionRef(execution.Execution), Message: finalMsg})
-			}
-			return finalMsg, info, nil
-
-		case StreamEventError:
-			if ev.Message.Role != "" || len(ev.Message.Content) > 0 || ev.Message.Usage != nil {
-				partial = ev.Message
-			}
-			if ev.Err == nil {
-				ev.Err = &PartialStreamError{Partial: partial}
-			}
-			return partial, info, ev.Err
+func emitConversationProgress(event StreamEvent, execution Execution, sink eventSink, started *bool) {
+	switch event.Type {
+	case StreamEventTextStart, StreamEventThinkingStart, StreamEventToolCallStart,
+		StreamEventTextDelta, StreamEventThinkingDelta, StreamEventToolCallDelta:
+		if !*started {
+			*started = true
+			sink.emit(Event{Type: EventMessageStart, Execution: executionRef(execution), Message: event.Message})
 		}
 	}
-
-	// Stream closed without done event — surface as PartialStreamError instead
-	// of pretending the message completed. Emitting EventMessageEnd here would
-	// let callers persist a half-finished message (missing StopReason, possibly
-	// truncated tool_call args, unclosed thinking blocks) into history — the
-	// next LLM call would then see structurally invalid context.
-	return partial, info, &PartialStreamError{Partial: partial}
+	switch event.Type {
+	case StreamEventTextDelta, StreamEventThinkingDelta, StreamEventToolCallDelta:
+		var kind DeltaKind
+		switch event.Type {
+		case StreamEventThinkingDelta:
+			kind = DeltaThinking
+		case StreamEventToolCallDelta:
+			kind = DeltaToolCall
+		}
+		sink.emit(Event{Type: EventMessageUpdate, Execution: executionRef(execution), Message: event.Message, Delta: event.Delta, DeltaKind: kind, ToolID: event.ToolID})
+	}
 }

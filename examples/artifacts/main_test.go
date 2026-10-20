@@ -31,7 +31,7 @@ func TestArtifactRunLifecycle(t *testing.T) {
 			}
 			return registerInitial(ctx, run)
 		}),
-		agentgo.WithModelMiddlewares(func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
+		agentgo.WithModelExecutor(agentgo.NewModelExecutor(agentgo.ModelExecutorConfig{Middlewares: []agentgo.ModelMiddleware{func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
 			attempts++
 			if _, ok := execution.Artifacts.GetArtifact("main.go"); !ok {
 				t.Error("initial artifact missing before model middleware")
@@ -40,7 +40,7 @@ func TestArtifactRunLifecycle(t *testing.T) {
 				return agentgo.ModelResult{}, retryError{}
 			}
 			return next(ctx, execution)
-		}),
+		}}})),
 		agentgo.WithAfterRun(func(_ context.Context, run agentgo.AfterRunContext) error { runErr = run.Err; return nil }),
 	)
 	agent := agentgo.NewAgent(options...)

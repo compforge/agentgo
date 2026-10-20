@@ -154,11 +154,9 @@ func WithToolMiddlewares(mw ...ToolMiddleware) AgentOption {
 	return func(a *Agent) { a.toolMiddlewares = mw }
 }
 
-// WithModelMiddlewares sets model execution middlewares. Each middleware wraps
-// one physical provider attempt, including internal context summarization;
-// first middleware is outermost.
-func WithModelMiddlewares(mw ...ModelMiddleware) AgentOption {
-	return func(a *Agent) { a.modelMiddlewares = mw }
+// WithModelExecutor sets the executor shared by Loop calls and context summaries.
+func WithModelExecutor(executor *ModelExecutor) AgentOption {
+	return func(a *Agent) { a.modelExecutor = executor }
 }
 
 // WithMaxToolConcurrency sets the maximum number of tools executed in parallel.

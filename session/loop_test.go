@@ -35,17 +35,20 @@ func answer(text string) agentgo.Message {
 	return agentgo.Message{Role: agentgo.RoleAssistant, Content: []agentgo.ContentBlock{agentgo.TextBlock(text)}, StopReason: agentgo.StopReasonStop}
 }
 
-type richTool struct{ *agentgo.FuncTool }
+type richTool struct {
+	*agentgo.FuncTool
+	executor *agentgo.ModelExecutor
+}
 
 func (t richTool) ExecuteContent(ctx context.Context, args json.RawMessage) ([]agentgo.ContentBlock, error) {
 	if string(args) != `{"approved":true}` {
 		return nil, errors.New("gate rewrite lost")
 	}
-	_, err := agentgo.ExecuteModel(ctx, agentgo.ModelExecution{
+	_, err := t.executor.Call(ctx, scriptModel(func(context.Context, []agentgo.Message) (agentgo.Message, error) {
+		return answer("nested response"), nil
+	}), agentgo.ModelExecution{
 		Execution: agentgo.Execution{ID: "inspect-1/nested", Kind: agentgo.ExecutionKindModel, Attempt: 1, TurnIndex: 1},
 		Request:   agentgo.LLMRequest{Messages: []agentgo.Message{agentgo.UserMsg("nested analysis")}},
-	}, func(context.Context, agentgo.ModelExecution) (agentgo.ModelResult, error) {
-		return agentgo.ModelResult{Message: answer("nested response")}, nil
 	})
 	return []agentgo.ContentBlock{agentgo.TextBlock("tool output"), agentgo.ImageURLBlock("https://example.test/image.png")}, err
 }
@@ -74,14 +77,15 @@ func TestLoopRecordsActualRequestsAndResults(t *testing.T) {
 		}
 		return answer("complete"), nil
 	})
-	tool := richTool{agentgo.NewFuncTool("inspect", "inspect", nil, nil)}
+	executor := agentgo.NewModelExecutor(agentgo.ModelExecutorConfig{Middlewares: []agentgo.ModelMiddleware{func(ctx context.Context, call agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
+		call.Request.Messages = append(call.Request.Messages, agentgo.UserMsg("middleware input"))
+		return next(ctx, call)
+	}}})
+	tool := richTool{agentgo.NewFuncTool("inspect", "inspect", nil, nil), executor}
 	var refs []Ref
 	for event := range agentgo.AgentLoop(context.Background(), []agentgo.AgentMessage{agentgo.UserMsg("inspect")}, agentgo.AgentContext{Tools: []agentgo.Tool{tool}}, agentgo.LoopConfig{
-		Model: model,
-		ModelMiddlewares: []agentgo.ModelMiddleware{func(ctx context.Context, call agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
-			call.Request.Messages = append(call.Request.Messages, agentgo.UserMsg("middleware input"))
-			return next(ctx, call)
-		}},
+		Model:         model,
+		ModelExecutor: executor,
 		ToolGate: func(context.Context, agentgo.GateRequest) (*agentgo.GateDecision, error) {
 			return &agentgo.GateDecision{Allowed: true, UpdatedArgs: json.RawMessage(`{"approved":true}`)}, nil
 		},
@@ -199,9 +203,9 @@ func TestShortCircuitHasResponseWithoutProviderRequest(t *testing.T) {
 	s, path := newTestSession(t)
 	run := mustRun(t, s)
 	for event := range agentgo.AgentLoop(context.Background(), []agentgo.AgentMessage{agentgo.UserMsg("cached")}, agentgo.AgentContext{}, agentgo.LoopConfig{
-		ModelMiddlewares: []agentgo.ModelMiddleware{func(context.Context, agentgo.ModelExecution, agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
+		ModelExecutor: agentgo.NewModelExecutor(agentgo.ModelExecutorConfig{Middlewares: []agentgo.ModelMiddleware{func(context.Context, agentgo.ModelExecution, agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
 			return agentgo.ModelResult{Message: answer("cached response")}, nil
-		}},
+		}}}),
 	}) {
 		if err := run.Record(event); err != nil {
 			t.Fatal(err)
@@ -276,12 +280,12 @@ func TestLengthAndThinkingFactsSurviveRecording(t *testing.T) {
 	})
 	for event := range agentgo.AgentLoop(t.Context(), []agentgo.AgentMessage{agentgo.UserMsg("work")}, agentgo.AgentContext{}, agentgo.LoopConfig{
 		Model: model, ThinkingLevel: agentgo.ThinkingHigh, MaxLengthRecoveries: &zero,
-		ModelMiddlewares: []agentgo.ModelMiddleware{func(ctx context.Context, call agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
+		ModelExecutor: agentgo.NewModelExecutor(agentgo.ModelExecutorConfig{Middlewares: []agentgo.ModelMiddleware{func(ctx context.Context, call agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
 			for _, option := range []agentgo.CallOption{agentgo.WithThinking(agentgo.ThinkingLow), agentgo.WithAPIKey("private-test-key")} {
 				option(call.Request.Config)
 			}
 			return next(ctx, call)
-		}},
+		}}}),
 	}) {
 		if err := run.Record(event); err != nil {
 			t.Fatal(err)

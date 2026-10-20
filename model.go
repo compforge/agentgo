@@ -109,11 +109,9 @@ type LoopConfig struct {
 	// FollowUp: called when the agent would otherwise stop.
 	GetFollowUpMessages func() []AgentMessage
 
-	// ModelMiddlewares wrap each AgentGo-owned physical model attempt, including
-	// context summarization. ToolMiddlewares wrap each tool execution. First
-	// middleware is outermost.
-	ModelMiddlewares []ModelMiddleware
-	ToolMiddlewares  []ToolMiddleware
+	// ModelExecutor is shared with context summaries. Nil uses the default executor.
+	ModelExecutor   *ModelExecutor
+	ToolMiddlewares []ToolMiddleware
 
 	// MaxToolConcurrency limits parallel tool execution.
 	// 0 or 1 = sequential (default, backward compatible).

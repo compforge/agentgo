@@ -52,7 +52,7 @@ func (a *Agent) buildConfig(continuing bool) LoopConfig {
 			defer a.mu.Unlock()
 			return dequeue(&a.followUpQ)
 		},
-		ModelMiddlewares:      a.modelMiddlewares,
+		ModelExecutor:         a.modelExecutor,
 		ToolMiddlewares:       a.toolMiddlewares,
 		MaxToolConcurrency:    a.maxToolConcurrency,
 		ShouldEmitAbortMarker: a.wantAbortMarker.Load,

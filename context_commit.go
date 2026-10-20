@@ -1,7 +1,5 @@
 package agentgo
 
-import "context"
-
 // Context preparation failures are not provider failures, even if a host wraps
 // a retryable error. Retrying cannot repair a rejected durable state transition.
 type contextPreparationError struct{ cause error }
@@ -9,20 +7,14 @@ type contextPreparationError struct{ cause error }
 func (e *contextPreparationError) Error() string { return "prepare context: " + e.cause.Error() }
 func (e *contextPreparationError) Unwrap() error { return e.cause }
 
-func stageContext(ctx context.Context, source *memoryArtifactManager) (context.Context, *memoryArtifactManager) {
+func stageArtifacts(source *memoryArtifactManager) *memoryArtifactManager {
 	staged := newArtifactManager()
 	if source != nil {
 		for _, artifact := range source.ListArtifacts() {
 			staged.artifacts[artifact.ID()] = artifact
 		}
 	}
-	// Summary model middleware must use the same staged collection as compaction.
-	runtime, ok := ctx.Value(modelExecutionRuntimeKey{}).(modelExecutionRuntime)
-	if ok {
-		runtime.artifacts = staged
-		ctx = context.WithValue(ctx, modelExecutionRuntimeKey{}, runtime)
-	}
-	return ctx, staged
+	return staged
 }
 
 func acceptContext(agentCtx *AgentContext, config LoopConfig, result ContextCommitResult, staged *memoryArtifactManager, execution Execution, sink eventSink) error {

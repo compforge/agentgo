@@ -118,7 +118,7 @@ func TestAgentLoop_ModelMiddleware(t *testing.T) {
 				order = append(order, "before_turn")
 				return []AgentMessage{UserMsg("prepared model context")}, nil
 			},
-			ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
+			ModelExecutor: NewModelExecutor(ModelExecutorConfig{Middlewares: []ModelMiddleware{func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
 				order = append(order, "before_model")
 				if call.TurnIndex != 1 {
 					t.Fatalf("model call turn = %d, want 1", call.TurnIndex)
@@ -135,7 +135,7 @@ func TestAgentLoop_ModelMiddleware(t *testing.T) {
 					t.Fatalf("unexpected model result: %#v", result)
 				}
 				return result, err
-			}},
+			}}}),
 			AfterTurn: func(_ context.Context, turn AfterTurnContext) error {
 				order = append(order, "after_turn")
 				if got := turn.Context.Messages[len(turn.Context.Messages)-1].TextContent(); got != "answer" {
@@ -212,9 +212,9 @@ func TestAgentLoop_ModelMiddlewareErrorStopsRun(t *testing.T) {
 					modelCalls++
 					return &LLMResponse{Message: assistantMsg("unexpected", StopReasonStop)}, nil
 				}),
-				ModelMiddlewares: []ModelMiddleware{func(context.Context, ModelExecution, ModelExecuteFunc) (ModelResult, error) {
+				ModelExecutor: NewModelExecutor(ModelExecutorConfig{Middlewares: []ModelMiddleware{func(context.Context, ModelExecution, ModelExecuteFunc) (ModelResult, error) {
 					return ModelResult{}, errors.New("prepare call failed")
-				}},
+				}}}),
 			},
 		)
 
@@ -239,13 +239,13 @@ func TestAgentLoop_ModelMiddlewareErrorStopsRun(t *testing.T) {
 					committed = append(committed, message)
 					return nil
 				},
-				ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
+				ModelExecutor: NewModelExecutor(ModelExecutorConfig{Middlewares: []ModelMiddleware{func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
 					result, err := next(ctx, call)
 					if err != nil {
 						return result, err
 					}
 					return ModelResult{}, errors.New("validate response failed")
-				}},
+				}}}),
 			},
 		)
 
@@ -2061,7 +2061,7 @@ func TestMarkLastMessageForCache_DoesNotMutateInput(t *testing.T) {
 }
 
 // streamErrModel returns an error from GenerateStream. Guards the contract
-// that callLLMStream surfaces stream-init errors rather than silently
+// that ModelExecutor.Call surfaces stream-init errors rather than silently
 // falling back to non-streaming Generate.
 type streamErrModel struct{ err error }
 
@@ -2073,11 +2073,11 @@ func (m *streamErrModel) GenerateStream(context.Context, []Message, []ToolSpec, 
 }
 func (m *streamErrModel) SupportsTools() bool { return true }
 
-func TestCallLLMStream_StreamInitErrorBubbles(t *testing.T) {
+func TestModelExecutor_StreamInitErrorBubbles(t *testing.T) {
 	m := &streamErrModel{err: fmt.Errorf("provider unavailable")}
 	events := make(chan Event, 4)
 
-	_, _, err := callLLMStream(context.Background(), m, newModelExecution(1, 1), eventSink{ctx: context.Background(), ch: events})
+	_, err := NewModelExecutor(ModelExecutorConfig{OnEvent: func(event Event) { events <- event }}).Call(t.Context(), m, newModelExecution(1, 1))
 	close(events)
 
 	if err == nil {
@@ -2111,11 +2111,11 @@ func (m *partialStreamModel) GenerateStream(context.Context, []Message, []ToolSp
 }
 func (m *partialStreamModel) SupportsTools() bool { return true }
 
-func TestCallLLMStream_PartialStreamErrorOnTruncation(t *testing.T) {
+func TestModelExecutor_PartialStreamErrorOnTruncation(t *testing.T) {
 	m := &partialStreamModel{text: "half a sente"}
 	events := make(chan Event, 16)
 
-	_, _, err := callLLMStream(context.Background(), m, newModelExecution(1, 1), eventSink{ctx: context.Background(), ch: events})
+	_, err := NewModelExecutor(ModelExecutorConfig{OnEvent: func(event Event) { events <- event }}).Call(t.Context(), m, newModelExecution(1, 1))
 	close(events)
 
 	var partialErr *PartialStreamError
@@ -2191,14 +2191,14 @@ func TestAgentLoop_ModelMiddlewareWrapsEachAttempt(t *testing.T) {
 		LoopConfig{
 			Model:      m,
 			MaxRetries: 2,
-			ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
+			ModelExecutor: NewModelExecutor(ModelExecutorConfig{Middlewares: []ModelMiddleware{func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
 				attempts = append(attempts, call.Attempt)
 				callIDs = append(callIDs, call.ID)
 				for _, option := range []CallOption{WithToolChoice("required")} {
 					option(call.Request.Config)
 				}
 				return next(ctx, call)
-			}},
+			}}}),
 		},
 	)
 

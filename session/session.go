@@ -160,7 +160,7 @@ func (r *Run) Record(event agentgo.Event) error {
 		return err
 	}
 	switch event.Type {
-	case agentgo.EventMessageStart, agentgo.EventMessageUpdate, agentgo.EventToolExecUpdate:
+	case agentgo.EventModelStream, agentgo.EventMessageStart, agentgo.EventMessageUpdate, agentgo.EventToolExecUpdate:
 		return nil
 	case agentgo.EventModelResponse:
 		if event.LengthRecovery == nil {

@@ -18,8 +18,10 @@ router, err := llm.NewRouter([]llm.Route{
     AttemptTimeout: 60 * time.Second,
 })
 // Handle err.
-ctx = agentgo.WithModelRuntime(ctx, middlewares, observeEvent)
-result, err := agentgo.GenerateModel(ctx, router, agentgo.ModelExecution{
+executor := agentgo.NewModelExecutor(agentgo.ModelExecutorConfig{
+    Middlewares: middlewares, OnEvent: observeEvent,
+})
+result, err := executor.Call(ctx, router, agentgo.ModelExecution{
     Execution: agentgo.Execution{ID: "review", Kind: agentgo.ExecutionKindModel, Attempt: 1},
     Request: agentgo.LLMRequest{
         Messages: messages, Tools: tools,
@@ -61,14 +63,14 @@ active attempt; member models must honor their contexts.
 
 ## Facts and configuration
 
-Each finished endpoint attempt emits `model_attempt` through the model runtime,
-inside AgentLoop or standalone GenerateModel, and can be saved by `session`.
+Each finished endpoint attempt emits `model_attempt` through the model executor,
+inside AgentLoop or standalone `ModelExecutor.Call`, and can be saved by `session`.
 ModelAttempt.Index is nested inside Execution.ID and
 Execution.Attempt; it does not replace those execution coordinates. Facts include
 the safe endpoint label, duration, requested model, reported usage when available,
 error kind, timeout scope and whether another endpoint will be tried.
 RouterConfig.Observe is an optional router-local observer even without a model
-runtime. Use the runtime event stream for unified call recording, and avoid counting
+executor. Use the executor or Loop event stream for unified call recording, and avoid counting
 both observers as separate attempts. Observe may run
 concurrently and must return promptly. Endpoint labels must not contain secrets.
 

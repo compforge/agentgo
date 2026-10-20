@@ -107,12 +107,12 @@ func TestModelCallEventsRecordForwardedOptions(t *testing.T) {
 		return &LLMResponse{Message: assistantMsg("done", StopReasonStop)}, nil
 	})
 	events := runTestLoop(t, []AgentMessage{UserMsg("work")}, AgentContext{}, LoopConfig{Model: model, ThinkingLevel: ThinkingHigh,
-		ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
+		ModelExecutor: NewModelExecutor(ModelExecutorConfig{Middlewares: []ModelMiddleware{func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
 			for _, option := range []CallOption{WithThinking("none"), WithMaxTokens(1024), WithAPIKey("private-test-key")} {
 				option(call.Request.Config)
 			}
 			return next(ctx, call)
-		}},
+		}}}),
 	})
 	start, _ := findEvent(events, EventModelExecStart)
 	end, _ := findEvent(events, EventModelExecEnd)

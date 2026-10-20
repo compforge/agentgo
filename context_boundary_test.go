@@ -31,10 +31,10 @@ func TestTransformDoesNotReplaceAcceptedBaseline(t *testing.T) {
 			}
 			return nil
 		},
-		ModelMiddlewares: []agentgo.ModelMiddleware{func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
+		ModelExecutor: agentgo.NewModelExecutor(agentgo.ModelExecutorConfig{Middlewares: []agentgo.ModelMiddleware{func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
 			observed = engine.Snapshot().TranscriptMessages
 			return next(ctx, execution)
-		}},
+		}}}),
 	}) {
 		if event.Type == agentgo.EventAgentEnd {
 			final = event.State

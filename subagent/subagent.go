@@ -52,10 +52,8 @@ type Config struct {
 	// ToolMiddlewares wrap each tool execution in this sub-agent's runs
 	// (outermost first). Mirrors agentgo.WithToolMiddlewares.
 	ToolMiddlewares []agentgo.ToolMiddleware
-	// ModelMiddlewares wrap every model attempt in this sub-agent, including
-	// model calls made by its ContextManager. Mirrors
-	// agentgo.WithModelMiddlewares.
-	ModelMiddlewares []agentgo.ModelMiddleware
+	// ModelExecutor is shared by this sub-agent's model calls and context summaries.
+	ModelExecutor *agentgo.ModelExecutor
 
 	// ThinkingLevel sets the reasoning depth for this sub-agent's runs.
 	// Empty ("") leaves it unspecified (model/provider default). Mirrors
@@ -914,7 +912,7 @@ func (r *Runner) run(ctx context.Context, agentName, taskStr string, modelOverri
 		MaxTurns:                 cfg.MaxTurns,
 		MaxRetries:               cfg.MaxRetries,
 		ToolGate:                 cfg.ToolGate,
-		ModelMiddlewares:         cfg.ModelMiddlewares,
+		ModelExecutor:            cfg.ModelExecutor,
 		ToolMiddlewares:          cfg.ToolMiddlewares,
 		ContextManager:           contextManager,
 		ToolResultMessageFactory: cfg.ToolResultMessageFactory,

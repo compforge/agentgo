@@ -883,12 +883,12 @@ func TestTool_GateAndMiddlewarePassThrough(t *testing.T) {
 func TestRunner_ModelMiddlewarePassThrough(t *testing.T) {
 	var executions []agentgo.Execution
 	cfg := simpleAgent("writer", "done")
-	cfg.ModelMiddlewares = []agentgo.ModelMiddleware{
+	cfg.ModelExecutor = agentgo.NewModelExecutor(agentgo.ModelExecutorConfig{Middlewares: []agentgo.ModelMiddleware{
 		func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
 			executions = append(executions, execution.Execution)
 			return next(ctx, execution)
 		},
-	}
+	}})
 
 	if _, err := NewRunner(cfg).Run(context.Background(), "writer", "go"); err != nil {
 		t.Fatal(err)
