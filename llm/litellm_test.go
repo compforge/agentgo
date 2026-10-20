@@ -199,7 +199,7 @@ func TestLiteLLMAdapterCapabilities(t *testing.T) {
 	if caps.Provider != "capture" || caps.Model != "m" || !caps.ProviderBaseline || caps.Thinking.Supported != SupportYes || caps.Thinking.Disable != SupportYes {
 		t.Fatalf("capabilities=%+v", caps)
 	}
-	if len(caps.Thinking.Efforts) != 0 || caps.Tools.StrictSchema != SupportUnknown {
+	if len(caps.Thinking.Efforts) != 0 {
 		t.Fatal("invented model-specific capability facts")
 	}
 }
@@ -210,8 +210,8 @@ func TestLiteLLMAdapterCapabilitiesFallback(t *testing.T) {
 	if caps.Provider != "capture" || caps.Model != "m" {
 		t.Fatalf("identity = %s/%s, want capture/m", caps.Provider, caps.Model)
 	}
-	if caps.Thinking.Supported != SupportUnknown || caps.Tools.Calls != SupportUnknown {
-		t.Fatalf("fallback should be unknown support, got %+v / %+v", caps.Thinking, caps.Tools)
+	if caps.Thinking.Supported != SupportUnknown || caps.Thinking.Disable != SupportUnknown {
+		t.Fatalf("fallback should be unknown support, got %+v", caps.Thinking)
 	}
 }
 
@@ -499,6 +499,39 @@ func TestGenerateStreamAttributesInterleavedToolCallDeltas(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("delta %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// +case:id=provider_has_no_hidden_retries,desc=`A provider returns HTTP 503`,expect=`NewModel issues one request; the Router or Loop owns the retry budget`
+func TestNewModelDoesNotRetryTransport(t *testing.T) {
+	for _, streamed := range []bool{false, true} {
+		calls := 0
+		model, err := NewModel("compat", "test", WithAPIKey("test"), WithBaseURL("https://provider.test/v1"), WithHTTPTransport(roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{StatusCode: 503, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"message":"unavailable"}}`))}, nil
+		})))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if streamed {
+			_, err = model.GenerateStream(t.Context(), []agentgo.Message{agentgo.UserMsg("test")}, nil)
+		} else {
+			_, err = model.Generate(t.Context(), []agentgo.Message{agentgo.UserMsg("test")}, nil)
+		}
+		if err == nil || calls != 1 {
+			t.Fatalf("streamed=%v requests=%d err=%v", streamed, calls, err)
+		}
+	}
+}
+
+func TestPartialUsageWithoutTotals(t *testing.T) {
+	for _, usage := range []litellm.Usage{{ReasoningTokens: 3}, {CacheWriteTokens: 5}} {
+		message := convertResponse(&litellm.Response{Usage: usage})
+		if message.Usage == nil || message.Usage.Reasoning != usage.ReasoningTokens || message.Usage.CacheWrite != usage.CacheWriteTokens || message.Usage.Input != 0 || message.Usage.TotalTokens != 0 {
+			t.Fatalf("partial usage=%+v", message.Usage)
 		}
 	}
 }

@@ -31,9 +31,9 @@ type AgentContext struct {
 type LLMRequest struct {
 	Messages []Message  `json:"messages"`
 	Tools    []ToolSpec `json:"tools,omitempty"`
-	// Config is the resolved per-call configuration for transport adapters.
-	// ModelExecution.Options remains authoritative inside the loop. APIKey is
-	// local-only and is excluded from JSON serialization.
+	// Config is the authoritative per-call input after middleware. Provider
+	// defaults remain owned by the model. APIKey is local-only; execution
+	// events redact it and JSON serialization excludes it.
 	Config *CallConfig `json:"config,omitempty"`
 }
 

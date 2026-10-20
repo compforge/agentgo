@@ -18,8 +18,14 @@ router, err := llm.NewRouter([]llm.Route{
     AttemptTimeout: 60 * time.Second,
 })
 // Handle err.
-response, err := router.Generate(ctx, messages, tools,
-    agentgo.WithThinking(agentgo.ThinkingMedium))
+ctx = agentgo.WithModelRuntime(ctx, middlewares, observeEvent)
+result, err := agentgo.GenerateModel(ctx, router, agentgo.ModelExecution{
+    Execution: agentgo.Execution{ID: "review", Kind: agentgo.ExecutionKindModel, Attempt: 1},
+    Request: agentgo.LLMRequest{
+        Messages: messages, Tools: tools,
+        Config: &agentgo.CallConfig{ThinkingLevel: agentgo.ThinkingMedium},
+    },
+})
 ```
 
 ## Budgets and failures
@@ -37,8 +43,10 @@ switch endpoints. Failed endpoints cool down for 30 seconds by default; a negati
 Cooldown disables this. Cooling endpoints are placed last, so an entirely cooling
 pool remains usable as a last resort.
 
-Router owns its attempt budget. Configure member providers without SDK retries
-(AgentGo's default). An exhausted or terminal routing call returns RoutingError
+Router owns its attempt budget. NewModel constructs providers without HTTP retry
+wrappers; configure externally supplied clients the same way. WithRequestTimeout
+and WithStreamIdleTimeout control transport deadlines; RouterConfig controls failover.
+An exhausted or terminal routing call returns RoutingError
 with Retryable false, preserving its underlying cause for inspection. AgentLoop
 honors this even when the cause is a partial stream; it does not restart the pool.
 Context overflow remains eligible for the loop's separate compaction recovery.
@@ -53,12 +61,15 @@ active attempt; member models must honor their contexts.
 
 ## Facts and configuration
 
-Each finished endpoint attempt emits `model_attempt` within AgentLoop and is saved
-by `session`. ModelAttempt.Index is nested inside Execution.ID and
+Each finished endpoint attempt emits `model_attempt` through the model runtime,
+inside AgentLoop or standalone GenerateModel, and can be saved by `session`.
+ModelAttempt.Index is nested inside Execution.ID and
 Execution.Attempt; it does not replace those execution coordinates. Facts include
 the safe endpoint label, duration, requested model, reported usage when available,
 error kind, timeout scope and whether another endpoint will be tried.
-RouterConfig.Observe receives the same facts for direct calls. It may run
+RouterConfig.Observe is an optional router-local observer even without a model
+runtime. Use the runtime event stream for unified call recording, and avoid counting
+both observers as separate attempts. Observe may run
 concurrently and must return promptly. Endpoint labels must not contain secrets.
 
 Successful messages carry `Metadata["route_endpoint"]`. Usage retains the actual
@@ -66,7 +77,8 @@ provider/model attribution. Attempt usage is diagnostic: it overlaps the success
 response's usage and must not be summed with that same response twice. Failed
 requests without provider usage remain unknown, not zero-cost.
 
-All call options pass unchanged to every selected candidate. Providers validate
+The final Request.Config is projected to ChatModel options once, after middleware,
+and forwarded unchanged to every selected candidate. Providers validate
 supported thinking settings; routing never lowers effort to make a fallback work.
 
 ## Provider boundary
@@ -79,11 +91,15 @@ state belong to litellm. AgentGo adapts its message contract and owns routing.
 through unchanged; off/none disables thinking. The endpoint decides which values
 it accepts. Native request defaults use `WithExtra`; explicit per-call thinking
 replaces raw thinking defaults. No model effort whitelist is maintained here.
+Capabilities exposes only thinking
+facts used by ThinkingPolicy: support, disable and optional explicitly known effort
+values. A provider baseline is advisory and cannot prove model-specific acceptance.
 
 `WithHTTPTransport` reuses a host-owned transport. `WithProviderExtra` configures
 the factory (for example `name` and `headers`). Give distinct endpoints distinct
 names when signed or encrypted history must remain isolated. ContentBlock's opaque
-ProviderState survives persistence and replay; litellm decides whether that state
+ProviderState is the sole carrier of provider replay state, including reasoning
+signatures. It survives persistence and replay; litellm decides whether that state
 belongs to the selected endpoint/model.
 
 Cache breakpoints remain explicit message metadata. PromptCacheKey and SessionID

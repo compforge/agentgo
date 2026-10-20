@@ -20,8 +20,8 @@ type ModelAttempt struct {
 	Usage        *Usage        `json:"usage,omitempty"`
 }
 
-// ReportModelAttempt publishes a routed attempt to the enclosing AgentLoop.
-// Outside a loop it is a no-op; routers may additionally offer a direct observer.
+// ReportModelAttempt publishes a routed attempt to the current model runtime.
+// With no observer it is a no-op; routers may additionally offer a direct observer.
 func ReportModelAttempt(ctx context.Context, attempt ModelAttempt, err error) {
 	runtime, _ := ctx.Value(modelExecutionRuntimeKey{}).(modelExecutionRuntime)
 	if runtime.emit == nil {

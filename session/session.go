@@ -34,8 +34,9 @@ type Session struct {
 	closed     bool
 }
 
-// Run is a recording scope for one AgentLoop invocation. It is independent of
-// goroutine identity. Drain the loop before Close; closing never implies success.
+// Run is a recording scope for an AgentLoop invocation or standalone model work.
+// It is independent of goroutine identity. Finish all producers before Close;
+// closing never implies success.
 type Run struct {
 	session *Session
 	id      string
@@ -188,18 +189,14 @@ func (r *Run) Record(event agentgo.Event) error {
 		if err != nil {
 			return s.failLocked(fmt.Errorf("encode %s message: %w", event.Type, err))
 		}
-		data.Message = encoded
+		if event.Type == agentgo.EventModelExecEnd && event.Err != nil {
+			data.PartialMessage = encoded
+		} else {
+			data.Message = encoded
+		}
 	}
 	if event.Err != nil {
 		data.Error = event.Err.Error()
-		var partial *agentgo.PartialStreamError
-		if event.Type == agentgo.EventModelExecEnd && errors.As(event.Err, &partial) {
-			encoded, err := s.codec.Marshal(partial.Partial)
-			if err != nil {
-				return s.failLocked(fmt.Errorf("encode partial response: %w", err))
-			}
-			data.PartialMessage = encoded
-		}
 	}
 	if event.RetryInfo != nil {
 		data.Retry = &RetryData{MaxRetries: event.RetryInfo.MaxRetries, Delay: event.RetryInfo.Delay}

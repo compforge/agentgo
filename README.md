@@ -130,6 +130,8 @@ The optional [`session`](docs/session.md) package records each logical conversat
 
 `Execution` gives expensive or externally visible work one run-scoped identity. A retry keeps the same `ID` and increments `Attempt`; `ModelExecution` and `ToolExecution` carry that coordinate through middleware and the Event stream. Internal summary calls are child executions of compaction, so hosts can correlate or replay known outcomes without AgentGo depending on a ledger or tracing model.
 
+Standalone calls use `WithModelRuntime` + `GenerateModel` to share middleware, final request snapshots and routed attempt events with the Loop. `ModelExecution.Request.Config` is the single call configuration. Failed responses retain diagnostic content and usage without committing history; see [model routing](docs/routing.md) and [session recording](docs/session.md).
+
 ## Extension points
 
 | Need | Contract |

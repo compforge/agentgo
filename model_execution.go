@@ -272,8 +272,8 @@ func callLLMView(ctx context.Context, agentCtx *AgentContext, config LoopConfig,
 		callOpts = append(callOpts, WithCallPromptCacheKey(config.PromptCacheKey))
 	}
 
-	execution.Request = LLMRequest{Messages: llmMessages, Tools: toolSpecs}
-	execution.Options = callOpts
+	callConfig := ResolveCallConfig(callOpts)
+	execution.Request = LLMRequest{Messages: llmMessages, Tools: toolSpecs, Config: &callConfig}
 	execute := func(ctx context.Context, call ModelExecution) (ModelResult, error) {
 		if config.Model == nil {
 			return ModelResult{}, ErrNoModel
@@ -347,7 +347,7 @@ func markLastMessageForCache(messages []Message, cacheControl string) []Message 
 // semantics. Switching execution model without notice changes the contract.
 func callLLMStream(ctx context.Context, model ChatModel, execution ModelExecution, sink eventSink) (Message, llmCallInfo, error) {
 	info := llmCallInfo{Execution: execution.Execution}
-	streamCh, err := model.GenerateStream(ctx, execution.Request.Messages, execution.Request.Tools, execution.Options...)
+	streamCh, err := model.GenerateStream(ctx, execution.Request.Messages, execution.Request.Tools, requestConfigOption(execution.Request))
 	if err != nil {
 		return Message{}, info, err
 	}
@@ -396,7 +396,13 @@ func callLLMStream(ctx context.Context, model ChatModel, execution ModelExecutio
 			return finalMsg, info, nil
 
 		case StreamEventError:
-			return Message{}, info, ev.Err
+			if ev.Message.Role != "" || len(ev.Message.Content) > 0 || ev.Message.Usage != nil {
+				partial = ev.Message
+			}
+			if ev.Err == nil {
+				ev.Err = &PartialStreamError{Partial: partial}
+			}
+			return partial, info, ev.Err
 		}
 	}
 
@@ -405,5 +411,5 @@ func callLLMStream(ctx context.Context, model ChatModel, execution ModelExecutio
 	// let callers persist a half-finished message (missing StopReason, possibly
 	// truncated tool_call args, unclosed thinking blocks) into history — the
 	// next LLM call would then see structurally invalid context.
-	return Message{}, info, &PartialStreamError{Partial: partial}
+	return partial, info, &PartialStreamError{Partial: partial}
 }

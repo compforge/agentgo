@@ -277,7 +277,9 @@ func TestLengthAndThinkingFactsSurviveRecording(t *testing.T) {
 	for event := range agentgo.AgentLoop(t.Context(), []agentgo.AgentMessage{agentgo.UserMsg("work")}, agentgo.AgentContext{}, agentgo.LoopConfig{
 		Model: model, ThinkingLevel: agentgo.ThinkingHigh, MaxLengthRecoveries: &zero,
 		ModelMiddlewares: []agentgo.ModelMiddleware{func(ctx context.Context, call agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
-			call.Options = append(call.Options, agentgo.WithThinking(agentgo.ThinkingLow), agentgo.WithAPIKey("private-test-key"))
+			for _, option := range []agentgo.CallOption{agentgo.WithThinking(agentgo.ThinkingLow), agentgo.WithAPIKey("private-test-key")} {
+				option(call.Request.Config)
+			}
 			return next(ctx, call)
 		}},
 	}) {

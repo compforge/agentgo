@@ -108,7 +108,9 @@ func TestModelCallEventsRecordForwardedOptions(t *testing.T) {
 	})
 	events := runTestLoop(t, []AgentMessage{UserMsg("work")}, AgentContext{}, LoopConfig{Model: model, ThinkingLevel: ThinkingHigh,
 		ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
-			call.Options = append(call.Options, WithThinking("none"), WithMaxTokens(1024), WithAPIKey("private-test-key"))
+			for _, option := range []CallOption{WithThinking("none"), WithMaxTokens(1024), WithAPIKey("private-test-key")} {
+				option(call.Request.Config)
+			}
 			return next(ctx, call)
 		}},
 	})
@@ -208,5 +210,24 @@ func TestLengthRecoveryBudgetSurvivesCheckpoint(t *testing.T) {
 	}
 	if calls != 1 || end.Summary.EndReason != EndReasonLength || end.Summary.LengthRecoveries != 1 {
 		t.Fatalf("calls=%d summary=%+v", calls, end.Summary)
+	}
+}
+
+// +case:id=stream_error_is_not_commit,desc=`A stream emits an error event without a cause after partial text`,expect=`The call fails and retains diagnostic content without committing it`
+func TestStreamErrorWithoutCauseRetainsEvidence(t *testing.T) {
+	partial := assistantMsg("unfinished", "")
+	model := newScriptedStreamModel(func(ch chan<- StreamEvent) {
+		ch <- StreamEvent{Type: StreamEventTextDelta, Message: partial, Delta: "unfinished"}
+		ch <- StreamEvent{Type: StreamEventError}
+	})
+	events := runTestLoop(t, []AgentMessage{UserMsg("test")}, AgentContext{}, LoopConfig{Model: model})
+	end, ok := findEvent(events, EventModelExecEnd)
+	if !ok || !errors.Is(end.Err, ErrStreamPartial) || end.Message.TextContent() != "unfinished" {
+		t.Fatalf("end=%+v", end)
+	}
+	for _, event := range events {
+		if event.Type == EventMessageEnd && event.Message.GetRole() == RoleAssistant {
+			t.Fatal("failed stream committed")
+		}
 	}
 }

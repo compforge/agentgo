@@ -126,7 +126,9 @@ func TestAgentLoop_ModelMiddleware(t *testing.T) {
 				if got := call.Request.Messages[len(call.Request.Messages)-1].TextContent(); got != "prepared model context" {
 					t.Fatalf("model request tail = %q, want prepared model context", got)
 				}
-				call.Options = append(call.Options, WithThinking(ThinkingHigh), WithToolChoice("required"))
+				for _, option := range []CallOption{WithThinking(ThinkingHigh), WithToolChoice("required")} {
+					option(call.Request.Config)
+				}
 				result, err := next(ctx, call)
 				order = append(order, "after_model")
 				if result.Message.TextContent() != "answer" {
@@ -2192,7 +2194,9 @@ func TestAgentLoop_ModelMiddlewareWrapsEachAttempt(t *testing.T) {
 			ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
 				attempts = append(attempts, call.Attempt)
 				callIDs = append(callIDs, call.ID)
-				call.Options = append(call.Options, WithToolChoice("required"))
+				for _, option := range []CallOption{WithToolChoice("required")} {
+					option(call.Request.Config)
+				}
 				return next(ctx, call)
 			}},
 		},

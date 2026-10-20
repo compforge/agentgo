@@ -216,17 +216,10 @@ func generateSummaryOnce(ctx context.Context, model agentgo.ChatModel, execution
 // executeSummaryModel keeps summary calls on AgentGo's model execution path so
 // they inherit the enclosing Loop's middleware and observable coordinates.
 func executeSummaryModel(ctx context.Context, model agentgo.ChatModel, execution agentgo.Execution, messages []agentgo.Message, opts ...agentgo.CallOption) (agentgo.Message, error) {
-	call := agentgo.ModelExecution{
+	config := agentgo.ResolveCallConfig(opts)
+	result, err := agentgo.GenerateModel(ctx, model, agentgo.ModelExecution{
 		Execution: execution,
-		Request:   agentgo.LLMRequest{Messages: messages},
-		Options:   opts,
-	}
-	result, err := agentgo.ExecuteModel(ctx, call, func(ctx context.Context, execution agentgo.ModelExecution) (agentgo.ModelResult, error) {
-		response, err := model.Generate(ctx, execution.Request.Messages, execution.Request.Tools, execution.Options...)
-		if err != nil {
-			return agentgo.ModelResult{}, err
-		}
-		return agentgo.ModelResult{Message: response.Message}, nil
+		Request:   agentgo.LLMRequest{Messages: messages, Config: &config},
 	})
 	return result.Message, err
 }
