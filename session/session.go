@@ -148,7 +148,8 @@ func (s *Session) BeginRun() (*Run, error) {
 
 // Record appends a completed content or lifecycle observation. Token deltas,
 // partial message snapshots, progress updates and the duplicate model_response
-// notification are omitted. State is deliberately excluded: use SaveCheckpoint
+// notification are omitted unless it carries a length recovery decision. State
+// is deliberately excluded: use SaveCheckpoint
 // explicitly at a valid boundary. Errors are returned without changing the loop.
 func (r *Run) Record(event agentgo.Event) error {
 	s := r.session
@@ -158,14 +159,19 @@ func (r *Run) Record(event agentgo.Event) error {
 		return err
 	}
 	switch event.Type {
-	case agentgo.EventMessageStart, agentgo.EventMessageUpdate, agentgo.EventToolExecUpdate, agentgo.EventModelResponse:
+	case agentgo.EventMessageStart, agentgo.EventMessageUpdate, agentgo.EventToolExecUpdate:
 		return nil
+	case agentgo.EventModelResponse:
+		if event.LengthRecovery == nil {
+			return nil
+		}
 	}
 	if event.Type == "" {
 		return fmt.Errorf("session %s run %s: empty event type", s.id, r.id)
 	}
 	data := EventData{
 		TurnIndex: event.TurnIndex, ModelRequest: event.ModelRequest,
+		ModelCall: event.ModelCall, LengthRecovery: event.LengthRecovery,
 		ToolID: event.ToolID, Tool: event.Tool, ToolLabel: event.ToolLabel, Args: event.Args,
 		Disposition: event.Disposition, IsError: event.IsError,
 		Summary: event.Summary, ContextOperation: event.ContextOperation,

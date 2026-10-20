@@ -38,6 +38,15 @@ func WithMaxTurns(n int) AgentOption {
 	return func(a *Agent) { a.maxTurns = n }
 }
 
+// WithMaxLengthRecoveries sets the maximum automatic length recoveries per run.
+// Zero or negative disables recovery. Omitting this option preserves the default (3).
+func WithMaxLengthRecoveries(n int) AgentOption {
+	return func(a *Agent) {
+		limit := n
+		a.maxLengthRecoveries = &limit
+	}
+}
+
 // WithLengthRecoveryPrompt overrides the user message injected when output
 // is truncated (max_tokens) with no completed tool calls. Empty keeps the
 // built-in default prompt.

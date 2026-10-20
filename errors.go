@@ -27,7 +27,10 @@ import (
 
 // Sentinel errors. Use with errors.Is.
 var (
-	ErrMaxTurns         = errors.New("max turns reached")
+	ErrMaxTurns = errors.New("max turns reached")
+	// ErrOutputTruncated is a run-level failure after length recovery is unavailable.
+	// A single provider response with StopReasonLength is not itself an error.
+	ErrOutputTruncated  = errors.New("model output truncated: length recovery unavailable")
 	ErrNoModel          = errors.New("no model configured")
 	ErrNoMessages       = errors.New("cannot continue: no messages in context")
 	ErrAlreadyRunning   = errors.New("agent is already running")

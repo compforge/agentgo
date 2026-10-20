@@ -61,6 +61,7 @@ func (a *Agent) buildConfig(continuing bool) LoopConfig {
 		AfterTurn:             a.afterTurn,
 		StopGuard:             a.stopGuard,
 		LengthRecoveryPrompt:  a.lengthRecoveryPrompt,
+		MaxLengthRecoveries:   a.maxLengthRecoveries,
 		AbortMarkerText:       a.abortMarkerText,
 		AbortMarkerToolText:   a.abortMarkerToolText,
 		CacheLastMessage:      a.cacheLastMessage,

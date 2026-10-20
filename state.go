@@ -3,6 +3,8 @@ package agentgo
 // RunProgress is the loop-owned progress needed to continue an unfinished
 // run from a completed turn boundary.
 type RunProgress struct {
+	// EndReason preserves a terminal decision across a saved turn boundary.
+	EndReason             EndReason      `codec:"end_reason,omitempty"`
 	Active                bool           `codec:"active"` // false after terminal run finalization
 	NextTurn              bool           `codec:"next_turn"`
 	CompletedTurns        int            `codec:"completed_turns"`

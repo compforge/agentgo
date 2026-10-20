@@ -151,6 +151,7 @@ type result struct {
 type Usage struct {
 	Input      int     `json:"input"`
 	Output     int     `json:"output"`
+	Reasoning  int     `json:"reasoning,omitempty"` // included in Output, not an additional charge
 	CacheRead  int     `json:"cache_read"`
 	CacheWrite int     `json:"cache_write"`
 	Cost       float64 `json:"cost"`
@@ -1065,6 +1066,7 @@ func (r *Runner) run(ctx context.Context, agentName, taskStr string, modelOverri
 				if msg, ok := ev.Message.(agentgo.Message); ok && msg.Usage != nil {
 					su.Input += msg.Usage.Input
 					su.Output += msg.Usage.Output
+					su.Reasoning += msg.Usage.Reasoning
 					su.CacheRead += msg.Usage.CacheRead
 					su.CacheWrite += msg.Usage.CacheWrite
 					if msg.Usage.Cost != nil {

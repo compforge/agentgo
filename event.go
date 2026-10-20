@@ -90,6 +90,7 @@ type EndReason string
 
 const (
 	EndReasonStop     EndReason = "stop"
+	EndReasonLength   EndReason = "length" // truncated output with no remaining automatic recovery
 	EndReasonMaxTurns EndReason = "max_turns"
 	EndReasonAborted  EndReason = "aborted"
 	EndReasonError    EndReason = "error"
@@ -98,10 +99,11 @@ const (
 // RunSummary captures loop facts that are known at the end of a run.
 // It intentionally excludes higher-level policy judgments.
 type RunSummary struct {
-	TurnCount  int
-	ToolCalls  int
-	ToolErrors int
-	EndReason  EndReason
+	TurnCount        int
+	ToolCalls        int
+	ToolErrors       int
+	EndReason        EndReason
+	LengthRecoveries int
 }
 
 // DeltaKind identifies what kind of content a message_update delta carries.
@@ -149,7 +151,28 @@ type Event struct {
 	ContextItems []ContextItem   // for context_projected
 	Compaction   *CompactionInfo // for context_compacted
 	Summary      *RunSummary     // for agent_end: factual run summary
-	State        *AgentState     // for agent_start/turn_end/agent_end: loop state at that boundary
+	// ModelCall reports requested settings: start has the pre-middleware values;
+	// end has the settings forwarded to the model, or nil if middleware did not
+	// dispatch. These are not a claim about the provider's effective effort.
+	ModelCall *ModelCallSettings
+	// LengthRecovery accompanies model_response for truncated responses without
+	// completed tool calls. The Message retains the actual StopReason.
+	LengthRecovery *LengthRecoveryInfo
+	State          *AgentState // for agent_start/turn_end/agent_end: loop state at that boundary
+}
+
+// ModelCallSettings is the credential-free inference intent observable per call.
+type ModelCallSettings struct {
+	ThinkingLevel  ThinkingLevel `json:"thinking_level,omitempty"`
+	ThinkingBudget int           `json:"thinking_budget,omitempty"`
+	MaxTokens      int           `json:"max_tokens,omitempty"`
+}
+
+// LengthRecoveryInfo records a continuation decision, not a transport retry.
+type LengthRecoveryInfo struct {
+	Count       int // recoveries already scheduled in this run
+	Limit       int
+	WillRecover bool
 }
 
 // RetryInfo carries retry context for EventRetry events.
