@@ -13,19 +13,22 @@ type lifecycleContextKey struct{}
 
 func TestLifecycleNestedModelAndDerivedContexts(t *testing.T) {
 	var calls []Execution
+	executor := NewModelExecutor(ModelExecutorConfig{Middlewares: []ModelMiddleware{func(ctx context.Context, execution ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
+		calls = append(calls, execution.Execution)
+		return next(context.WithValue(ctx, lifecycleContextKey{}, "model"), execution)
+	}}})
 	tool := NewFuncTool("inspect", "inspect", nil, func(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
 		parent, ok := ExecutionFromContext(ctx)
 		if !ok || parent.ID != "inspect-1" || ctx.Value(lifecycleContextKey{}) != "tool" {
 			t.Errorf("tool context lost: %+v", parent)
 		}
-		_, err := ExecuteModel(ctx, ModelExecution{Execution: Execution{ID: "inspect-1/model", Kind: ExecutionKindModel, TurnIndex: 1, Attempt: 1}},
-			func(ctx context.Context, execution ModelExecution) (ModelResult, error) {
-				current, _ := ExecutionFromContext(ctx)
-				if current != execution.Execution || execution.ParentID != parent.ID || ctx.Value(lifecycleContextKey{}) != "model" {
-					t.Errorf("nested model context = %+v, execution = %+v", current, execution.Execution)
-				}
-				return ModelResult{Message: assistantMsg("detail", StopReasonStop)}, nil
-			})
+		_, err := executor.Call(ctx, callOptionFuncModel(func(ctx context.Context, _ *LLMRequest, _ CallConfig) (*LLMResponse, error) {
+			current, _ := ExecutionFromContext(ctx)
+			if current.ParentID != parent.ID || ctx.Value(lifecycleContextKey{}) != "model" {
+				t.Errorf("nested context: %+v", current)
+			}
+			return &LLMResponse{Message: assistantMsg("detail", StopReasonStop)}, nil
+		}), ModelExecution{Execution: Execution{ID: "inspect-1/model", Kind: ExecutionKindModel, TurnIndex: 1, Attempt: 1}})
 		return json.RawMessage(`"detail"`), err
 	})
 	model := callOptionFuncModel(func(ctx context.Context, _ *LLMRequest, _ CallConfig) (*LLMResponse, error) {
@@ -47,10 +50,7 @@ func TestLifecycleNestedModelAndDerivedContexts(t *testing.T) {
 			}
 			return next(context.WithValue(ctx, lifecycleContextKey{}, "tool"), execution)
 		}},
-		ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, execution ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
-			calls = append(calls, execution.Execution)
-			return next(context.WithValue(ctx, lifecycleContextKey{}, "model"), execution)
-		}},
+		ModelExecutor: executor,
 	})
 	if len(calls) != 3 || calls[1].ID != "inspect-1/model" || calls[1].ParentID != "inspect-1" {
 		t.Fatalf("model middleware calls = %+v", calls)

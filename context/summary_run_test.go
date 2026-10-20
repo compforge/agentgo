@@ -13,11 +13,18 @@ type stubModel struct {
 }
 
 func (m stubModel) Generate(ctx context.Context, messages []agentgo.Message, tools []agentgo.ToolSpec, opts ...agentgo.CallOption) (*agentgo.LLMResponse, error) {
-	return m.generate(ctx, messages, tools, opts...)
+	panic("summary must use GenerateStream")
 }
 
 func (m stubModel) GenerateStream(ctx context.Context, messages []agentgo.Message, tools []agentgo.ToolSpec, opts ...agentgo.CallOption) (<-chan agentgo.StreamEvent, error) {
-	return nil, context.Canceled
+	response, err := m.generate(ctx, messages, tools, opts...)
+	if err != nil {
+		return nil, err
+	}
+	ch := make(chan agentgo.StreamEvent, 1)
+	ch <- agentgo.StreamEvent{Type: agentgo.StreamEventDone, Message: response.Message}
+	close(ch)
+	return ch, nil
 }
 
 func (m stubModel) SupportsTools() bool { return true }

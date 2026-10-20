@@ -31,9 +31,9 @@ type AgentContext struct {
 type LLMRequest struct {
 	Messages []Message  `json:"messages"`
 	Tools    []ToolSpec `json:"tools,omitempty"`
-	// Config is the resolved per-call configuration for transport adapters.
-	// ModelExecution.Options remains authoritative inside the loop. APIKey is
-	// local-only and is excluded from JSON serialization.
+	// Config is the authoritative per-call input after middleware. Provider
+	// defaults remain owned by the model. APIKey is local-only; execution
+	// events redact it and JSON serialization excludes it.
 	Config *CallConfig `json:"config,omitempty"`
 }
 
@@ -109,11 +109,9 @@ type LoopConfig struct {
 	// FollowUp: called when the agent would otherwise stop.
 	GetFollowUpMessages func() []AgentMessage
 
-	// ModelMiddlewares wrap each AgentGo-owned physical model attempt, including
-	// context summarization. ToolMiddlewares wrap each tool execution. First
-	// middleware is outermost.
-	ModelMiddlewares []ModelMiddleware
-	ToolMiddlewares  []ToolMiddleware
+	// ModelExecutor is shared with context summaries. Nil uses the default executor.
+	ModelExecutor   *ModelExecutor
+	ToolMiddlewares []ToolMiddleware
 
 	// MaxToolConcurrency limits parallel tool execution.
 	// 0 or 1 = sequential (default, backward compatible).

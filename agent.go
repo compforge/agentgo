@@ -25,7 +25,7 @@ type Agent struct {
 	contextEstimateFn    ContextEstimateFn
 	toolResultFactory    func(ToolCall, ToolResult) AgentMessage
 	toolGate             ToolGate
-	modelMiddlewares     []ModelMiddleware
+	modelExecutor        *ModelExecutor
 	toolMiddlewares      []ToolMiddleware
 	maxToolConcurrency   int
 	maxLengthRecoveries  *int
@@ -661,10 +661,11 @@ func (a *Agent) BuildLLMMessages() ([]Message, error) {
 	sp := a.systemPrompt
 	mgr := a.contextManager
 	artifacts := a.artifacts
+	executor := a.modelExecutor
 	a.mu.Unlock()
 
 	if mgr != nil {
-		view, err := mgr.Transform(context.Background(), TransformContext{Messages: msgs, Artifacts: artifacts})
+		view, err := mgr.Transform(context.Background(), TransformContext{Messages: msgs, Artifacts: artifacts, ModelExecutor: executor})
 		if err != nil {
 			return nil, err
 		}

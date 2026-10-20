@@ -37,7 +37,9 @@ agentgo/
    ContextItem / ContextDemand 共享身份协议，但 kind、representation、
    signal、提取器和评分含义归应用；权限、终止和 Context 策略均通过扩展点注入。
 3. **Event stream 是统一观测面**：模型、工具、Context 投影/压缩及结束状态都从 Event 输出；新增运行
-   能力时优先补完整事实事件，而不是让 UI、日志或 Harness 猜内部状态。
+   能力时优先补完整事实事件，而不是让 UI、日志或 Harness 猜内部状态。独立模型调用通过
+   `ModelExecutor.Call` 复用同一执行契约；`ModelExecution.Request.Config` 是唯一调用配置，
+   middleware 后发布脱敏快照。失败响应与 usage 保留为诊断事实，不进入消息历史或工具执行。
 4. **Context 投影与提交分离**：单次模型调用的 transient projection 不应悄悄覆盖运行基线；只有显式
    commit/recovery 契约可以替换历史；压缩候选的消息和材料一起接受后才报告已提交事实。
    Transformer 在最终模型请求前执行一次，可扩大、缩小或调整消息，与压缩预算无关。

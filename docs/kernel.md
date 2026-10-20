@@ -101,17 +101,23 @@ Turn hook 负责准备输入和观察已提交的 turn，Middleware 包裹模型
 观测适配器组合这些公开契约；内核不另设 telemetry 层，也不依赖特定时间线或 tracing SDK。
 
 Middleware 按注册顺序由外向内执行，可修改请求、派生 context 或短路返回已知结果；每层最多调用一次
-`next`。模型重试由 Loop 管理，工具可能有外部副作用，不允许 Middleware 隐式重复执行。派生 context
+`next`。对话调用的重试由 Loop 管理，独立调用由宿主管理；工具可能有外部副作用，Middleware 不得隐式重复执行。派生 context
 会传到 provider，以及工具的校验、预览、授权与实际调用；`ExecutionFromContext` 返回当前执行坐标。
-工具或 ContextManager 内的模型工作通过 `ExecuteModel` 进入相同执行路径，缺省 `ParentID` 从 context
-继承；直接调用 provider 不受此入口管理。嵌套调用必须在所属操作返回前完成；并发工具也可能并发进入
+Loop、summary 和独立模型工作统一通过显式 `ModelExecutor.Call` 执行，底层消费 `GenerateStream`，
+返回最终结果并发布 `model_stream` 增量事实。只有对话调用将进度投影为 `message_start` / `message_update`；
+summary 和工具内部模型输出不进入对话消息流。`WithModelExecutor` 或 `LoopConfig.ModelExecutor` 注入执行器，
+`TransformContext.ModelExecutor` 传给 ContextManager；工具通过构造参数或闭包持有执行器。
+Middleware 与 observer 属于执行器配置，不从 context 查找。context 仅携带取消、父执行坐标及内部 run 事件出口；
+缺省 `ParentID` 从父执行继承。宿主提供 Execution ID 与 Attempt，无须创建 Loop 或手工构造生命周期事件。
+直接调用 `ChatModel.Generate` / `GenerateStream` 是 provider 协议入口，不受执行管线管理。
+嵌套调用必须在所属操作返回前完成；并发工具也可能并发进入
 模型 Middleware，调用状态应保持局部。Middleware 返回错误会影响执行，观测写入失败由适配器自行
 处理，不能伪装成业务执行失败。模型、ContextManager 方法和工具执行边界将 panic 转为失败结果。
 
 | 事实 | 边界与解释 |
 |------|------------|
 | `turn_start` / `turn_end` | 用 `TurnIndex` 关联。准备、模型或提交失败仍结束已开始的 turn；此时 `Err` 非空、`State` 为空，不推进已完成轮数，也不调用 `AfterTurn`。完整提交的 turn 才携带可恢复的 `State`。 |
-| `model_exec_start` / `model_exec_end` | 每次物理模型尝试，包含 Middleware；重试保持逻辑 ID，递增 Attempt。内部 summary 和工具中的模型调用也使用此路径。 |
+| `model_exec_start` / `model_exec_end` | 每次模型执行尝试，包含 Middleware 及其路由尝试；重试保持逻辑 ID，递增 Attempt。内部 summary 和工具中的模型调用也使用此路径。 |
 | `tool_queued` → `tool_exec_start` / `tool_exec_end` | 区分调度等待与执行管线。执行管线包含 Middleware、参数校验、预览和授权；结束时的 `Disposition` 区分实际调用、前置拒绝、Middleware 短路和跳过。 |
 | `tool_invoke_start` / `tool_invoke_end` | 仅覆盖 `Tool.Execute` / `ExecuteContent`，起始事件携带授权后实参。拒绝、短路和跳过不产生调用事件。 |
 | `context_prepare_start` / `context_prepare_end` | 覆盖 `ContextManager.Compact`、`Transform` 或 `RecoverOverflow`，包括不压缩、失败的情况；`ContextOperation` 区分方法。结束表示方法返回，后续提交成功与否仍由提交路径负责。 |
@@ -165,10 +171,19 @@ stateful Agent 使用 `WithMaxLengthRecoveries(n)`。每次恢复继续受原 co
 思考，但不能与 off 同时设置；不支持的参数必须返回错误，不得被静默忽略。
 
 `model_exec_start.ModelCall` 是 middleware 前的调用意图；`model_exec_end.ModelCall` 是实际交给
-ChatModel 的选项，middleware 未 dispatch 时为 nil。LiteLLM 适配器在响应 metadata 的
+ChatModel 的配置摘要，middleware 未 dispatch 时为 nil。LiteLLM 适配器在响应 metadata 的
 `model_request_settings` 中记录补齐输出上限后的 provider-neutral 请求值。两者都只记录
 thinking level、thinking budget 与 max tokens，不记录凭据或原始 ProviderOptions。Session JSONL 同时保留调用设置和截断恢复决定。这些字段不是
 供应商内部实际生效档位的回显，不能用它们推断服务端的别名映射。
+
+`ModelExecution.Request.Config` 是一次调用的唯一配置来源。CallOption 只用于构造配置及适配
+ChatModel 协议，执行中不保留另一份 options。Middleware 修改 Config 后，`model_request` 记录完整
+配置快照，包括 temperature、structured output、tool choice 和缓存提示；APIKey 在内存事件及 JSON
+中均被排除。可变配置值被快照隔离，模型默认值仍归 provider 所有。
+
+失败调用的 `ModelResult.Message` 与 `model_exec_end.Message` 保留已收到的文本、推理、工具内容、
+ProviderState 和 usage。异常中携带的 PartialStreamError 也归一到该响应出口。只有成功返回的响应
+可以继续进入 Loop 提交及工具执行；记录失败响应不代表接受它，也不触发 checkpoint。
 
 `proxy.StreamFn` 的 `LLMRequest.Config` 携带解析后的调用选项，远端实现需要读取并应用；旧实现忽略
 该字段不会自动获得 effort 控制。APIKey 只供本地 callback 使用，JSON 不传输该字段。
@@ -266,7 +281,7 @@ ContextEngine 的压缩回调报告候选，Committed 为 false；Loop 只在接
 Sync 记录已接受的基线；Transform 和候选准备只改变视图观察，异步事件消费不反向更新引擎基线。
 普通模型重试使用已接受的基线重新转换请求，不重复压缩。provider overflow 单独触发一次恢复并重试，
 提交型恢复更新基线，非提交型恢复只提供重试视图；同一逻辑调用保持 Execution ID，Attempt 递增。
-摘要内部模型调用经过 ExecuteModel 和模型 Middleware，使用同一材料准备态，不递归进入会话准备流程。
+摘要内部模型调用经过显式 ModelExecutor.Call 和模型 Middleware，使用同一材料准备态，不递归进入会话准备流程。
 
 ### Turn 配置与流式事件
 

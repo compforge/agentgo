@@ -67,7 +67,7 @@ func (s *SummaryCompactor) Compact(ctx context.Context, input agentgo.TransformC
 	if expect >= 1 {
 		return messages, nil
 	}
-	return s.apply(ctx, messages, clampRatio(expect))
+	return s.apply(ctx, input, clampRatio(expect))
 }
 
 // SetPostSummaryHooks replaces the hook list used to inject lightweight
@@ -76,7 +76,8 @@ func (s *SummaryCompactor) SetPostSummaryHooks(hooks ...PostSummaryHook) {
 	s.cfg.PostSummaryHooks = hooks
 }
 
-func (s *SummaryCompactor) apply(ctx context.Context, messages []agentgo.AgentMessage, expect float64) ([]agentgo.AgentMessage, error) {
+func (s *SummaryCompactor) apply(ctx context.Context, input agentgo.TransformContext, expect float64) ([]agentgo.AgentMessage, error) {
+	messages := input.Messages
 	if len(messages) == 0 || s.cfg.Model == nil {
 		return messages, nil
 	}
@@ -98,6 +99,7 @@ func (s *SummaryCompactor) apply(ctx context.Context, messages []agentgo.AgentMe
 	}
 
 	cfg := summaryRunConfig{
+		Executor: input.ModelExecutor, Artifacts: input.Artifacts,
 		Model:               s.cfg.Model,
 		ContextWindow:       ctxWindow,
 		ReserveTokens:       reserve,

@@ -383,7 +383,8 @@ func (e *ContextEngine) apply(ctx context.Context, input agentgo.TransformContex
 		expect = float64(threshold) / float64(before)
 	}
 
-	next, err := e.cfg.Compactor.Compact(ctx, agentgo.TransformContext{Messages: view, Artifacts: input.Artifacts}, clampRatio(expect))
+	input.Messages = view
+	next, err := e.cfg.Compactor.Compact(ctx, input, clampRatio(expect))
 	if err != nil {
 		return applyResult{}, err
 	}

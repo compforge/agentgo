@@ -235,11 +235,11 @@ func TestAgentContinueRestoresStateWithLoader(t *testing.T) {
 		WithSnapshotLoader(func(context.Context, SnapshotLoadContext) (AgentSnapshot, error) {
 			return AgentSnapshot{State: restored}, nil
 		}),
-		WithModelMiddlewares(func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
+		WithModelExecutor(NewModelExecutor(ModelExecutorConfig{Middlewares: []ModelMiddleware{func(ctx context.Context, call ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
 			attempts = append(attempts, call.TurnIndex)
 			callIDs = append(callIDs, call.ID)
 			return next(ctx, call)
-		}),
+		}}})),
 	)
 
 	if err := agent.Continue(context.Background()); err != nil {
@@ -368,12 +368,12 @@ func TestAgentLoopModelMiddlewareCanReturnKnownOutcome(t *testing.T) {
 				modelCalled = true
 				return nil, errors.New("must not execute")
 			}),
-			ModelMiddlewares: []ModelMiddleware{func(_ context.Context, call ModelExecution, _ ModelExecuteFunc) (ModelResult, error) {
+			ModelExecutor: NewModelExecutor(ModelExecutorConfig{Middlewares: []ModelMiddleware{func(_ context.Context, call ModelExecution, _ ModelExecuteFunc) (ModelResult, error) {
 				if call.TurnIndex != 1 || call.Attempt != 1 {
 					t.Fatalf("call coordinate = turn %d attempt %d", call.TurnIndex, call.Attempt)
 				}
 				return ModelResult{Message: assistantMsg("known", StopReasonStop)}, nil
-			}},
+			}}}),
 		},
 	)
 

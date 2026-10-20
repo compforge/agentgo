@@ -45,7 +45,8 @@ type Record struct {
 }
 
 // EventData preserves diagnostic facts without serializing runtime handles or
-// a full AgentState on every event. Message is a codec-encoded AgentMessage;
+// a full AgentState on every event. Message and PartialMessage are codec-encoded
+// AgentMessages; failed model evidence is stored only in PartialMessage.
 // ModelRequest is the final model-facing representation, not recovery state.
 type EventData struct {
 	ModelAttempt     *agentgo.ModelAttempt       `json:"model_attempt,omitempty"`

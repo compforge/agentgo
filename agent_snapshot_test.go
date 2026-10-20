@@ -180,10 +180,10 @@ func TestAgentContinueRestoresSnapshotBeforeRun(t *testing.T) {
 			}}, nil
 		}),
 		WithModel(mockModel(assistantMsg("finished", StopReasonStop))),
-		WithModelMiddlewares(func(ctx context.Context, execution ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
+		WithModelExecutor(NewModelExecutor(ModelExecutorConfig{Middlewares: []ModelMiddleware{func(ctx context.Context, execution ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
 			turnIndexes = append(turnIndexes, execution.TurnIndex)
 			return next(ctx, execution)
-		}),
+		}}})),
 	)
 
 	if err := agent.Continue(context.Background()); err != nil {
@@ -254,10 +254,10 @@ func TestAgentSetSnapshotResumesPendingTurn(t *testing.T) {
 			}
 			return &LLMResponse{Message: assistantMsg("finished", StopReasonStop)}, nil
 		})),
-		WithModelMiddlewares(func(ctx context.Context, execution ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
+		WithModelExecutor(NewModelExecutor(ModelExecutorConfig{Middlewares: []ModelMiddleware{func(ctx context.Context, execution ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
 			turnIndexes = append(turnIndexes, execution.TurnIndex)
 			return next(ctx, execution)
-		}),
+		}}})),
 	)
 	snapshot := AgentSnapshot{State: AgentState{
 		Messages: []AgentMessage{
@@ -328,10 +328,10 @@ func TestAgentLoopNewPromptResetsInactiveContinuation(t *testing.T) {
 				CompletedTurns:  4,
 				PendingMessages: []AgentMessage{UserMsg("stale continuation")},
 			}},
-			ModelMiddlewares: []ModelMiddleware{func(ctx context.Context, execution ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
+			ModelExecutor: NewModelExecutor(ModelExecutorConfig{Middlewares: []ModelMiddleware{func(ctx context.Context, execution ModelExecution, next ModelExecuteFunc) (ModelResult, error) {
 				turnIndexes = append(turnIndexes, execution.TurnIndex)
 				return next(ctx, execution)
-			}},
+			}}}),
 		},
 	)
 

@@ -48,7 +48,8 @@ func (c *compactorChain) Compact(ctx context.Context, input agentgo.TransformCon
 		if current > 0 {
 			stageExpect = float64(target) / float64(current)
 		}
-		next, err := compactor.Compact(ctx, agentgo.TransformContext{Messages: view, Artifacts: input.Artifacts}, clampRatio(stageExpect))
+		input.Messages = view
+		next, err := compactor.Compact(ctx, input, clampRatio(stageExpect))
 		if err != nil {
 			return nil, err
 		}

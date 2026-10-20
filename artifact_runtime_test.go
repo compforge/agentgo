@@ -67,11 +67,11 @@ func TestArtifactHookAndTransformRuntime(t *testing.T) {
 			afterTurn++
 			return turn.Artifacts.AddArtifact(runtimeArtifact{"turn", "complete"}, true)
 		}),
-		agentgo.WithModelMiddlewares(func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
+		agentgo.WithModelExecutor(agentgo.NewModelExecutor(agentgo.ModelExecutorConfig{Middlewares: []agentgo.ModelMiddleware{func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
 			check(execution.Artifacts)
 			models++
 			return next(ctx, execution)
-		}),
+		}}})),
 		agentgo.WithAfterRun(func(_ context.Context, run agentgo.AfterRunContext) error {
 			check(run.Artifacts)
 			after++
@@ -332,7 +332,7 @@ func TestArtifactAgentAndNestedLoopIsolation(t *testing.T) {
 				}
 				return run.Artifacts.AddArtifact(runtimeArtifact{id, "value"}, false)
 			}),
-			agentgo.WithModelMiddlewares(func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
+			agentgo.WithModelExecutor(agentgo.NewModelExecutor(agentgo.ModelExecutorConfig{Middlewares: []agentgo.ModelMiddleware{func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
 				var terminal *agentgo.AgentState
 				nested := agentgo.AgentLoop(ctx, []agentgo.AgentMessage{agentgo.UserMsg("nested")}, agentgo.AgentContext{}, agentgo.LoopConfig{
 					Model: executionTestModel{reply: "nested done"},
@@ -355,7 +355,7 @@ func TestArtifactAgentAndNestedLoopIsolation(t *testing.T) {
 					t.Error("nested material leaked into parent")
 				}
 				return next(ctx, execution)
-			}))
+			}}})))
 		if err := agent.Prompt(t.Context(), "go"); err != nil {
 			t.Fatal(err)
 		}
@@ -366,7 +366,7 @@ func TestArtifactAgentAndNestedLoopIsolation(t *testing.T) {
 	}
 }
 
-// Summary model calls go through the same runtime middleware while compaction
+// Summary model calls go through the same explicit executor while compaction
 // replaces only messages. Both threshold and provider-overflow paths must retain
 // the material capability when rebuilding the next request.
 func TestArtifactCompactionRuntime(t *testing.T) {
@@ -396,7 +396,7 @@ func TestArtifactCompactionRuntime(t *testing.T) {
 					manager = run.Artifacts
 					return run.Artifacts.AddArtifact(runtimeArtifact{"material", "kept"}, false)
 				}),
-				agentgo.WithModelMiddlewares(func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
+				agentgo.WithModelExecutor(agentgo.NewModelExecutor(agentgo.ModelExecutorConfig{Middlewares: []agentgo.ModelMiddleware{func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
 					if _, ok := execution.Artifacts.GetArtifact("material"); !ok {
 						t.Error("summary/model middleware lost material")
 					}
@@ -415,7 +415,7 @@ func TestArtifactCompactionRuntime(t *testing.T) {
 						}
 					}
 					return next(ctx, execution)
-				}))
+				}}})))
 			if err := agent.PromptMessages(t.Context(), agentgo.UserMsg(strings.Repeat("old content ", 1500)), agentgo.UserMsg("latest")); err != nil {
 				t.Fatal(err)
 			}

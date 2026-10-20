@@ -64,8 +64,8 @@ The file records native event types with an `EventData` payload:
 
 | Fact | Recorded content |
 |---|---|
-| `model_request` | Messages and tool declarations passed to the model executor after middleware, including internal summary/nested model calls |
-| `model_exec_end` | Model result or error; a failed partial stream also retains its partial response separately |
+| `model_request` | Messages, tool declarations and resolved per-call Config after middleware, including summary and standalone calls |
+| `model_exec_end` | Successful response in Message, or failed response evidence in PartialMessage alongside the error, including reported usage and provider state |
 | `message_end` | Committed, codec-encoded AgentMessage, preserving application types |
 | `tool_exec_start` | Requested tool and arguments |
 | `tool_invoke_start` | Actual arguments after middleware and authorization |
@@ -75,8 +75,12 @@ The file records native event types with an `EventData` payload:
 `model_request` describes the AgentGo executor boundary, not a provider's HTTP
 wire body or effective provider defaults. It excludes CallOption functions and
 credentials. Middleware short-circuits have a result without an executor request.
-Message containers are detached for publication; opaque metadata values and tool
-schemas remain read-only. `message_end` and `model_exec_end` have distinct meaning:
+Message containers and mutable Config fields are detached for publication; opaque
+message metadata values and tool declarations' schemas remain read-only. APIKey is
+also removed from the in-memory request event. JSON-valued Config fields such as
+ToolChoice and ResponseFormat.JSONSchema.Schema are frozen as json.RawMessage;
+unencodable values carry a snapshot_error diagnostic without retaining the input.
+`message_end` and `model_exec_end` have distinct meaning:
 a model result is not proof that the corresponding conversation message committed.
 
 Token deltas, partial message snapshots, tool progress/preview updates, and the
@@ -88,6 +92,54 @@ The default codec knows built-in AgentGo messages. Supply a JSON-compatible code
 with custom message/artifact registrations, and `context.CodecOptions()` when
 context-owned representations are used. Unknown typed messages cause an explicit
 recording error rather than silently lowering away their original content.
+
+## Standalone model calls
+
+A recording run can also scope standalone calls. Use an explicit executor and event
+observer for model work; the host supplies IDs unique within that run.
+
+```go
+var recordErr error
+executor := agentgo.NewModelExecutor(agentgo.ModelExecutorConfig{
+    Middlewares: middlewares,
+    OnEvent: func(event agentgo.Event) {
+        // Events are serialized within a call. Synchronize across concurrent calls.
+        recordErr = errors.Join(recordErr, run.Record(event))
+    },
+})
+result, callErr := executor.Call(ctx, model, agentgo.ModelExecution{
+    Execution: agentgo.Execution{
+        ID: "classify", Kind: agentgo.ExecutionKindModel, Attempt: 1,
+    },
+    Request: agentgo.LLMRequest{
+        Messages: messages,
+        Config: &agentgo.CallConfig{ThinkingLevel: agentgo.ThinkingMedium},
+    },
+})
+// result.Message may contain diagnostic content even when callErr != nil.
+// Handle callErr and recordErr independently, then close the recording run.
+```
+
+The executor always consumes `GenerateStream`, returning the final result while
+publishing transient `model_stream` events to `OnEvent`. It emits start, the final request after middleware, routed attempts when
+using a Router, and end. A middleware short-circuit omits the request and provider
+attempts. `Call` adds no retries and does not commit messages. Partial
+responses never create message_end or recovery checkpoints. Standalone completion
+is determined by model_exec_end and its error; no agent_end is manufactured.
+
+Share an executor with an Agent via `WithModelExecutor(executor)`, or set
+`LoopConfig.ModelExecutor` for a bare Loop. Context preparation receives it in
+`TransformContext.ModelExecutor`; summaries pass staged `Artifacts` explicitly.
+Tools that call models receive the executor through their own constructor or
+closure. Context carries cancellation, parent execution coordinates and internal
+run event routing, never middleware configuration. A nil executor uses the default
+policy. Shared middleware and observers must be safe for concurrent calls.
+
+When a call belongs to a Loop, its model facts also appear on that Loop's event
+stream. Record either that stream or the executor observer to avoid duplicates.
+Only the Loop's conversation call produces `message_start` / `message_update`;
+auxiliary model progress is `model_stream`. Session recording omits both forms of
+transient progress and stores completion or failure at `model_exec_end`.
 
 ## Reading and interrupted files
 
@@ -104,7 +156,8 @@ ignored, even if that line happens to contain syntactically valid JSON.
 `Open` validates the file and removes only that unfinished tail before appending.
 An interrupted old run remains incomplete; a new run gets a fresh ID. `run_close`
 means the recording scope was closed, not that execution succeeded. Success or
-failure comes from `agent_end`; a missing terminal event remains a gap. Kernel
+failure comes from `agent_end` for loops and `model_exec_end` for standalone calls.
+A missing terminal event remains a gap. Kernel
 event delivery is best-effort after cancellation, so continuously drain events.
 
 `Record` writes directly to the file without an application buffer, but does not

@@ -95,13 +95,13 @@ func TestCompactionPublishesMessagesAndArtifactsTogether(t *testing.T) {
 					}
 					return nil
 				},
-				ModelMiddlewares: []agentgo.ModelMiddleware{func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
+				ModelExecutor: agentgo.NewModelExecutor(agentgo.ModelExecutorConfig{Middlewares: []agentgo.ModelMiddleware{func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
 					modelCalls++
 					if mode == "overflow" && modelCalls == 1 {
 						return agentgo.ModelResult{}, failed
 					}
 					return next(ctx, execution)
-				}},
+				}}}),
 			})
 			for event := range events {
 				if event.Type == agentgo.EventContextCompacted {
@@ -154,7 +154,7 @@ func TestOrdinaryRetryTransformsOnceWithoutRecompacting(t *testing.T) {
 	var final *agentgo.AgentState
 	for event := range agentgo.AgentLoop(t.Context(), []agentgo.AgentMessage{agentgo.UserMsg("task")}, agentgo.AgentContext{}, agentgo.LoopConfig{
 		Model: executionTestModel{reply: "done"}, ContextManager: engine, MaxRetries: 1,
-		ModelMiddlewares: []agentgo.ModelMiddleware{func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
+		ModelExecutor: agentgo.NewModelExecutor(agentgo.ModelExecutorConfig{Middlewares: []agentgo.ModelMiddleware{func(ctx context.Context, execution agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
 			models++
 			if execution.ID != "model-1" || execution.Attempt != models {
 				t.Errorf("execution=%+v", execution.Execution)
@@ -166,7 +166,7 @@ func TestOrdinaryRetryTransformsOnceWithoutRecompacting(t *testing.T) {
 				return agentgo.ModelResult{}, contextRetryError{}
 			}
 			return next(ctx, execution)
-		}},
+		}}}),
 	}) {
 		if event.Type == agentgo.EventAgentEnd {
 			final = event.State

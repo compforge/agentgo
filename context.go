@@ -92,8 +92,10 @@ type ContextRecoveryResult struct {
 // accepted runtime artifacts. Message and artifact payloads are shared values:
 // replace them rather than mutate in place. Callers outside AgentLoop own staging.
 type TransformContext struct {
-	Artifacts ArtifactManager
-	Messages  []AgentMessage
+	// ModelExecutor is the explicit model policy for auxiliary calls.
+	ModelExecutor *ModelExecutor
+	Artifacts     ArtifactManager
+	Messages      []AgentMessage
 }
 
 // ContextManager owns prompt projection, committed rewrites, overflow

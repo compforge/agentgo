@@ -31,7 +31,8 @@ func (e *ContextEngine) Transform(ctx context.Context, input agentgo.TransformCo
 	view := copyMessages(messages)
 	for _, transformer := range e.cfg.Transformers {
 		var err error
-		view, err = transformer.Transform(ctx, agentgo.TransformContext{Messages: view, Artifacts: input.Artifacts})
+		input.Messages = view
+		view, err = transformer.Transform(ctx, input)
 		if err != nil {
 			return nil, err
 		}

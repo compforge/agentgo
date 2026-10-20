@@ -49,6 +49,13 @@
 // opt-in — context strategies, stop guards, sub-agents, middleware — reached
 // only when a use case needs it.
 //
+// [ModelExecutor.Call] is the shared execution boundary for conversation,
+// summary and standalone calls. It consumes a model stream, applies middleware,
+// publishes execution facts, and returns the final message or partial failure
+// evidence. Inject it with [WithModelExecutor] or [LoopConfig.ModelExecutor];
+// auxiliary context work receives it in [TransformContext.ModelExecutor]. The
+// caller owns retries and whether a result becomes conversation history.
+//
 // Models are adapters behind the [ChatModel] interface; the kernel imports no
 // LLM SDK. Provider errors are classified through the [RetryableError] and
 // [RetryHinter] interfaces plus the ErrProvider* sentinels, so any backend can

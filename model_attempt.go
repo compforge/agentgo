@@ -20,17 +20,10 @@ type ModelAttempt struct {
 	Usage        *Usage        `json:"usage,omitempty"`
 }
 
-// ReportModelAttempt publishes a routed attempt to the enclosing AgentLoop.
-// Outside a loop it is a no-op; routers may additionally offer a direct observer.
+// ReportModelAttempt publishes a routed attempt to the active model call.
+// With no observer it is a no-op; routers may additionally offer a direct observer.
 func ReportModelAttempt(ctx context.Context, attempt ModelAttempt, err error) {
-	runtime, _ := ctx.Value(modelExecutionRuntimeKey{}).(modelExecutionRuntime)
-	if runtime.emit == nil {
-		return
+	if report, ok := ctx.Value(modelAttemptReporterKey{}).(func(ModelAttempt, error)); ok {
+		report(attempt, err)
 	}
-	execution, ok := ExecutionFromContext(ctx)
-	var ref *Execution
-	if ok {
-		ref = executionRef(execution)
-	}
-	runtime.emit(Event{Type: EventModelAttempt, Execution: ref, ModelAttempt: &attempt, Err: err})
 }

@@ -28,65 +28,13 @@ type Capabilities struct {
 	Model            string
 	ProviderBaseline bool // model-specific limits are enforced by the provider
 
-	Thinking   ThinkingCapabilities
-	Tools      ToolCapabilities
-	Structured StructuredCapabilities
-	Streaming  StreamingCapabilities
-	Usage      UsageCapabilities
+	Thinking ThinkingCapabilities
 }
 
 type ThinkingCapabilities struct {
-	Supported     Support
-	Disable       Support
-	Efforts       []agentgo.ThinkingLevel
-	BudgetTokens  Support
-	IncludeOutput Support
-	Notes         []string
-}
-
-func (c ThinkingCapabilities) SupportsEffort(level agentgo.ThinkingLevel) bool {
-	for _, effort := range c.Efforts {
-		if effort == level {
-			return true
-		}
-	}
-	return false
-}
-
-type ToolCapabilities struct {
-	Calls               Support
-	ParallelCalls       Support
-	StrictSchema        Support
-	Choice              Support
-	MultimodalResults   Support
-	RequiresAdjacency   bool
-	RoundTripSignatures Support
-	HostedProviderTools Support
-}
-
-type StructuredCapabilities struct {
-	JSONObject Support
-	JSONSchema Support
-	Strict     Support
-	PromptOnly bool
-}
-
-type StreamingCapabilities struct {
-	Supported       Support
-	Usage           Support
-	ReasoningDeltas Support
-	ToolCallDeltas  Support
-	NativeResponses Support
-	IdleTimeout     Support
-}
-
-type UsageCapabilities struct {
-	InputTokens      Support
-	OutputTokens     Support
-	TotalTokens      Support
-	ReasoningTokens  Support
-	CacheReadTokens  Support
-	CacheWriteTokens Support
+	Supported Support
+	Disable   Support
+	Efforts   []agentgo.ThinkingLevel
 }
 
 func fromLiteLLMCapabilities(c litellm.Capabilities) Capabilities {

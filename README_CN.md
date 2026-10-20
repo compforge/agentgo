@@ -130,6 +130,8 @@ Hook 参数中的 State / Snapshot 是回调入口快照。`AfterTurn` 写入的
 
 `Execution` 为昂贵或对外可见的动作提供一次 Run 内稳定的身份。同一逻辑调用重试时保持 `ID` 不变并递增 `Attempt`；`ModelExecution` 与 `ToolExecution` 把该坐标贯穿 Middleware 和 Event stream。内部 summary 是 compaction 的子 Execution，宿主因此可以关联动作或复用已知结果，而 AgentGo 无需绑定 Ledger 或 Trace 的数据模型。
 
+独立模型调用通过 `ModelExecutor.Call` 复用 Loop 的 Middleware、最终请求快照和路由 attempt 事件。`ModelExecution.Request.Config` 是唯一调用配置；失败响应保留诊断内容和 usage，不提交历史。见[模型路由](docs/routing.md)与[会话记录](docs/session.md)。
+
 ## 扩展点
 
 | 需求 | 契约 |
@@ -143,7 +145,7 @@ Hook 参数中的 State / Snapshot 是回调入口快照。`AfterTurn` 写入的
 | 压缩策略 | `context.Compactor` |
 | Stateful Agent 恢复与收尾 | `AgentSnapshot` / `WithSnapshotLoader` / `WithBeforeRun` / `WithAfterRun` |
 | Turn 准备与状态观察 | `WithBeforeTurn` / `WithAfterTurn` |
-| 模型执行拦截 | `WithModelMiddlewares` |
+| 模型执行拦截 | `WithModelExecutor` |
 | 工具执行拦截 | `WithToolMiddlewares` |
 | 终止策略 | `StopGuard` |
 | UI、日志与轨迹采集 | `<-chan Event` / `Agent.Subscribe` |

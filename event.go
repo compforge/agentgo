@@ -28,6 +28,8 @@ const (
 	// EventModelRequest carries the effective request passed to the model
 	// executor after middleware. Short-circuited calls do not emit it.
 	EventModelRequest EventType = "model_request"
+	// EventModelStream is transient progress for any model call, including summaries.
+	EventModelStream EventType = "model_stream"
 	// EventModelResponse fires after a conversation model call and any tool
 	// executions it triggered. Internal model calls such as context summaries
 	// use model_exec_start/model_exec_end without becoming conversation output.
@@ -120,7 +122,8 @@ const (
 // Event is a lifecycle event emitted by the agent loop.
 // This is the single output channel for all lifecycle information.
 type Event struct {
-	Type EventType
+	ModelStream *StreamEvent // Transient progress; never a committed conversation message.
+	Type        EventType
 	// Timestamp is captured at the source before channel delivery can block.
 	// Concurrent producers need not arrive in timestamp order.
 	Timestamp time.Time
