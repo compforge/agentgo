@@ -14,6 +14,8 @@ import (
 // EventType identifies agent lifecycle event types.
 type EventType string
 
+const EventModelAttempt EventType = "model_attempt"
+
 const (
 	EventAgentStart EventType = "agent_start"
 	EventAgentEnd   EventType = "agent_end"
@@ -154,7 +156,8 @@ type Event struct {
 	// ModelCall reports requested settings: start has the pre-middleware values;
 	// end has the settings forwarded to the model, or nil if middleware did not
 	// dispatch. These are not a claim about the provider's effective effort.
-	ModelCall *ModelCallSettings
+	ModelCall    *ModelCallSettings
+	ModelAttempt *ModelAttempt
 	// LengthRecovery accompanies model_response for truncated responses without
 	// completed tool calls. The Message retains the actual StopReason.
 	LengthRecovery *LengthRecoveryInfo

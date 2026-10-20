@@ -20,6 +20,11 @@ func Snapshot(message agentgo.Message) agentgo.Message {
 			call.Args = slices.Clone(call.Args)
 			block.ToolCall = &call
 		}
+		if block.ProviderState != nil {
+			state := *block.ProviderState
+			state.Data = slices.Clone(state.Data)
+			block.ProviderState = &state
+		}
 		if block.Image != nil {
 			image := *block.Image
 			block.Image = &image

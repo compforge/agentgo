@@ -171,7 +171,7 @@ func (r *Run) Record(event agentgo.Event) error {
 	}
 	data := EventData{
 		TurnIndex: event.TurnIndex, ModelRequest: event.ModelRequest,
-		ModelCall: event.ModelCall, LengthRecovery: event.LengthRecovery,
+		ModelAttempt: event.ModelAttempt, ModelCall: event.ModelCall, LengthRecovery: event.LengthRecovery,
 		ToolID: event.ToolID, Tool: event.Tool, ToolLabel: event.ToolLabel, Args: event.Args,
 		Disposition: event.Disposition, IsError: event.IsError,
 		Summary: event.Summary, ContextOperation: event.ContextOperation,

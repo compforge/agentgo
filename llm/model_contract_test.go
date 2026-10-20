@@ -90,13 +90,13 @@ func TestThinkingOverrideReachesProviderWire(t *testing.T) {
 		t.Fatalf("unsupported budget was silently accepted: %v", err)
 	}
 	_, err = model.Generate(context.Background(), []agentgo.Message{agentgo.UserMsg("work")}, nil, agentgo.WithThinking("unsupported-effort"))
-	if err == nil || len(bodies) != calls {
-		t.Fatalf("unsupported effort was sent: calls=%d err=%v", len(bodies), err)
+	if err != nil || len(bodies) != calls+1 || bodies[len(bodies)-1]["reasoning_effort"] != "unsupported-effort" {
+		t.Fatalf("effort must reach the vendor unchanged: calls=%d err=%v", len(bodies), err)
 	}
 }
 
 func TestReasoningOnlyLengthResponsePreserved(t *testing.T) {
-	usage := litellm.Usage{InputTokens: 10, OutputTokens: 32, ReasoningTokens: 32, TotalTokens: 42}
+	usage := litellm.Usage{InputTokens: 10, OutputTokens: 32, ReasoningTokens: 32}
 	provider := &captureProvider{chatFunc: func(context.Context, *litellm.Request) (*litellm.Response, error) {
 		return &litellm.Response{Blocks: []litellm.Block{litellm.ReasoningBlock{Text: "partial reasoning"}}, FinishReason: litellm.FinishReasonLength, FinishReasonRaw: "length", Usage: usage}, nil
 	}}
@@ -106,7 +106,7 @@ func TestReasoningOnlyLengthResponsePreserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	streamProvider := &captureStreamProvider{events: []litellm.Event{
-		litellm.ReasoningDelta{Text: "partial reasoning"}, litellm.UsageEvent{Usage: usage}, litellm.DoneEvent{FinishReason: litellm.FinishReasonLength, FinishReasonRaw: "length", Provider: "capture", Model: "m"},
+		litellm.BlockStart{Index: 0, Block: litellm.ReasoningBlock{}}, litellm.ReasoningDelta{Index: 0, Text: "partial reasoning"}, litellm.BlockEnd{Index: 0}, litellm.UsageEvent{Usage: usage}, litellm.DoneEvent{FinishReason: litellm.FinishReasonLength, FinishReasonRaw: "length", Provider: "capture", Model: "m"},
 	}}
 	streamModel := NewLiteLLMAdapter("m", mustClient(t, streamProvider))
 	ch, err := streamModel.GenerateStream(context.Background(), []agentgo.Message{agentgo.UserMsg("work")}, nil, agentgo.WithThinking(agentgo.ThinkingHigh), agentgo.WithMaxTokens(32))

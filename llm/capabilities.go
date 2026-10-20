@@ -90,83 +90,13 @@ type UsageCapabilities struct {
 }
 
 func fromLiteLLMCapabilities(c litellm.Capabilities) Capabilities {
-	return Capabilities{
-		Provider:         c.Provider,
-		Model:            c.Model,
-		ProviderBaseline: true,
-		Thinking: ThinkingCapabilities{
-			Supported:     fromLiteLLMSupport(c.Thinking.Supported),
-			Disable:       fromLiteLLMSupport(c.Thinking.Disable),
-			Efforts:       fromLiteLLMThinkingEfforts(c.Thinking.Efforts),
-			BudgetTokens:  fromLiteLLMSupport(c.Thinking.BudgetTokens),
-			IncludeOutput: fromLiteLLMSupport(c.Thinking.IncludeOutput),
-			Notes:         append([]string(nil), c.Thinking.Notes...),
-		},
-		Tools: ToolCapabilities{
-			Calls:               fromLiteLLMSupport(c.Tools.Calls),
-			ParallelCalls:       fromLiteLLMSupport(c.Tools.ParallelCalls),
-			StrictSchema:        fromLiteLLMSupport(c.Tools.StrictSchema),
-			Choice:              fromLiteLLMSupport(c.Tools.Choice),
-			MultimodalResults:   fromLiteLLMSupport(c.Tools.MultimodalResults),
-			RequiresAdjacency:   c.Tools.RequiresAdjacency,
-			RoundTripSignatures: fromLiteLLMSupport(c.Tools.RoundTripSignatures),
-			HostedProviderTools: fromLiteLLMSupport(c.Tools.HostedProviderTools),
-		},
-		Structured: StructuredCapabilities{
-			JSONObject: fromLiteLLMSupport(c.Structured.JSONObject),
-			JSONSchema: fromLiteLLMSupport(c.Structured.JSONSchema),
-			Strict:     fromLiteLLMSupport(c.Structured.Strict),
-			PromptOnly: c.Structured.PromptOnly,
-		},
-		Streaming: StreamingCapabilities{
-			Supported:       fromLiteLLMSupport(c.Streaming.Supported),
-			Usage:           fromLiteLLMSupport(c.Streaming.Usage),
-			ReasoningDeltas: fromLiteLLMSupport(c.Streaming.ReasoningDeltas),
-			ToolCallDeltas:  fromLiteLLMSupport(c.Streaming.ToolCallDeltas),
-			NativeResponses: fromLiteLLMSupport(c.Streaming.NativeResponses),
-			IdleTimeout:     fromLiteLLMSupport(c.Streaming.IdleTimeout),
-		},
-		Usage: UsageCapabilities{
-			InputTokens:      fromLiteLLMSupport(c.Usage.InputTokens),
-			OutputTokens:     fromLiteLLMSupport(c.Usage.OutputTokens),
-			TotalTokens:      fromLiteLLMSupport(c.Usage.TotalTokens),
-			ReasoningTokens:  fromLiteLLMSupport(c.Usage.ReasoningTokens),
-			CacheReadTokens:  fromLiteLLMSupport(c.Usage.CacheReadTokens),
-			CacheWriteTokens: fromLiteLLMSupport(c.Usage.CacheWriteTokens),
-		},
-	}
-}
-
-func fromLiteLLMSupport(s litellm.Support) Support {
-	switch s {
-	case litellm.SupportNo:
-		return SupportNo
-	case litellm.SupportYes:
-		return SupportYes
-	case litellm.SupportPartial:
-		return SupportPartial
-	default:
-		return SupportUnknown
-	}
-}
-
-func fromLiteLLMThinkingEfforts(efforts []string) []agentgo.ThinkingLevel {
-	if len(efforts) == 0 {
-		return nil
-	}
-	out := make([]agentgo.ThinkingLevel, 0, len(efforts))
-	for _, effort := range efforts {
-		switch level := agentgo.ThinkingLevel(effort); level {
-		case agentgo.ThinkingMinimal,
-			agentgo.ThinkingLow,
-			agentgo.ThinkingMedium,
-			agentgo.ThinkingHigh,
-			agentgo.ThinkingXHigh,
-			agentgo.ThinkingMax:
-			out = append(out, level)
+	support := func(v bool) Support {
+		if v {
+			return SupportYes
 		}
+		return SupportNo
 	}
-	return out
+	return Capabilities{ProviderBaseline: true, Thinking: ThinkingCapabilities{Supported: support(c.ThinkingEffort), Disable: support(c.DisableThinking)}}
 }
 
 func (c Capabilities) ThinkingPolicy() ThinkingPolicy {

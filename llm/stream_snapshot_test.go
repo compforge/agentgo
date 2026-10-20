@@ -9,10 +9,9 @@ import (
 
 func TestStreamEventsRetainPublishedContent(t *testing.T) {
 	p := &captureStreamProvider{events: []litellm.Event{
-		litellm.ContentDelta{Text: "A"}, litellm.ContentDelta{Text: "B"},
-		litellm.ReasoningDelta{Text: "first"}, litellm.ReasoningDelta{Text: " second"},
-		litellm.RefusalDelta{Text: "no"}, litellm.RefusalDelta{Text: " more"},
-		litellm.DoneEvent{FinishReason: litellm.FinishReasonStop},
+		litellm.BlockStart{Index: 0, Block: litellm.TextBlock{}}, litellm.BlockStart{Index: 1, Block: litellm.ReasoningBlock{}},
+		litellm.TextDelta{Index: 0, Text: "A"}, litellm.TextDelta{Index: 0, Text: "B"}, litellm.ReasoningDelta{Index: 1, Text: "first"}, litellm.ReasoningDelta{Index: 1, Text: " second"},
+		litellm.BlockEnd{Index: 0}, litellm.BlockEnd{Index: 1}, litellm.DoneEvent{FinishReason: litellm.FinishReasonStop},
 	}}
 	m := NewLiteLLMAdapter("m", mustClient(t, p))
 	ch, err := m.GenerateStream(t.Context(), []agentgo.Message{agentgo.UserMsg("hi")}, nil)
@@ -33,20 +32,16 @@ func TestStreamEventsRetainPublishedContent(t *testing.T) {
 			if got := ev.Message.ThinkingContent(); got != "first" {
 				t.Errorf("first thinking = %q", got)
 			}
-		case "no":
-			if got := ev.Message.Metadata["refusal"]; got != "no" {
-				t.Errorf("first refusal = %v", got)
-			}
 		}
 	}
 }
 
 func TestStreamEventsConcurrentRead(t *testing.T) {
-	p := &captureStreamProvider{}
+	p := &captureStreamProvider{events: []litellm.Event{litellm.BlockStart{Index: 0, Block: litellm.TextBlock{}}, litellm.BlockStart{Index: 1, Block: litellm.ReasoningBlock{}}}}
 	for range 1000 {
-		p.events = append(p.events, litellm.ContentDelta{Text: "x"}, litellm.ReasoningDelta{Text: "y"}, litellm.RefusalDelta{Text: "z"})
+		p.events = append(p.events, litellm.TextDelta{Index: 0, Text: "x"}, litellm.ReasoningDelta{Index: 1, Text: "y"})
 	}
-	p.events = append(p.events, litellm.DoneEvent{FinishReason: litellm.FinishReasonStop})
+	p.events = append(p.events, litellm.BlockEnd{Index: 0}, litellm.BlockEnd{Index: 1}, litellm.DoneEvent{FinishReason: litellm.FinishReasonStop})
 	m := NewLiteLLMAdapter("m", mustClient(t, p))
 	ch, err := m.GenerateStream(t.Context(), []agentgo.Message{agentgo.UserMsg("hi")}, nil)
 	if err != nil {

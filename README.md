@@ -165,3 +165,5 @@ Built-in packages include typed state encoding under `codec/`, model adapters un
 ## License
 
 Apache License 2.0
+
+- [Model routing and provider boundaries](docs/routing.md) — bounded failover, attempt events, litellm v1.9.6 (Go 1.26+).

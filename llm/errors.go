@@ -3,8 +3,6 @@ package llm
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 	"time"
 
 	"github.com/compforge/agentgo"
@@ -16,7 +14,7 @@ import (
 // classification facts (agentgo.RetryableError / RetryHinter, and the
 // ErrContextOverflow / ErrProvider* sentinels via errors.Is) without importing
 // litellm. Unwrap exposes the original error, so callers that DO know litellm
-// can still match it with errors.As(&litellm.LiteLLMError{}).
+// can still match it with errors.As(&litellm.Error{}).
 type providerError struct{ err error }
 
 // wrapProviderError wraps a raw litellm error for kernel consumption. Control
@@ -33,51 +31,10 @@ func wrapProviderError(err error) error {
 	return &providerError{err: err}
 }
 
-// Error appends the structured facts litellm carries but keeps out of its own
-// Error() text (error type, HTTP status, provider, model). Gateway messages
-// are often as vague as "Provider returned error"; without these facts users
-// cannot tell a config mistake from an upstream outage. This is the single
-// seam every provider error string flows through (engine retry events, host
-// surfaces, logs), so enriching here fixes them all at once.
-func (e *providerError) Error() string {
-	msg := e.err.Error()
-	var le *litellm.LiteLLMError
-	if !errors.As(e.err, &le) {
-		return msg
-	}
-	facts := make([]string, 0, 4)
-	if le.Type != "" {
-		facts = append(facts, string(le.Type))
-	}
-	if le.StatusCode != 0 {
-		facts = append(facts, fmt.Sprintf("HTTP %d", le.StatusCode))
-	}
-	if le.Provider != "" {
-		facts = append(facts, le.Provider)
-	}
-	if le.Model != "" {
-		facts = append(facts, le.Model)
-	}
-	if len(facts) == 0 {
-		return msg
-	}
-	return msg + " [" + strings.Join(facts, ", ") + "]"
-}
-
-func (e *providerError) Unwrap() error { return e.err }
-
-// Retryable reports litellm's own retryability verdict (network, timeout,
-// rate-limit, overloaded, and upstream provider errors are retryable).
-func (e *providerError) Retryable() bool { return litellm.IsRetryableError(e.err) }
-
-// RetryAfter surfaces a provider Retry-After hint (rate-limit responses) as a
-// duration, or 0 when none is present.
-func (e *providerError) RetryAfter() time.Duration {
-	if s := litellm.GetRetryAfter(e.err); s > 0 {
-		return time.Duration(s) * time.Second
-	}
-	return 0
-}
+func (e *providerError) Error() string             { return e.err.Error() }
+func (e *providerError) Unwrap() error             { return e.err }
+func (e *providerError) Retryable() bool           { return litellm.IsTemporaryError(e.err) }
+func (e *providerError) RetryAfter() time.Duration { return litellm.RetryAfter(e.err) }
 
 // Is maps litellm's category checks onto the kernel's sentinels so callers can
 // classify provider failures with a plain errors.Is. Other targets fall through
@@ -85,28 +42,28 @@ func (e *providerError) RetryAfter() time.Duration {
 func (e *providerError) Is(target error) bool {
 	switch target {
 	case agentgo.ErrContextOverflow:
-		return litellm.IsContextOverflowError(e.err)
+		return litellm.ErrorTypeOf(e.err) == litellm.ErrorTypeContextOverflow
 	case agentgo.ErrProviderRateLimit:
-		return litellm.IsRateLimitError(e.err)
+		return litellm.ErrorTypeOf(e.err) == litellm.ErrorTypeRateLimit
 	case agentgo.ErrProviderQuota:
 		return isQuotaError(e.err)
 	case agentgo.ErrProviderTimeout:
-		return litellm.IsTimeoutError(e.err)
+		return litellm.ErrorTypeOf(e.err) == litellm.ErrorTypeTimeout
 	case agentgo.ErrProviderStreamIdle:
-		return litellm.IsStreamIdleError(e.err)
+		return agentgo.IsStreamIdleMessage(e.err.Error())
 	case agentgo.ErrProviderNetwork:
-		return litellm.IsNetworkError(e.err)
+		return litellm.ErrorTypeOf(e.err) == litellm.ErrorTypeNetwork
 	case agentgo.ErrProviderAuth:
-		return litellm.IsAuthError(e.err)
+		return litellm.ErrorTypeOf(e.err) == litellm.ErrorTypeAuth
 	case agentgo.ErrProviderOverloaded:
-		return litellm.IsOverloadedError(e.err)
+		return litellm.ErrorTypeOf(e.err) == litellm.ErrorTypeOverloaded
 	case agentgo.ErrProviderContentFilter:
-		return litellm.IsContentFilterError(e.err)
+		return litellm.ErrorTypeOf(e.err) == litellm.ErrorTypeContentFilter
 	}
 	return false
 }
 
 func isQuotaError(err error) bool {
-	var e *litellm.LiteLLMError
+	var e *litellm.Error
 	return errors.As(err, &e) && e.Type == litellm.ErrorTypeQuota
 }

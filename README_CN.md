@@ -165,3 +165,5 @@ Hook 参数中的 State / Snapshot 是回调入口快照。`AfterTurn` 写入的
 ## 许可证
 
 Apache License 2.0
+
+- [Model routing and provider boundaries](docs/routing.md) — bounded failover, attempt events, litellm v1.9.6 (Go 1.26+).
