@@ -266,3 +266,56 @@ func TestStatefulAgentRecordsAfterRunAndContextMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestLengthAndThinkingFactsSurviveRecording(t *testing.T) {
+	s, path := newTestSession(t)
+	run := mustRun(t, s)
+	zero := 0
+	model := scriptModel(func(context.Context, []agentgo.Message) (agentgo.Message, error) {
+		return agentgo.Message{Role: agentgo.RoleAssistant, StopReason: agentgo.StopReasonLength, Content: []agentgo.ContentBlock{agentgo.ThinkingBlock("partial")}, Usage: &agentgo.Usage{Output: 32, Reasoning: 32}}, nil
+	})
+	for event := range agentgo.AgentLoop(t.Context(), []agentgo.AgentMessage{agentgo.UserMsg("work")}, agentgo.AgentContext{}, agentgo.LoopConfig{
+		Model: model, ThinkingLevel: agentgo.ThinkingHigh, MaxLengthRecoveries: &zero,
+		ModelMiddlewares: []agentgo.ModelMiddleware{func(ctx context.Context, call agentgo.ModelExecution, next agentgo.ModelExecuteFunc) (agentgo.ModelResult, error) {
+			call.Options = append(call.Options, agentgo.WithThinking(agentgo.ThinkingLow), agentgo.WithAPIKey("private-test-key"))
+			return next(ctx, call)
+		}},
+	}) {
+		if err := run.Record(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := run.Close(); err != nil {
+		t.Fatal(err)
+	}
+	start, end, response, terminal := false, false, false, false
+	for _, record := range recordsAt(t, path) {
+		if len(record.Data) == 0 {
+			continue
+		}
+		if strings.Contains(string(record.Data), "private-test-key") {
+			t.Fatal("credential recorded")
+		}
+		data := decodeEvent(t, record)
+		switch agentgo.EventType(record.Type) {
+		case agentgo.EventModelExecStart:
+			start = data.ModelCall != nil && data.ModelCall.ThinkingLevel == agentgo.ThinkingHigh
+		case agentgo.EventModelExecEnd:
+			end = data.ModelCall != nil && data.ModelCall.ThinkingLevel == agentgo.ThinkingLow
+			var message agentgo.AgentMessage
+			if err := s.codec.Unmarshal(data.Message, &message); err != nil {
+				t.Fatal(err)
+			}
+			if message.(agentgo.Message).Usage.Reasoning != 32 {
+				t.Fatal("reasoning usage lost")
+			}
+		case agentgo.EventModelResponse:
+			response = data.LengthRecovery != nil && data.LengthRecovery.Limit == 0 && !data.LengthRecovery.WillRecover
+		case agentgo.EventAgentEnd:
+			terminal = data.Summary != nil && data.Summary.EndReason == agentgo.EndReasonLength
+		}
+	}
+	if !start || !end || !response || !terminal {
+		t.Fatalf("recorded start=%v end=%v response=%v terminal=%v", start, end, response, terminal)
+	}
+}

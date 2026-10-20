@@ -914,3 +914,15 @@ func TestTool_ThinkingOffIsForwarded(t *testing.T) {
 		t.Fatalf("off thinking: got %q, want %q (must be forwarded, not dropped)", got, agentgo.ThinkingOff)
 	}
 }
+
+func TestRunnerReportsExhaustedLengthRecovery(t *testing.T) {
+	message := agentgo.Message{Role: agentgo.RoleAssistant, Content: []agentgo.ContentBlock{agentgo.ThinkingBlock("partial")}, StopReason: agentgo.StopReasonLength, Usage: &agentgo.Usage{Output: 10, Reasoning: 10}}
+	model := newMock(message, message, message, message)
+	result, err := NewRunner(Config{Name: "writer", Description: "writer", Model: model, MaxTurns: 10}).Run(context.Background(), "writer", "work")
+	if !errors.Is(err, agentgo.ErrOutputTruncated) {
+		t.Fatalf("error=%v", err)
+	}
+	if result.Usage.Output != 40 || result.Usage.Reasoning != 40 {
+		t.Fatalf("usage=%+v", result.Usage)
+	}
+}

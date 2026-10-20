@@ -129,7 +129,9 @@ func WithClientOptions(opts ...litellm.ClientOption) ModelOption {
 // every request's Extra map (e.g. min_p, presence_penalty, or provider keys like
 // chat_template_kwargs). OpenAI-compatible providers pass these through verbatim
 // into the request body — the extra_body convention. Per-call Extra entries
-// (e.g. session_id) are added alongside, not overwritten.
+// (e.g. session_id) are added alongside. Explicit WithThinking/WithThinkingBudget
+// replace raw thinking defaults for that call; provider-specific mapping remains
+// in the provider. Other Extra keys are preserved.
 func WithExtra(extra map[string]any) ModelOption {
 	return func(c *modelConfig) { c.extra = extra }
 }
@@ -275,6 +277,7 @@ func (l *LiteLLMAdapter) Generate(ctx context.Context, messages []agentgo.Messag
 	}
 
 	msg := convertResponse(ltResp)
+	recordModelSettings(&msg, ltReq)
 	if msg.Usage != nil {
 		msg.Usage.Cost = CalculateCost(pricingForUsage(l.Info().Pricing, msg.Usage), msg.Usage)
 	}
@@ -454,6 +457,7 @@ func (l *LiteLLMAdapter) GenerateStream(ctx context.Context, messages []agentgo.
 				Model:       model,
 				Input:       u.InputTokens,
 				Output:      u.OutputTokens,
+				Reasoning:   u.ReasoningTokens,
 				CacheRead:   u.CacheReadTokens,
 				CacheWrite:  u.CacheWriteTokens,
 				TotalTokens: u.TotalTokens,
@@ -464,6 +468,7 @@ func (l *LiteLLMAdapter) GenerateStream(ctx context.Context, messages []agentgo.
 			partial.StopReason = mapStopReason(resp.FinishReason)
 			mergeResponseMetadata(&partial, resp)
 		}
+		recordModelSettings(&partial, request)
 		eventChan <- agentgo.StreamEvent{Type: agentgo.StreamEventDone, Message: streaming.Snapshot(partial), StopReason: partial.StopReason}
 	}()
 
@@ -704,6 +709,7 @@ func convertResponse(response *litellm.Response) agentgo.Message {
 			Model:       model,
 			Input:       response.Usage.InputTokens,
 			Output:      response.Usage.OutputTokens,
+			Reasoning:   response.Usage.ReasoningTokens,
 			CacheRead:   response.Usage.CacheReadTokens,
 			CacheWrite:  response.Usage.CacheWriteTokens,
 			TotalTokens: response.Usage.TotalTokens,
@@ -844,11 +850,37 @@ func applyCallConfig(ctx context.Context, req *litellm.Request, opts []agentgo.C
 	callCfg := agentgo.ResolveCallConfig(opts)
 	ctx = contextWithAPIKey(ctx, callCfg.APIKey)
 
+	if callCfg.ThinkingBudget < 0 {
+		return ctx, fmt.Errorf("llm: thinking budget cannot be negative")
+	}
+	if callCfg.ThinkingBudget > 0 && callCfg.ThinkingLevel == agentgo.ThinkingOff {
+		return ctx, fmt.Errorf("llm: thinking budget cannot be set when thinking is off")
+	}
+	if callCfg.ThinkingLevel != "" || callCfg.ThinkingBudget > 0 {
+		if caps.Thinking.Supported == litellm.SupportNo {
+			return ctx, fmt.Errorf("llm: provider %q model %q does not support thinking overrides", caps.Provider, req.Model)
+		}
+		if callCfg.ThinkingLevel == agentgo.ThinkingOff && caps.Thinking.Disable == litellm.SupportNo {
+			return ctx, fmt.Errorf("llm: provider %q model %q cannot disable thinking", caps.Provider, req.Model)
+		}
+		if callCfg.ThinkingBudget > 0 && caps.Thinking.BudgetTokens == litellm.SupportNo {
+			return ctx, fmt.Errorf("llm: provider %q model %q does not support a thinking token budget", caps.Provider, req.Model)
+		}
+		// These are raw defaults, not an additional authority over a typed
+		// per-call override. Provider-specific effort mapping stays in litellm.
+		for _, key := range []string{"thinking", "reasoning_effort", "reasoning", "enable_thinking", "thinking_budget"} {
+			delete(req.ProviderOptions, key)
+		}
+	}
+
 	// Thinking level + budget.
 	// Anthropic budget-token thinking requires temperature=1.
 	switch callCfg.ThinkingLevel {
 	case "":
-		// Leave unspecified to allow model/provider defaults.
+		// A budget alone opts into thinking without specifying an effort.
+		if callCfg.ThinkingBudget > 0 {
+			req.Thinking = &litellm.Thinking{Mode: litellm.ThinkingEnabled, BudgetTokens: &callCfg.ThinkingBudget}
+		}
 	case agentgo.ThinkingOff:
 		req.Thinking = &litellm.Thinking{Mode: litellm.ThinkingDisabled}
 	default:
@@ -856,6 +888,8 @@ func applyCallConfig(ctx context.Context, req *litellm.Request, opts []agentgo.C
 		if callCfg.ThinkingBudget > 0 {
 			req.Thinking.BudgetTokens = &callCfg.ThinkingBudget
 		}
+	}
+	if req.Thinking != nil && req.Thinking.Mode == litellm.ThinkingEnabled {
 		// Each provider owns its thinking-time sampling constraint: Anthropic
 		// wants temperature=1 (omitting it defaults to 1), while mimo forbids a
 		// custom temperature/top_p entirely. Clear the injected default and let
@@ -1158,4 +1192,31 @@ func findPendingToolCallBlock(content []agentgo.ContentBlock, byID map[string]in
 		}
 	}
 	return -1
+}
+
+// recordModelSettings captures the adapter's resolved request, not an assertion
+// about a provider's internal effort mapping. No raw provider options are logged.
+func recordModelSettings(message *agentgo.Message, req *litellm.Request) {
+	settings := agentgo.ModelCallSettings{}
+	if req.MaxTokens != nil {
+		settings.MaxTokens = *req.MaxTokens
+	}
+	if req.Thinking != nil {
+		if req.Thinking.Mode == litellm.ThinkingDisabled {
+			settings.ThinkingLevel = agentgo.ThinkingOff
+		} else {
+			settings.ThinkingLevel = agentgo.ThinkingLevel(req.Thinking.Effort)
+		}
+		if req.Thinking.BudgetTokens != nil {
+			settings.ThinkingBudget = *req.Thinking.BudgetTokens
+		}
+	}
+	if message.Metadata == nil {
+		message.Metadata = make(map[string]any)
+	}
+	message.Metadata["model_request_settings"] = map[string]any{
+		"thinking_level":  string(settings.ThinkingLevel),
+		"thinking_budget": settings.ThinkingBudget,
+		"max_tokens":      settings.MaxTokens,
+	}
 }

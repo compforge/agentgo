@@ -74,18 +74,20 @@ func ExecuteModel(ctx context.Context, execution ModelExecution, next ModelExecu
 	}
 	ctx = ContextWithExecution(ctx, execution.Execution)
 	if runtime.emit != nil {
-		runtime.emit(Event{Type: EventModelExecStart, Execution: executionRef(execution.Execution)})
+		runtime.emit(Event{Type: EventModelExecStart, Execution: executionRef(execution.Execution), ModelCall: modelCallSettings(execution.Options)})
 	}
 
+	var dispatched *ModelCallSettings
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			result, err = ModelResult{}, fmt.Errorf("model execution %s panicked: %v", execution.ID, recovered)
 		}
 		if runtime.emit != nil {
-			runtime.emit(Event{Type: EventModelExecEnd, Execution: executionRef(execution.Execution), Message: result.Message, Err: err})
+			runtime.emit(Event{Type: EventModelExecEnd, Execution: executionRef(execution.Execution), Message: result.Message, ModelCall: dispatched, Err: err})
 		}
 	}()
 	execute := func(ctx context.Context, call ModelExecution) (ModelResult, error) {
+		dispatched = modelCallSettings(call.Options)
 		if runtime.emit != nil {
 			request := snapshotModelRequest(call.Request)
 			runtime.emit(Event{Type: EventModelRequest, Execution: executionRef(call.Execution), ModelRequest: &request})
@@ -140,4 +142,9 @@ func snapshotModelRequest(request LLMRequest) LLMRequest {
 		}
 	}
 	return request
+}
+
+func modelCallSettings(opts []CallOption) *ModelCallSettings {
+	cfg := ResolveCallConfig(opts)
+	return &ModelCallSettings{ThinkingLevel: cfg.ThinkingLevel, ThinkingBudget: cfg.ThinkingBudget, MaxTokens: cfg.MaxTokens}
 }

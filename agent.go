@@ -28,6 +28,7 @@ type Agent struct {
 	modelMiddlewares     []ModelMiddleware
 	toolMiddlewares      []ToolMiddleware
 	maxToolConcurrency   int
+	maxLengthRecoveries  *int
 	lengthRecoveryPrompt string
 	abortMarkerText      string
 	abortMarkerToolText  string

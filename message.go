@@ -138,8 +138,11 @@ type Usage struct {
 	Provider string `json:"provider,omitempty" codec:"provider,omitempty"`
 	Model    string `json:"model,omitempty" codec:"model,omitempty"`
 
-	Input       int   `json:"input" codec:"input"`
-	Output      int   `json:"output" codec:"output"`
+	Input  int `json:"input" codec:"input"`
+	Output int `json:"output" codec:"output"`
+	// Reasoning is the provider-reported portion of Output used for reasoning.
+	// Zero may mean unreported; never add it to Output, TotalTokens, or cost.
+	Reasoning   int   `json:"reasoning,omitempty" codec:"reasoning,omitempty"`
 	CacheRead   int   `json:"cache_read" codec:"cache_read"`
 	CacheWrite  int   `json:"cache_write" codec:"cache_write"`
 	TotalTokens int   `json:"total_tokens" codec:"total_tokens"`
@@ -153,6 +156,7 @@ func (u *Usage) Add(other *Usage) {
 	}
 	u.Input += other.Input
 	u.Output += other.Output
+	u.Reasoning += other.Reasoning
 	u.CacheRead += other.CacheRead
 	u.CacheWrite += other.CacheWrite
 	u.TotalTokens += other.TotalTokens
@@ -185,8 +189,12 @@ const (
 
 // NormalizeThinkingLevel returns the canonical level used internally.
 // Empty and "auto" both mean "do not send a thinking override".
+// "none" is a compatibility spelling for ThinkingOff, never an enabled effort.
 func NormalizeThinkingLevel(level ThinkingLevel) ThinkingLevel {
 	level = ThinkingLevel(strings.ToLower(strings.TrimSpace(string(level))))
+	if level == "none" {
+		return ThinkingOff
+	}
 	if level == "auto" {
 		return ThinkingAuto
 	}

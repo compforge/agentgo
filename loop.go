@@ -163,6 +163,9 @@ func finishAgentRun(current *AgentContext, state *AgentState, sink eventSink) {
 		sink.emit(Event{Type: EventTurnEnd, TurnIndex: sink.terminal.turnIndex, Err: sink.terminal.event.Err})
 	}
 	state.Progress.Active = false
+	if summary := sink.terminal.event.Summary; summary != nil {
+		state.Progress.EndReason = summary.EndReason
+	}
 	state.IsRunning = false
 	finalState := snapshotRunState(*state, current)
 	sink.terminal.event.State = &finalState
@@ -199,6 +202,9 @@ func commitMessage(currentCtx *AgentContext, newMessages *[]AgentMessage, config
 //   - Tool results are appended after the assistant message that requested them.
 //   - Steering stops not-yet-started tools. Started tools follow their
 //     InterruptBehavior and may continue or be cancelled.
+//
+// +spec=`A truncated answer without completed tools cannot become a normal stop after recovery is exhausted.`
+// +link=component://docs/kernel.md
 func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]AgentMessage, config LoopConfig, sink eventSink, state *AgentState) {
 	type runSummaryState struct {
 		toolCalls  int
@@ -210,15 +216,21 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 	}
 	buildSummary := func(turnCount int, reason EndReason) *RunSummary {
 		return &RunSummary{
-			TurnCount:  turnCount,
-			ToolCalls:  summaryState.toolCalls,
-			ToolErrors: summaryState.toolErrors,
-			EndReason:  reason,
+			TurnCount:        turnCount,
+			ToolCalls:        summaryState.toolCalls,
+			ToolErrors:       summaryState.toolErrors,
+			EndReason:        reason,
+			LengthRecoveries: state.Progress.LengthRecoveries,
 		}
 	}
 	maxTurns := config.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = defaultMaxTurns
+	}
+
+	maxLengthRecoveries := defaultMaxLengthRecoveries
+	if config.MaxLengthRecoveries != nil {
+		maxLengthRecoveries = max(0, *config.MaxLengthRecoveries)
 	}
 
 	turnCount := state.Progress.CompletedTurns
@@ -319,7 +331,14 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 	var lastAssistantMsg Message
 
 	if state.Progress.CompletedTurns > 0 && !state.Progress.NextTurn {
-		sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonStop)})
+		reason := state.Progress.EndReason
+		if reason == "" {
+			reason = EndReasonStop
+		}
+		if reason == EndReasonLength {
+			sink.emit(Event{Type: EventError, Err: ErrOutputTruncated})
+		}
+		sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, reason)})
 		return
 	}
 
@@ -443,10 +462,13 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 		// stripped due to incomplete JSON — the tool was never executed,
 		// so recovery is safe. The recovery prompt tells the model to
 		// "break remaining work into smaller pieces."
-		shouldRecoverLength := assistantMsg.StopReason == StopReasonLength &&
-			len(toolCalls) == 0 &&
-			!callInfo.HasCompletedToolCalls &&
-			lengthRecoveryCount < defaultMaxLengthRecoveries
+		truncated := assistantMsg.StopReason == StopReasonLength &&
+			len(toolCalls) == 0 && !callInfo.HasCompletedToolCalls
+		shouldRecoverLength := truncated && lengthRecoveryCount < maxLengthRecoveries
+		var lengthRecovery *LengthRecoveryInfo
+		if truncated {
+			lengthRecovery = &LengthRecoveryInfo{Count: lengthRecoveryCount, Limit: maxLengthRecoveries, WillRecover: shouldRecoverLength}
+		}
 
 		var turnToolResults []ToolResult
 		if hasMoreToolCalls {
@@ -473,7 +495,7 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 			}
 		}
 
-		sink.emit(Event{Type: EventModelResponse, Execution: executionRef(callInfo.Execution), Message: assistantMsg, ToolResults: turnToolResults})
+		sink.emit(Event{Type: EventModelResponse, Execution: executionRef(callInfo.Execution), Message: assistantMsg, ToolResults: turnToolResults, LengthRecovery: lengthRecovery})
 		turnCount++
 		// Early exit: a terminal tool completed successfully. This is a
 		// normal stop, so it passes through the same StopGuard gate as
@@ -532,6 +554,18 @@ func runLoop(ctx context.Context, currentCtx *AgentContext, newMessages *[]Agent
 				return
 			}
 			continue
+		}
+
+		if truncated {
+			state.Progress.EndReason = EndReasonLength
+			state.Progress.NextTurn = false
+			state.Progress.PendingMessages = nil
+			if !runAfterTurn(turnCount, assistantMsg, turnToolResults) {
+				return
+			}
+			sink.emit(Event{Type: EventError, Err: ErrOutputTruncated})
+			sink.emit(Event{Type: EventAgentEnd, NewMessages: *newMessages, Summary: buildSummary(turnCount, EndReasonLength)})
+			return
 		}
 
 		// Get steering messages after turn completes

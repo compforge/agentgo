@@ -31,6 +31,10 @@ type AgentContext struct {
 type LLMRequest struct {
 	Messages []Message  `json:"messages"`
 	Tools    []ToolSpec `json:"tools,omitempty"`
+	// Config is the resolved per-call configuration for transport adapters.
+	// ModelExecution.Options remains authoritative inside the loop. APIKey is
+	// local-only and is excluded from JSON serialization.
+	Config *CallConfig `json:"config,omitempty"`
 }
 
 // LLMResponse carries the result of a single LLM call.
@@ -146,8 +150,13 @@ type LoopConfig struct {
 	// LengthRecoveryPrompt overrides the user message injected when the
 	// model's output is truncated (max_tokens) with no completed tool calls.
 	// Empty uses a built-in default. Each recovery is an extra LLM call on
-	// top of normal turn accounting, bounded by an internal cap.
+	// top of regular calls, counted toward MaxTurns and MaxLengthRecoveries.
 	LengthRecoveryPrompt string
+
+	// MaxLengthRecoveries limits automatic continuations after truncated output.
+	// Nil preserves the default (3); zero or negative disables recovery. The
+	// original context deadline and MaxTurns still apply.
+	MaxLengthRecoveries *int
 
 	// AbortMarkerText overrides the marker message recorded when a run is
 	// cancelled mid-inference (only when ShouldEmitAbortMarker returns true).
@@ -204,7 +213,7 @@ type CallOption func(*CallConfig)
 type CallConfig struct {
 	ThinkingLevel  ThinkingLevel
 	ThinkingBudget int    // max thinking tokens, 0 = use provider default
-	APIKey         string // per-call API key override, empty = use model default
+	APIKey         string `json:"-"` // local per-call override; never serialize credentials
 	SessionID      string // provider session caching identifier
 	PromptCacheKey string // prompt-cache routing identity, empty = no hint
 	MaxTokens      int    // per-call max tokens override, 0 = use model default

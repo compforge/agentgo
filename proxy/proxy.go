@@ -40,7 +40,9 @@ type Frame struct {
 }
 
 // StreamFn makes an LLM call through a remote proxy and returns a channel of
-// bandwidth-optimized frames.
+// bandwidth-optimized frames. Config contains the resolved per-call options.
+// APIKey is available only to the local callback and is excluded when the request
+// is JSON-encoded; remote authentication remains the transport owner's job.
 type StreamFn func(ctx context.Context, req *agentgo.LLMRequest) (<-chan Frame, error)
 
 // Model implements agentgo.ChatModel by forwarding to a proxy stream
@@ -79,7 +81,8 @@ func (p *Model) Generate(ctx context.Context, messages []agentgo.Message, tools 
 
 // GenerateStream converts proxy frames into standard StreamEvents.
 func (p *Model) GenerateStream(ctx context.Context, messages []agentgo.Message, tools []agentgo.ToolSpec, opts ...agentgo.CallOption) (<-chan agentgo.StreamEvent, error) {
-	frames, err := p.streamFn(ctx, &agentgo.LLMRequest{Messages: messages, Tools: tools})
+	cfg := agentgo.ResolveCallConfig(opts)
+	frames, err := p.streamFn(ctx, &agentgo.LLMRequest{Messages: messages, Tools: tools, Config: &cfg})
 	if err != nil {
 		return nil, err
 	}

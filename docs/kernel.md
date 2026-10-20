@@ -141,6 +141,41 @@ Session 只负责局部记录，不知道 Unit、Review、质量判定或全局�
 Session 不自动将 State 或流式 partial snapshot 写入文件；宿主可显式保存 checkpoint，日志和恢复状态
 保持不同语义。文件协议、接入和失败边界见 [Session](session.md)。
 
+## 模型调用、截断与思考设置
+
+Model 返回执行事实：`StopReasonLength` 表示输出达到上限，部分正文、思考内容和 Usage 仍应保留。
+它不是网络错误，也不自动说明业务任务完成。流式与非流式适配必须保持相同的停止原因和用量语义。
+
+当截断响应没有已完成的工具调用时，Loop 丢弃不完整工具参数，并在同一 Run 内尝试有界续写。
+`LoopConfig.MaxLengthRecoveries` 为 nil 时维持 3 次默认恢复；显式 0（或负数）禁用恢复。
+stateful Agent 使用 `WithMaxLengthRecoveries(n)`。每次恢复继续受原 context deadline 和 MaxTurns
+限制，计入 `RunProgress.LengthRecoveries`，装载运行状态后也不重新获得恢复额度。
+恢复禁用或额度耗尽后，以 `EndReasonLength` 结束，同时报告运行级 `ErrOutputTruncated`，便于只消费
+错误的调用方识别未完成；单次 Model 调用仍保留正常的部分响应。该终态不进入普通 stop / StopGuard 路径；已经完成的
+工具调用仍按工具执行契约处理。宿主应识别新增终态，不能只把 error/aborted 以外的结果当作成功。
+
+`model_response` 的 `LengthRecovery` 记录已安排的恢复次数、配置上限和本次是否将恢复；
+`RunSummary.LengthRecoveries` 提供终态汇总。终态决定在 `RunProgress.EndReason` 中保留，恢复最终 turn checkpoint 不会把 length 改成 stop。
+恢复次数是已安排的 continuation 数；若 MaxTurns
+或取消阻止下一次调用，已安排不代表已执行。宿主按 Execution 事件统计实际模型调用。
+
+思考控制沿用 `WithThinking`、`ThinkingLevel` 和 `ModelMiddleware`。`auto`/空值不指定覆盖；
+`off`（兼容 `none`）明确关闭。显式调用设置覆盖 model-level Extra 中对应的 raw thinking 默认字段，
+不修改共享 Model；模型特有的 effort 映射和支持性校验由 Provider/litellm 负责。预算可以单独开启
+思考，但不能与 off 同时设置；不支持的参数必须返回错误，不得被静默忽略。
+
+`model_exec_start.ModelCall` 是 middleware 前的调用意图；`model_exec_end.ModelCall` 是实际交给
+ChatModel 的选项，middleware 未 dispatch 时为 nil。LiteLLM 适配器在响应 metadata 的
+`model_request_settings` 中记录补齐输出上限后的 provider-neutral 请求值。两者都只记录
+thinking level、thinking budget 与 max tokens，不记录凭据或原始 ProviderOptions。Session JSONL 同时保留调用设置和截断恢复决定。这些字段不是
+供应商内部实际生效档位的回显，不能用它们推断服务端的别名映射。
+
+`proxy.StreamFn` 的 `LLMRequest.Config` 携带解析后的调用选项，远端实现需要读取并应用；旧实现忽略
+该字段不会自动获得 effort 控制。APIKey 只供本地 callback 使用，JSON 不传输该字段。
+
+`Usage.Reasoning` 记录 Provider 报告的推理 token，是 Output 的分项，不再次累加到 TotalTokens
+或费用。0 可能代表供应商未报告，不能仅凭该值判断没有思考；适配层不按文本长度估算。
+
 ## ContextItem 与 ContextDemand
 
 `ContextItem` 描述模型调用前的实际 Context 中存在哪些可识别信息；`ContextDemand` 描述轨迹暴露了

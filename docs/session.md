@@ -80,7 +80,7 @@ schemas remain read-only. `message_end` and `model_exec_end` have distinct meani
 a model result is not proof that the corresponding conversation message committed.
 
 Token deltas, partial message snapshots, tool progress/preview updates, and the
-redundant `model_response` notification are not written. Failed stream partial
+redundant `model_response` notification are not written. A `model_response` with a length recovery decision records that decision without duplicating the message content. Failed stream partial
 content is recorded only once at the failed model boundary. A run does not
 implicitly store a full snapshot at any lifecycle event.
 

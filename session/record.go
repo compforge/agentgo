@@ -48,23 +48,25 @@ type Record struct {
 // a full AgentState on every event. Message is a codec-encoded AgentMessage;
 // ModelRequest is the final model-facing representation, not recovery state.
 type EventData struct {
-	TurnIndex        int                      `json:"turn_index,omitempty"`
-	Message          json.RawMessage          `json:"message,omitempty"`
-	PartialMessage   json.RawMessage          `json:"partial_message,omitempty"`
-	ModelRequest     *agentgo.LLMRequest      `json:"model_request,omitempty"`
-	ToolID           string                   `json:"tool_id,omitempty"`
-	Tool             string                   `json:"tool,omitempty"`
-	ToolLabel        string                   `json:"tool_label,omitempty"`
-	Args             json.RawMessage          `json:"args,omitempty"`
-	ToolResult       *ToolResultData          `json:"tool_result,omitempty"`
-	Disposition      agentgo.ToolDisposition  `json:"disposition,omitempty"`
-	IsError          bool                     `json:"is_error,omitempty"`
-	Error            string                   `json:"error,omitempty"`
-	Summary          *agentgo.RunSummary      `json:"summary,omitempty"`
-	ContextOperation agentgo.ContextOperation `json:"context_operation,omitempty"`
-	ContextItems     []agentgo.ContextItem    `json:"context_items,omitempty"`
-	Compaction       *agentgo.CompactionInfo  `json:"compaction,omitempty"`
-	Retry            *RetryData               `json:"retry,omitempty"`
+	ModelCall        *agentgo.ModelCallSettings  `json:"model_call,omitempty"`
+	LengthRecovery   *agentgo.LengthRecoveryInfo `json:"length_recovery,omitempty"`
+	TurnIndex        int                         `json:"turn_index,omitempty"`
+	Message          json.RawMessage             `json:"message,omitempty"`
+	PartialMessage   json.RawMessage             `json:"partial_message,omitempty"`
+	ModelRequest     *agentgo.LLMRequest         `json:"model_request,omitempty"`
+	ToolID           string                      `json:"tool_id,omitempty"`
+	Tool             string                      `json:"tool,omitempty"`
+	ToolLabel        string                      `json:"tool_label,omitempty"`
+	Args             json.RawMessage             `json:"args,omitempty"`
+	ToolResult       *ToolResultData             `json:"tool_result,omitempty"`
+	Disposition      agentgo.ToolDisposition     `json:"disposition,omitempty"`
+	IsError          bool                        `json:"is_error,omitempty"`
+	Error            string                      `json:"error,omitempty"`
+	Summary          *agentgo.RunSummary         `json:"summary,omitempty"`
+	ContextOperation agentgo.ContextOperation    `json:"context_operation,omitempty"`
+	ContextItems     []agentgo.ContextItem       `json:"context_items,omitempty"`
+	Compaction       *agentgo.CompactionInfo     `json:"compaction,omitempty"`
+	Retry            *RetryData                  `json:"retry,omitempty"`
 }
 
 // RetryData is a retry observation; Error on EventData carries its cause.
